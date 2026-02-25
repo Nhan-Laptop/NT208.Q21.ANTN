@@ -1,0 +1,91 @@
+{
+  "timestamp": "2026-02-14T02:52:04.967226+00:00",
+  "base_url": "http://127.0.0.1:8000",
+  "total_checks": 7,
+  "passed": 7,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "health_info_disclosure",
+      "passed": true,
+      "severity_if_failed": "MEDIUM",
+      "details": "/health should not expose sensitive implementation details.",
+      "evidence": {
+        "status": 200,
+        "keys": [
+          "app",
+          "status",
+          "transport_encryption_enabled"
+        ],
+        "leaks": []
+      }
+    },
+    {
+      "name": "idor_session_read",
+      "passed": true,
+      "severity_if_failed": "HIGH",
+      "details": "User B must not read User A session.",
+      "evidence": {
+        "status": 403,
+        "body": "{\"detail\":\"You cannot access this session\"}"
+      }
+    },
+    {
+      "name": "idor_message_list",
+      "passed": true,
+      "severity_if_failed": "HIGH",
+      "details": "User B must not list User A messages.",
+      "evidence": {
+        "status": 403,
+        "body": "{\"detail\":\"You cannot access this session\"}"
+      }
+    },
+    {
+      "name": "privilege_escalation_admin_overview",
+      "passed": true,
+      "severity_if_failed": "HIGH",
+      "details": "Researcher must not access admin-only API.",
+      "evidence": {
+        "status": 403,
+        "body": "{\"detail\":\"Missing permissions: admin:manage\"}"
+      }
+    },
+    {
+      "name": "encrypted_payload_tampering",
+      "passed": true,
+      "severity_if_failed": "MEDIUM",
+      "details": "Tampered encrypted payload should fail gracefully with 400.",
+      "evidence": {
+        "status": 400,
+        "body": "{\"detail\":\"Invalid encrypted payload: Invalid encrypted payload length\"}"
+      }
+    },
+    {
+      "name": "upload_pdf_magic_bytes",
+      "passed": true,
+      "severity_if_failed": "MEDIUM",
+      "details": "Fake PDF should be rejected via signature check.",
+      "evidence": {
+        "status": 415,
+        "body": "{\"detail\":\"Invalid PDF file signature\"}"
+      }
+    },
+    {
+      "name": "login_rate_limit",
+      "passed": true,
+      "severity_if_failed": "HIGH",
+      "details": "Login endpoint should return 429 under brute-force attempts.",
+      "evidence": {
+        "statuses": [
+          401,
+          401,
+          401,
+          401,
+          401,
+          401,
+          429
+        ]
+      }
+    }
+  ]
+}
