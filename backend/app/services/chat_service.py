@@ -20,6 +20,7 @@ from app.services.tools.retraction_scan import retraction_scanner
 
 class ChatService:
     FILE_HINT_PATTERN = re.compile(r"\b(pdf|file|document|paper|manuscript|tom tat|summary|summarize)\b", re.IGNORECASE)
+    _FILE_CONTEXT_MAX_CHARS = 15_000
 
     def create_session(self, db: Session, current_user: User, title: str, mode: SessionMode) -> ChatSession:
         session_obj = ChatSession(user_id=current_user.id, title=title, mode=mode)
@@ -114,9 +115,12 @@ class ChatService:
         summary = "Retraction scan completed on detected DOI(s)."
         return MessageType.RETRACTION_REPORT, summary, {"type": "retraction_report", "data": retraction}
 
-    def _build_file_context(self, db: Session, session_id: str, user_message: str) -> str:
-        if not self.FILE_HINT_PATTERN.search(user_message):
-            return user_message
+    def _get_file_context(self, db: Session, session_id: str) -> str | None:
+        """Retrieve extracted text from the most recent file in this session.
+
+        Returns an XML-tagged block or *None* if no usable file exists.
+        The text is already decrypted by SQLAlchemy's EncryptedText type.
+        """
         latest_file = (
             db.query(FileAttachment)
             .filter(FileAttachment.session_id == session_id)
@@ -124,13 +128,20 @@ class ChatService:
             .first()
         )
         if not latest_file or not latest_file.extracted_text:
-            return user_message
-        snippet = latest_file.extracted_text[:4000]
+            return None
+        snippet = latest_file.extracted_text[: self._FILE_CONTEXT_MAX_CHARS]
         return (
-            f"{user_message}\n\n"
-            f"[Attached file context: {latest_file.file_name}]\n"
-            f"{snippet}"
+            f'<Attached_Document name="{latest_file.file_name}">\n'
+            f'{snippet}\n'
+            f'</Attached_Document>'
         )
+
+    def _build_file_context(self, db: Session, session_id: str, user_message: str) -> str:
+        """Append file context to the user message when a file is attached."""
+        file_block = self._get_file_context(db, session_id)
+        if not file_block:
+            return user_message
+        return f"{user_message}\n\n{file_block}"
 
     def complete_chat(
         self,
@@ -166,7 +177,9 @@ class ChatService:
             SessionMode.RETRACTION,
             SessionMode.AI_DETECTION,
         }:
-            msg_type, content, structured = self._run_mode_tool(mode, user_message)
+            # Inject file context so explicit tool modes also see the PDF text
+            tool_input = self._build_file_context(db, session_id, user_message)
+            msg_type, content, structured = self._run_mode_tool(mode, tool_input)
             assistant_msg = self._save_message(
                 db=db,
                 session_id=session_id,
