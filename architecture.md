@@ -753,7 +753,7 @@ graph TB
     subgraph EXTERNAL["🌐 External APIs"]
         CrossrefAPI["Crossref API<br/>api.crossref.org/works"]
         OpenAlexAPI["OpenAlex API<br/>api.openalex.org/works"]
-        PubPeerAPI["PubPeer API<br/>pubpeer.com/v1<br/>(⚠️ dead since 2026-02)"]
+        PubPeerAPI["PubPeer API v3<br/>pubpeer.com/v3/publications<br/>(POST + devkey)"]
     end
 
     %% Main flow
@@ -769,7 +769,7 @@ graph TB
     CR_Hab -->|"SDK call"| CrossrefAPI
     CR_HTTP -->|"HTTP GET"| CrossrefAPI
     OA_Query -->|"HTTP GET"| OpenAlexAPI
-    PP_Query -->|"HTTP GET"| PubPeerAPI
+    PP_Query -->|"HTTP POST"| PubPeerAPI
 
     SRC1 --> RISK_CALC
     SRC2 --> RISK_CALC
@@ -1213,8 +1213,8 @@ sequenceDiagram
         RS->>OA: GET api.openalex.org/works/doi:{doi}
         OA-->>RS: OpenAlex data<br/>(is_retracted flag)
 
-        RS->>PP: GET pubpeer.com/search?q={doi}
-        PP-->>RS: ⚠️ 404 (API dead)<br/>→ graceful fallback
+        RS->>PP: POST pubpeer.com/v3/publications<br/>{dois: [doi], devkey}
+        PP-->>RS: {feedbacks: [{total_comments, url}]}
 
         RS->>RS: Compute risk_level<br/>(CRITICAL/HIGH/MEDIUM/LOW/NONE)
         RS->>RS: Collect risk_factors[]
@@ -1457,7 +1457,7 @@ graph TB
         GEMINI["Google Gemini API<br/>gemini-2.0-flash"]
         OA["OpenAlex API<br/>api.openalex.org"]
         CR["Crossref API<br/>api.crossref.org"]
-        PP["PubPeer API<br/>pubpeer.com ❌ DEAD"]
+        PP["PubPeer API v3<br/>pubpeer.com/v3"]
     end
 
     subgraph ML_Models["🧠 ML Models (HuggingFace)"]
@@ -1483,7 +1483,7 @@ graph TB
     CC -->|habanero SDK| CR
     RS -->|habanero SDK| CR
     RS -->|httpx| OA
-    RS -->|httpx ❌| PP
+    RS -->|httpx POST| PP
     JF -->|sentence-transformers| SP
     JF -->|huggingface-hub| HF
     AW -->|transformers| RB
@@ -1497,7 +1497,7 @@ graph TB
     classDef warn fill:#f39c12,stroke:#e67e22,color:#fff
     classDef ml fill:#9b59b6,stroke:#8e44ad,color:#fff
 
-    class PP dead
+    class PP ok
     class GEMINI,OA,CR ok
     class SP,RB,HF ml
     class DB,S3,CRYPTO,JWT_LIB,BCRYPT,PDF ok
@@ -1667,42 +1667,83 @@ if title.upper().startswith("RETRACTED:"):
 | Thuộc tính | Chi tiết |
 |-----------|---------|
 | **Vai trò** | Kiểm tra post-publication peer review comments |
-| **HTTP Client** | `httpx` gọi `https://pubpeer.com/v1/publications` |
-| **Auth** | Không yêu cầu |
+| **HTTP Client** | `httpx` — **POST** request |
+| **Endpoint** | `POST https://pubpeer.com/v3/publications?devkey=PubMedChrome` |
+| **Auth** | Public devkey `PubMedChrome` (query parameter) |
 | **Sử dụng bởi** | `retraction_scan.py` |
-| **Trạng thái** | ❌ **DEAD** — Tất cả endpoints trả 404 HTML thay vì JSON (từ 02/2025) |
+| **Trạng thái** | ✅ **Hoạt động** (latency ~0.4s) |
 
-**Phương thức tích hợp (trước khi API chết):**
+> **Lưu ý lịch sử**: API v1 (`GET /v1/publications`) đã ngừng hoạt động (trả 404 HTML). Hệ thống hiện dùng API v3 với `POST` method và JSON body.
+
+**Phương thức tích hợp:**
 
 ```python
 import httpx
-r = httpx.get(
-    "https://pubpeer.com/v1/publications",
-    params={"doi": doi},
-    timeout=12.0,
+
+PUBPEER_API_URL = "https://pubpeer.com/v3/publications"
+PUBPEER_DEVKEY = "PubMedChrome"
+
+resp = client.post(
+    f"{PUBPEER_API_URL}?devkey={PUBPEER_DEVKEY}",
+    json={"dois": [doi]},
+    headers={
+        "User-Agent": "AIRA-ResearchAssistant/1.0 (mailto:24521236@gm.uit.edu.vn)",
+        "Content-Type": "application/json",
+    },
 )
-# Kiểm tra response trước khi parse
-if r.status_code == 200 and "json" in r.headers.get("content-type", ""):
-    data = r.json()
-    comments = data.get("total", 0)
+data = resp.json()
+feedbacks = data.get("feedbacks", [])
+
+if not feedbacks:
+    # Paper sạch — không có bình luận trên PubPeer
+    result = {"has_comments": False, "total_comments": 0, "url": None}
+else:
+    fb = feedbacks[0]
+    result = {
+        "has_comments": True,
+        "total_comments": fb.get("total_comments", 0),
+        "url": fb.get("url"),  # Direct link đến bài trên PubPeer
+    }
 ```
 
-**Cơ chế Fallback (hiện tại):**
-- **API trả 404 hoặc HTML** → `pubpeer_comments = 0`
-- Luôn cung cấp manual search URL: `https://pubpeer.com/search?q={doi}`
-- Log debug warning (không crash, không raise exception)
-- Kiểm tra cả HTTP status code VÀ `Content-Type` header trước khi parse JSON
+**Cấu trúc Response từ PubPeer v3:**
+```json
+{
+  "feedbacks": [
+    {
+      "id": 12345,
+      "total_comments": 4,
+      "url": "https://pubpeer.com/publications/ABC123...",
+      "title": "Paper Title...",
+      "comments": [...]
+    }
+  ]
+}
+```
+
+- `feedbacks` rỗng (`[]`) → paper không có bình luận → an toàn
+- `feedbacks[0].total_comments > 0` → paper có bình luận → cần xem xét
+- `feedbacks[0].url` → link trực tiếp đến trang thảo luận trên PubPeer
+
+**Cơ chế Fallback:**
+- HTTP error (4xx, 5xx) → `pubpeer_comments = 0`, log warning
+- Network error → `pubpeer_comments = 0`, log warning  
+- Luôn cung cấp manual search URL backup: `https://pubpeer.com/search?q={doi}`
+- Bắt riêng `httpx.RequestError` và `httpx.HTTPStatusError` — KHÔNG crash app
 
 ```mermaid
 flowchart LR
-    A[scan_doi] --> B[httpx GET<br/>pubpeer.com/v1/publications]
-    B --> C{status == 200<br/>AND json in<br/>Content-Type?}
-    C -->|Yes| D[Parse JSON<br/>count comments]
-    C -->|No ❌| E[pubpeer_comments = 0<br/>url = manual search link]
-    B -->|Exception| E
+    A[scan_doi] --> B["httpx POST<br/>pubpeer.com/v3/publications<br/>?devkey=PubMedChrome<br/>{dois: [doi]}"]
+    B --> C{status == 200?}
+    C -->|Yes| D{feedbacks<br/>not empty?}
+    D -->|Yes| E["✅ has_comments=True<br/>total_comments=N<br/>url=direct_link"]
+    D -->|No| F["✅ has_comments=False<br/>total_comments=0<br/>(paper sạch)"]
+    C -->|No| G["⚠️ pubpeer_comments=0<br/>url=manual search link"]
+    B -->|Exception| G
 
-    style E fill:#f39c12,stroke:#e67e22
-    style D fill:#2ecc71,stroke:#27ae60
+    style E fill:#e74c3c,stroke:#c0392b,color:#fff
+    style F fill:#2ecc71,stroke:#27ae60
+    style G fill:#f39c12,stroke:#e67e22
 ```
 
 ### 7.6 HuggingFace Hub & Model Downloads
@@ -1996,7 +2037,7 @@ decoded = jwt.decode(token, settings.jwt_secret_key, algorithms=["HS256"])
 | 1 | Google Gemini | LLM API | `google-genai` | Default messages | ✅ OK | ~1.2s |
 | 2 | OpenAlex | REST API | `pyalex` + `httpx` | SDK → HTTP → UNVERIFIED | ✅ OK | ~2.0s |
 | 3 | Crossref | REST API | `habanero` + `httpx` | SDK → HTTP → UNVERIFIED | ✅ OK | ~1.0s |
-| 4 | PubPeer | REST API | `httpx` | Graceful degrade → 0 comments | ❌ DEAD | N/A |
+| 4 | PubPeer | REST API | `httpx` (POST) | Graceful degrade → 0 comments | ✅ OK | ~0.4s |
 | 5 | HuggingFace Hub | Model Repo | `huggingface-hub` | Online → Local cache | ✅ OK | — |
 | 6 | SPECTER2 | ML Model | `sentence-transformers` | specter2 → scibert → MiniLM → TF-IDF | ✅ OK | ~0.2s |
 | 7 | RoBERTa | ML Model | `transformers` + `torch` | ML → Rule-based only | ✅ OK | ~0.1s |
@@ -2065,7 +2106,7 @@ sequenceDiagram
     participant RS as RetractionScanner
     participant CR as Crossref
     participant OA as OpenAlex
-    participant PP as PubPeer ❌
+    participant PP as PubPeer v3
 
     U->>API: POST /tools/retraction-scan<br/>{text: "10.1016/S0140-6736(97)11096-0"}
     API->>RS: scan(text)
@@ -2082,10 +2123,10 @@ sequenceDiagram
         RS->>OA: httpx.get(openalex/works/{doi})
         OA-->>RS: {is_retracted: true/false}
 
-        Note over RS: Source 3: PubPeer (DEAD)
-        RS->>PP: httpx.get(pubpeer/v1/publications)
-        PP-->>RS: 404 HTML ❌
-        RS->>RS: pubpeer_comments = 0<br/>pubpeer_url = manual search link
+        Note over RS: Source 3: PubPeer
+        RS->>PP: POST /v3/publications?devkey=PubMedChrome<br/>{dois: [doi]}
+        PP-->>RS: {feedbacks: [{total_comments, url}]}
+        RS->>RS: Extract comment count + direct URL
 
         RS->>RS: Tính risk_level<br/>(CRITICAL/HIGH/MEDIUM/LOW/NONE)
     end

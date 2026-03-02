@@ -34,7 +34,8 @@ DOI_REGEX = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", flags=re.IGNORECASE)
 PMID_REGEX = re.compile(r"PMID[:\s]*(\d+)", flags=re.IGNORECASE)
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
-PUBPEER_API_URL = "https://pubpeer.com/v1/publications"
+PUBPEER_API_URL = "https://pubpeer.com/v3/publications"
+PUBPEER_DEVKEY = "PubMedChrome"
 CROSSREF_WORKS_URL = "https://api.crossref.org/works"
 
 
@@ -188,30 +189,48 @@ class RetractionScanner:
     # -- PubPeer -----------------------------------------------------------
 
     def _check_pubpeer(self, doi: str) -> PubPeerInfo:
-        """Query PubPeer for community feedback on a DOI.
+        """Query PubPeer v3 API for community feedback on a DOI.
 
-        NOTE: As of 2026-02, PubPeer's v1 JSON API returns 404 HTML.
-        We still attempt the call but gracefully degrade — the search
-        URL is always populated so users can check PubPeer manually.
+        Uses POST ``/v3/publications?devkey=PubMedChrome`` with a JSON
+        body ``{"dois": ["<doi>"]}``.
+
+        The response contains a ``feedbacks`` array. Each item has
+        ``total_comments`` and ``url`` fields.
         """
         info = PubPeerInfo()
-        info.url = f"https://pubpeer.com/search?q={doi}"  # always useful
+        info.url = f"https://pubpeer.com/search?q={doi}"  # always useful as fallback link
         try:
-            resp = self._get_client().get(PUBPEER_API_URL, params={"doi": doi})
+            resp = self._get_client().post(
+                f"{PUBPEER_API_URL}?devkey={PUBPEER_DEVKEY}",
+                json={"dois": [doi]},
+                headers={
+                    "User-Agent": "AIRA-ResearchAssistant/1.0 (mailto:24521236@gm.uit.edu.vn)",
+                    "Content-Type": "application/json",
+                },
+            )
             if resp.status_code != 200:
-                logger.debug("PubPeer returned %s for %s (API may be deprecated)", resp.status_code, doi)
+                logger.debug("PubPeer returned %s for %s", resp.status_code, doi)
                 return info
             ct = resp.headers.get("content-type", "")
             if "json" not in ct:
                 logger.debug("PubPeer returned non-JSON (%s) for %s", ct, doi)
                 return info
-            pubs = resp.json().get("publications", [])
-            if pubs:
-                pub = pubs[0]
+
+            data = resp.json()
+            feedbacks = data.get("feedbacks", [])
+            if not feedbacks:
+                # Paper is clean — no PubPeer comments
+                return info
+
+            fb = feedbacks[0]
+            total = fb.get("total_comments", 0)
+            if total > 0:
                 info.has_comments = True
-                info.comment_count = pub.get("total_comments", 0)
-                info.url = pub.get("url") or info.url
-                comments = pub.get("comments", [])
+                info.comment_count = total
+                info.url = fb.get("url") or info.url
+
+                # Extract concern keywords from comment snippets if present
+                comments = fb.get("comments", [])
                 if comments:
                     dates = [c.get("created_at") for c in comments if c.get("created_at")]
                     if dates:
@@ -224,6 +243,10 @@ class RetractionScanner:
                         for kw in concern_kws:
                             if kw in txt and kw not in info.concerns:
                                 info.concerns.append(kw)
+        except httpx.RequestError as e:
+            logger.debug("PubPeer connection error for %s: %s", doi, e)
+        except httpx.HTTPStatusError as e:
+            logger.debug("PubPeer HTTP error for %s: %s", doi, e.response.status_code)
         except Exception as e:
             logger.debug("PubPeer failed for %s: %s", doi, e)
         return info
