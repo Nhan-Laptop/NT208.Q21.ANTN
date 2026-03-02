@@ -13,7 +13,7 @@
 4. [Sơ đồ Component — Luồng Upload & Xử lý file PDF](#4-sơ-đồ-component--luồng-upload--xử-lý-file-pdf)
 5. [Sơ đồ UML](#5-sơ-đồ-uml)
    - 5.1 [Use-case Diagram](#51-use-case-diagram)
-   - 5.2 [Sequence Diagrams](#52-sequence-diagrams)
+   - 5.2 [Component Flow Diagrams](#52-component-flow-diagrams)
 6. [Thiết kế Cơ sở dữ liệu (ERD)](#6-thiết-kế-cơ-sở-dữ-liệu-erd)
 
 ---
@@ -987,252 +987,755 @@ graph TB
     UC12 -->|"include"| UC13
 ```
 
-### 5.2 Sequence Diagrams
+### 5.2 Component Flow Diagrams
 
-#### 5.2.1 Sequence Diagram — Đăng nhập & Xác thực
-
-```mermaid
-sequenceDiagram
-    actor User as 👤 User
-    participant FE as Frontend<br/>(Next.js)
-    participant API as FastAPI<br/>(/auth)
-    participant MW as Middleware<br/>(Rate Limit + CORS)
-    participant SEC as Security<br/>(JWT + bcrypt)
-    participant DB as Database<br/>(SQLAlchemy)
-
-    User->>FE: Nhập email + password
-    FE->>API: POST /api/v1/auth/login<br/>(OAuth2 form)
-    API->>MW: Check rate limit
-    MW-->>API: OK (within limit)
-    API->>SEC: authenticate_user(email, password)
-    SEC->>DB: SELECT * FROM users WHERE email=?
-    DB-->>SEC: User record
-    SEC->>SEC: bcrypt.checkpw(password, hashed)
-    SEC-->>API: User object (authenticated)
-    API->>SEC: create_access_token(sub=user_id,<br/>iat, jti, exp=1h)
-    SEC-->>API: JWT token (HS256)
-    API->>DB: log_audit_event("auth.login")
-    API-->>FE: 200 OK {access_token, token_type}
-    FE->>FE: localStorage.setItem("token", jwt)
-    FE-->>User: Redirect → /chat
-```
-
-#### 5.2.2 Sequence Diagram — Chat AI (General QA Mode)
+#### 5.2.1 Component Diagram — Đăng nhập & Xác thực
 
 ```mermaid
-sequenceDiagram
-    actor User as 👤 User
-    participant FE as Frontend<br/>(ChatView)
-    participant Store as ChatStore<br/>(useReducer)
-    participant API as FastAPI<br/>(/chat)
-    participant Auth as Auth<br/>(JWT + RBAC)
-    participant ChatSvc as ChatService
-    participant LLM as GeminiService
-    participant Gemini as Google Gemini<br/>API
-    participant DB as Database
-
-    User->>FE: Gõ tin nhắn + Enter
-    FE->>Store: dispatch(SEND_MESSAGE)
-    Store->>API: POST /api/v1/chat/completions<br/>{session_id, user_message, mode}
-    API->>Auth: verify JWT + check Permission.MESSAGE_WRITE
-    Auth-->>API: ✅ Authorized
-    API->>ChatSvc: complete_chat(db, user, session_id, message, mode)
-
-    ChatSvc->>DB: INSERT chat_messages (role=USER)
-    ChatSvc->>DB: SELECT recent messages (context)
-
-    alt mode == GENERAL_QA
-        ChatSvc->>LLM: generate_response(history, user_text)
-        LLM->>LLM: _build_contents(history → Content objects)
-        LLM->>Gemini: generate_content(contents, tools=[4 functions], AFC=disabled)
-        alt Gemini returns function_call
-            Gemini-->>LLM: function_call: scan_retraction_and_pubpeer(text)
-            LLM->>LLM: Execute tool locally → get real data
-            LLM->>Gemini: function_response(name, result)
-            Gemini-->>LLM: Final text (grounded in tool data)
-        else Gemini returns text directly
-            Gemini-->>LLM: Generated text (no tool needed)
-        end
-        LLM-->>ChatSvc: FunctionCallingResponse(text, message_type, tool_results)
+graph TB
+    subgraph USER["👤 User"]
+        InputForm["Nhập email + password"]
     end
 
-    ChatSvc->>DB: INSERT chat_messages (role=ASSISTANT)
-    ChatSvc->>DB: UPDATE chat_sessions.updated_at
-    ChatSvc-->>API: (user_msg, assistant_msg)
-    API-->>FE: 200 OK {session_id, user_message, assistant_message}
-    FE->>Store: dispatch(RECEIVE_MESSAGE)
-    Store-->>FE: Re-render với message mới
-    FE-->>User: Hiển thị AI response
+    subgraph FRONTEND["⚛️ Frontend (Next.js)"]
+        LoginPage["LoginPage<br/>app/login/page.tsx"]
+        AuthCtx["AuthContext<br/>lib/auth.tsx"]
+        Storage["localStorage<br/>setItem('token', jwt)"]
+        Redirect["Redirect → /chat"]
+
+        LoginPage --> AuthCtx
+        AuthCtx --> Storage
+        Storage --> Redirect
+    end
+
+    subgraph API_GATEWAY["🔒 API Gateway (FastAPI)"]
+        AuthEP["POST /api/v1/auth/login<br/>endpoints/auth.py<br/>(OAuth2 form)"]
+
+        subgraph MW["Middleware Chain"]
+            RateLimit["Rate Limiter<br/>(X-Forwarded-For trust fix)"]
+            CORS["CORS Headers"]
+        end
+
+        RateLimit --> CORS
+    end
+
+    subgraph SECURITY["🔐 Security Layer"]
+        Authenticate["authenticate_user()<br/>core/security.py"]
+        BcryptCheck["bcrypt.checkpw()<br/>password → hashed"]
+        CreateToken["create_access_token()<br/>sub=user_id, iat, jti<br/>exp=1h, HS256"]
+
+        Authenticate --> BcryptCheck
+        BcryptCheck --> CreateToken
+    end
+
+    subgraph DATABASE["🗄️ Database"]
+        UsersTable["users table<br/>SELECT WHERE email=?"]
+        AuditLog["audit_log<br/>event='auth.login'"]
+    end
+
+    %% Flow
+    InputForm --> LoginPage
+    LoginPage -->|"POST form data"| AuthEP
+    AuthEP --> MW
+    CORS --> Authenticate
+    Authenticate -->|"query user"| UsersTable
+    UsersTable -->|"User record"| BcryptCheck
+    CreateToken -->|"JWT token"| AuthEP
+    AuthEP -->|"log event"| AuditLog
+    AuthEP -->|"200 OK {access_token}"| AuthCtx
+
+    %% Styles
+    classDef user fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef frontend fill:#60a5fa,color:#fff,stroke:#2563eb
+    classDef api fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef security fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef db fill:#06b6d4,color:#fff,stroke:#0e7490
+
+    class InputForm user
+    class LoginPage,AuthCtx,Storage,Redirect frontend
+    class AuthEP,RateLimit,CORS api
+    class Authenticate,BcryptCheck,CreateToken security
+    class UsersTable,AuditLog db
 ```
 
-#### 5.2.3 Sequence Diagram — Citation Verification Tool
+#### 5.2.2 Component Diagram — Chat AI (General QA Mode)
 
 ```mermaid
-sequenceDiagram
-    actor User as 👤 User
-    participant FE as Frontend
-    participant API as FastAPI<br/>(/tools)
-    participant CitChk as CitationChecker
-    participant PyAlex as PyAlex<br/>(OpenAlex SDK)
-    participant Hab as Habanero<br/>(Crossref SDK)
-    participant HTTPX as httpx<br/>(Direct API)
-    participant DB as Database
+graph TB
+    subgraph FRONTEND["⚛️ Frontend (Next.js)"]
+        direction TB
+        ChatView["ChatView<br/>components/chat-view.tsx"]
+        Store["ChatStore (useReducer)<br/>dispatch SEND_MESSAGE"]
+        APIClient["API Client<br/>lib/api.ts"]
+        Render["Re-render<br/>dispatch RECEIVE_MESSAGE"]
+        ToolCards["Tool Result Cards<br/>components/tool-results.tsx"]
 
-    User->>FE: Nhập text chứa citations
-    FE->>API: POST /api/v1/tools/verify-citation<br/>{session_id, text}
+        ChatView --> Store
+        Store --> APIClient
+        Render --> ChatView
+        Render --> ToolCards
+    end
 
-    API->>CitChk: verify(text)
-    CitChk->>CitChk: _extract_citations(text)<br/>6 regex patterns (DOI, author-year,<br/>numbered, parenthetical, etc.)
+    subgraph API_GATEWAY["🔒 API Gateway (FastAPI)"]
+        direction TB
+        ChatEP["POST /api/v1/chat/completions<br/>endpoints/chat.py"]
 
-    loop For each citation found
-        alt Has DOI
-            CitChk->>Hab: cr.works(ids=doi)
-            Hab-->>CitChk: Crossref metadata
-            CitChk->>CitChk: status = DOI_VERIFIED, confidence = 1.0
-        else Author-year pattern
-            CitChk->>PyAlex: Works().search_filter(author=X, year=Y)
-            PyAlex-->>CitChk: OpenAlex results
-            alt Exact match found
-                CitChk->>CitChk: status = VALID, confidence = 0.9
-            else Fuzzy match
-                CitChk->>CitChk: status = PARTIAL_MATCH, confidence = 0.5
-            else No match
-                CitChk->>HTTPX: GET openalex.org/works?search=...
-                HTTPX-->>CitChk: Fallback results
-                CitChk->>CitChk: status = UNVERIFIED / HALLUCINATED
+        subgraph AUTH["Middleware Chain"]
+            JWT["JWT Verification"]
+            RBAC["Permission.MESSAGE_WRITE"]
+        end
+
+        JWT --> RBAC
+    end
+
+    subgraph CHAT_SVC["💬 ChatService"]
+        direction TB
+        SaveUser["_save_message(role=USER)"]
+        LoadCtx["Load history<br/>(context_window=8)"]
+        FileCtx["_build_file_context()<br/>→ <Attached_Document> XML"]
+        ModeRoute{"Mode Router"}
+        SaveAssist["_save_message(role=ASSISTANT)<br/>+ UPDATE session.updated_at"]
+
+        SaveUser --> LoadCtx
+        LoadCtx --> FileCtx
+        FileCtx --> ModeRoute
+    end
+
+    subgraph GENERAL_QA["🤖 General QA Path — Gemini FC"]
+        direction TB
+        GeminiSvc["GeminiService<br/>generate_response()"]
+        BuildContent["_build_contents()<br/>History → Content objects"]
+        GenContent["generate_content()<br/>tools=[4 functions], AFC=disabled"]
+        FCCheck{"function_call?"}
+        ExecTool["Execute tool locally<br/>→ send function_response"]
+        FinalText["Final text response<br/>FunctionCallingResponse"]
+
+        GeminiSvc --> BuildContent
+        BuildContent --> GenContent
+        GenContent --> FCCheck
+        FCCheck -->|"Yes"| ExecTool
+        ExecTool -->|"iterate"| GenContent
+        FCCheck -->|"No"| FinalText
+    end
+
+    subgraph DIRECT_TOOLS["🔧 Direct Mode Tools"]
+        direction TB
+        RunTool["_run_mode_tool()"]
+        T_Cite["CitationChecker.verify()"]
+        T_Retract["RetractionScanner.scan()"]
+        T_Journal["JournalFinder.recommend()"]
+        T_AI["AIWritingDetector.analyze()"]
+
+        RunTool --> T_Cite
+        RunTool --> T_Retract
+        RunTool --> T_Journal
+        RunTool --> T_AI
+    end
+
+    subgraph GEMINI_API["☁️ Google Gemini"]
+        GModel["gemini-flash-latest<br/>Vietnamese system prompt"]
+    end
+
+    subgraph DATABASE["🗄️ Database"]
+        MsgTable["chat_messages<br/>(USER + ASSISTANT)"]
+        SessionTable["chat_sessions<br/>updated_at"]
+    end
+
+    %% Flow
+    APIClient -->|"POST {session_id, user_message, mode}"| ChatEP
+    ChatEP --> AUTH
+    RBAC --> SaveUser
+    SaveUser -->|"INSERT"| MsgTable
+
+    ModeRoute -->|"GENERAL_QA"| GeminiSvc
+    ModeRoute -->|"VERIFICATION / RETRACTION<br/>JOURNAL_MATCH / AI_DETECTION"| RunTool
+
+    GenContent --> GModel
+    GModel --> FCCheck
+
+    FinalText --> SaveAssist
+    RunTool --> SaveAssist
+    SaveAssist -->|"INSERT"| MsgTable
+    SaveAssist -->|"UPDATE"| SessionTable
+
+    SaveAssist -->|"ChatCompletionResponse"| ChatEP
+    ChatEP -->|"200 OK"| APIClient
+    APIClient --> Render
+
+    %% Styles
+    classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef api fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef chatsvc fill:#14b8a6,color:#fff,stroke:#0d9488
+    classDef llm fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef tools fill:#10b981,color:#fff,stroke:#047857
+    classDef cloud fill:#f97316,color:#fff,stroke:#c2410c
+    classDef db fill:#06b6d4,color:#fff,stroke:#0e7490
+
+    class ChatView,Store,APIClient,Render,ToolCards frontend
+    class ChatEP,JWT,RBAC api
+    class SaveUser,LoadCtx,FileCtx,ModeRoute,SaveAssist chatsvc
+    class GeminiSvc,BuildContent,GenContent,FCCheck,ExecTool,FinalText llm
+    class RunTool,T_Cite,T_Retract,T_Journal,T_AI tools
+    class GModel cloud
+    class MsgTable,SessionTable db
+```
+
+#### 5.2.3 Component Diagram — Citation Verification Tool
+
+```mermaid
+graph TB
+    subgraph FRONTEND["⚛️ Frontend (Next.js)"]
+        direction TB
+        ChatView["ChatView<br/>components/chat-view.tsx"]
+        APIClient["API Client<br/>lib/api.ts"]
+        CitCard["CitationReportCard<br/>components/tool-results.tsx"]
+
+        ChatView -->|"user nhập text chứa citations"| APIClient
+        ChatView -->|"render kết quả"| CitCard
+    end
+
+    subgraph API_GATEWAY["🔒 API Gateway (FastAPI)"]
+        direction TB
+        ToolEP["POST /api/v1/tools/verify-citation<br/>endpoints/tools.py"]
+        ChatEP["POST /api/v1/chat/{session_id}<br/>endpoints/chat.py"]
+
+        subgraph AUTH["Middleware Chain"]
+            RateLimit["Rate Limiter"]
+            JWT["JWT Verification<br/>(HS256, 1h TTL)"]
+            RBAC["RBAC Check<br/>Permission.TOOL_EXECUTE"]
+        end
+
+        RateLimit --> JWT --> RBAC
+    end
+
+    subgraph LLM_LAYER["🤖 LLM Service — Gemini Function Calling"]
+        direction TB
+        ChatSvc["ChatService<br/>complete_chat()"]
+        FileCtx["_build_file_context()<br/>→ <Attached_Document> XML"]
+        GeminiSvc["GeminiService<br/>_generate_with_fc()"]
+        GeminiAPI["Google Gemini API<br/>gemini-flash-latest"]
+        FCLoop["FC Loop (max 5 iter)<br/>AFC disabled — manual control"]
+        FnCall["function_call:<br/>verify_citation(text)"]
+
+        ChatSvc --> FileCtx
+        FileCtx --> GeminiSvc
+        GeminiSvc --> FCLoop
+        FCLoop --> GeminiAPI
+        GeminiAPI -->|"function_call"| FnCall
+        FnCall -->|"execute locally"| FCLoop
+    end
+
+    subgraph CHECKER["🔎 CitationChecker<br/>services/tools/citation_checker.py"]
+        direction TB
+        Extract["extract_citations(text)<br/>6 regex patterns:<br/>• DOI (10.xxxx/...) • APA inline<br/>• APA reference • Numbered [1]<br/>• IEEE • Vancouver"]
+
+        subgraph VERIFY_DOI["DOI Verification Path"]
+            HabSDK["Habanero SDK<br/>cr.works(ids=doi)"]
+            HabHTTP["httpx fallback<br/>GET /works/{doi}"]
+            DOI_OK["status = DOI_VERIFIED<br/>confidence = 1.0"]
+            HabSDK -->|"fail"| HabHTTP
+            HabSDK -->|"success"| DOI_OK
+            HabHTTP -->|"success"| DOI_OK
+        end
+
+        subgraph VERIFY_AUTHOR["Author-Year Verification Path"]
+            PyAlexSDK["PyAlex SDK<br/>Works().search_filter(author, year)"]
+            PyAlexHTTP["httpx fallback<br/>GET openalex.org/works?search="]
+            FuzzyMatch["Fuzzy Author Match<br/>difflib.SequenceMatcher"]
+            StatusDecide["VALID (≥0.85) | PARTIAL_MATCH (≥0.5)<br/>| UNVERIFIED | HALLUCINATED"]
+            PyAlexSDK -->|"fail"| PyAlexHTTP
+            PyAlexSDK -->|"results"| FuzzyMatch
+            PyAlexHTTP -->|"results"| FuzzyMatch
+            FuzzyMatch --> StatusDecide
+        end
+
+        Stats["get_statistics()<br/>verified / hallucinated / unverified / total"]
+    end
+
+    subgraph PERSIST["📊 Endpoint Processing"]
+        Convert["Convert CitationCheckResult<br/>→ CitationItem (Pydantic)"]
+        FnResp["FunctionCallingResponse<br/>message_type=CITATION_REPORT"]
+        Persist["ChatService.persist<br/>→ INSERT chat_messages"]
+    end
+
+    subgraph DATABASE["🗄️ Database"]
+        MsgTable["chat_messages<br/>(role=ASSISTANT,<br/>type=CITATION_REPORT,<br/>tool_results🔒)"]
+    end
+
+    subgraph EXTERNAL["🌐 External APIs"]
+        CrossrefAPI["Crossref API<br/>api.crossref.org/works"]
+        OpenAlexAPI["OpenAlex API<br/>api.openalex.org/works"]
+    end
+
+    %% Flow connections
+    APIClient -->|"POST {session_id, text}"| ToolEP
+    APIClient -->|"POST {user_message}"| ChatEP
+    ToolEP --> AUTH
+    ChatEP --> AUTH
+    RBAC -->|"direct mode"| Extract
+    RBAC -->|"general_qa mode"| ChatSvc
+
+    GeminiAPI -->|"function_call"| Extract
+    FCLoop -->|"function_response"| GeminiAPI
+
+    Extract -->|"DOI found"| VERIFY_DOI
+    Extract -->|"author-year found"| VERIFY_AUTHOR
+
+    HabSDK -->|"SDK call"| CrossrefAPI
+    HabHTTP -->|"HTTP GET"| CrossrefAPI
+    PyAlexSDK -->|"SDK call"| OpenAlexAPI
+    PyAlexHTTP -->|"HTTP GET"| OpenAlexAPI
+
+    VERIFY_DOI --> Stats
+    VERIFY_AUTHOR --> Stats
+    Stats --> Convert
+    Convert --> FnResp
+    FnResp --> Persist
+    Persist -->|"INSERT"| MsgTable
+
+    FnResp -->|"JSON response"| APIClient
+    APIClient --> CitCard
+
+    %% Styles
+    classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef api fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef llm fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef checker fill:#10b981,color:#fff,stroke:#047857
+    classDef source fill:#6366f1,color:#fff,stroke:#4338ca
+    classDef db fill:#06b6d4,color:#fff,stroke:#0e7490
+    classDef external fill:#8b5cf6,color:#fff,stroke:#6d28d9
+    classDef persist fill:#14b8a6,color:#fff,stroke:#0d9488
+
+    class ChatView,APIClient,CitCard frontend
+    class ToolEP,ChatEP,RateLimit,JWT,RBAC api
+    class ChatSvc,FileCtx,GeminiSvc,GeminiAPI,FCLoop,FnCall llm
+    class Extract,HabSDK,HabHTTP,DOI_OK,PyAlexSDK,PyAlexHTTP,FuzzyMatch,StatusDecide,Stats checker
+    class MsgTable db
+    class CrossrefAPI,OpenAlexAPI external
+    class Convert,FnResp,Persist persist
+```
+
+#### 5.2.4 Component Diagram — Journal Recommendation Tool
+
+```mermaid
+graph TB
+    subgraph FRONTEND["⚛️ Frontend (Next.js)"]
+        direction TB
+        ChatView["ChatView<br/>components/chat-view.tsx"]
+        APIClient["API Client<br/>lib/api.ts"]
+        JournalCard["JournalListCard<br/>components/tool-results.tsx"]
+
+        ChatView -->|"user nhập abstract"| APIClient
+        ChatView -->|"render kết quả"| JournalCard
+    end
+
+    subgraph API_GATEWAY["🔒 API Gateway (FastAPI)"]
+        direction TB
+        ToolEP["POST /api/v1/tools/journal-match<br/>endpoints/tools.py"]
+        ChatEP["POST /api/v1/chat/{session_id}<br/>endpoints/chat.py"]
+
+        subgraph AUTH["Middleware Chain"]
+            RateLimit["Rate Limiter"]
+            JWT["JWT Verification<br/>(HS256, 1h TTL)"]
+            RBAC["RBAC Check<br/>Permission.TOOL_EXECUTE"]
+        end
+
+        RateLimit --> JWT --> RBAC
+    end
+
+    subgraph LLM_LAYER["🤖 LLM Service — Gemini Function Calling"]
+        direction TB
+        ChatSvc["ChatService<br/>complete_chat()"]
+        FileCtx["_build_file_context()<br/>→ extract Abstract from PDF"]
+        GeminiSvc["GeminiService<br/>_generate_with_fc()"]
+        GeminiAPI["Google Gemini API<br/>gemini-flash-latest"]
+        FCLoop["FC Loop (max 5 iter)<br/>AFC disabled — manual control"]
+        FnCall["function_call:<br/>match_journal(abstract, title)"]
+
+        ChatSvc --> FileCtx
+        FileCtx --> GeminiSvc
+        GeminiSvc --> FCLoop
+        FCLoop --> GeminiAPI
+        GeminiAPI -->|"function_call"| FnCall
+        FnCall -->|"execute locally"| FCLoop
+    end
+
+    subgraph FINDER["📚 JournalFinder<br/>services/tools/journal_finder.py"]
+        direction TB
+        DetectDomain["_detect_domains(text)<br/>keyword matching → domain list<br/>(CS, Medicine, Physics, etc.)"]
+
+        subgraph ML_PATH["ML Path (use_ml=True)"]
+            direction TB
+            subgraph MODEL_CHAIN["Model Candidate Chain (fallback)"]
+                SPECTER2["SPECTER2<br/>allenai/specter2_base<br/>768-dim embeddings"]
+                SciBERT["SciBERT fallback<br/>sentence-transformers"]
+                MiniLM["MiniLM-L6-v2 fallback<br/>all-MiniLM-L6-v2"]
+
+                SPECTER2 -->|"load fail"| SciBERT
+                SciBERT -->|"load fail"| MiniLM
+            end
+            Encode["model.encode([abstract])<br/>→ embedding vector"]
+            CosineSim["cosine_similarity()<br/>abstract_emb vs journal_embs<br/>(precomputed 35 journals)"]
+
+            MODEL_CHAIN --> Encode
+            Encode --> CosineSim
+        end
+
+        subgraph TFIDF_PATH["TF-IDF Fallback (use_ml=False)"]
+            TFIDF["_vectorize(text)<br/>→ Counter word frequencies"]
+            TFCosine["_cosine(v1, v2)<br/>dot product / magnitudes"]
+
+            TFIDF --> TFCosine
+        end
+
+        DomainBonus["_domain_bonus()<br/>+0.05 if domain matches"]
+        Sort["Sort by score + domain_bonus<br/>→ top_k results"]
+    end
+
+    subgraph PERSIST["📊 Endpoint Processing"]
+        Convert["Convert dict list<br/>→ JournalItem (Pydantic)"]
+        FnResp["FunctionCallingResponse<br/>message_type=JOURNAL_LIST"]
+        PersistDB["ChatService.persist<br/>→ INSERT chat_messages"]
+    end
+
+    subgraph DATABASE["🗄️ Database"]
+        MsgTable["chat_messages<br/>(role=ASSISTANT,<br/>type=JOURNAL_LIST,<br/>tool_results🔒)"]
+    end
+
+    subgraph HF_MODELS["🤗 HuggingFace Hub"]
+        HFHub["Model Downloads<br/>local_files_only fallback<br/>HF_TOKEN auth"]
+    end
+
+    %% Flow connections
+    APIClient -->|"POST {session_id, abstract}"| ToolEP
+    APIClient -->|"POST {user_message}"| ChatEP
+    ToolEP --> AUTH
+    ChatEP --> AUTH
+    RBAC -->|"direct mode"| DetectDomain
+    RBAC -->|"general_qa mode"| ChatSvc
+
+    GeminiAPI -->|"function_call"| DetectDomain
+    FCLoop -->|"function_response"| GeminiAPI
+
+    DetectDomain -->|"ML available"| ML_PATH
+    DetectDomain -->|"ML unavailable"| TFIDF_PATH
+    MODEL_CHAIN -->|"download / cache"| HFHub
+
+    CosineSim --> DomainBonus
+    TFCosine --> DomainBonus
+    DomainBonus --> Sort
+    Sort --> Convert
+    Convert --> FnResp
+    FnResp --> PersistDB
+    PersistDB -->|"INSERT"| MsgTable
+
+    FnResp -->|"JSON response"| APIClient
+    APIClient --> JournalCard
+
+    %% Styles
+    classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef api fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef llm fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef finder fill:#10b981,color:#fff,stroke:#047857
+    classDef ml fill:#6366f1,color:#fff,stroke:#4338ca
+    classDef tfidf fill:#f97316,color:#fff,stroke:#c2410c
+    classDef db fill:#06b6d4,color:#fff,stroke:#0e7490
+    classDef hf fill:#fbbf24,color:#000,stroke:#d97706
+    classDef persist fill:#14b8a6,color:#fff,stroke:#0d9488
+
+    class ChatView,APIClient,JournalCard frontend
+    class ToolEP,ChatEP,RateLimit,JWT,RBAC api
+    class ChatSvc,FileCtx,GeminiSvc,GeminiAPI,FCLoop,FnCall llm
+    class DetectDomain,DomainBonus,Sort finder
+    class SPECTER2,SciBERT,MiniLM,Encode,CosineSim ml
+    class TFIDF,TFCosine tfidf
+    class MsgTable db
+    class HFHub hf
+    class Convert,FnResp,PersistDB persist
+```
+
+#### 5.2.5 Component Diagram — File Upload & PDF Summary
+
+```mermaid
+graph TB
+    subgraph FRONTEND["⚛️ Frontend (Next.js)"]
+        direction TB
+        DragDrop["useFileUpload hook<br/>Drag-and-drop + progress"]
+        UploadPreview["File preview<br/>in chat input area"]
+        SummaryView["PDF Summary display"]
+
+        DragDrop --> UploadPreview
+    end
+
+    subgraph API_GATEWAY["🔒 API Gateway (FastAPI)"]
+        direction TB
+        UploadEP["POST /api/v1/upload<br/>(multipart/form-data)"]
+        SummarizeEP["POST /api/v1/tools/summarize-pdf<br/>{session_id, file_id}"]
+
+        subgraph AUTH["Middleware Chain"]
+            JWT["JWT Verification"]
+            RBAC_UP["Permission.FILE_UPLOAD"]
+            RBAC_TOOL["Permission.TOOL_EXECUTE"]
+        end
+    end
+
+    subgraph UPLOAD_FLOW["📤 Upload Flow — FileService"]
+        direction TB
+        Validate["Validate file<br/>type + size"]
+
+        subgraph ENCRYPT["🔐 Encryption"]
+            CryptoMgr["CryptoManager<br/>AES-256-GCM"]
+            GenIV["Random IV + auth tag"]
+            CryptoMgr --> GenIV
+        end
+
+        subgraph STORAGE["💾 StorageService"]
+            LocalStore["Local filesystem"]
+            S3Store["AWS S3 (optional)"]
+        end
+
+        ExtractText["PyMuPDF (fitz)<br/>extract_text()"]
+        SaveMeta["INSERT file_attachments<br/>(encrypted storage_key,<br/>extracted_text🔒)"]
+
+        Validate --> ENCRYPT
+        ENCRYPT --> STORAGE
+        Validate --> ExtractText
+        ExtractText --> SaveMeta
+    end
+
+    subgraph SUMMARIZE_FLOW["📝 Summarize Flow"]
+        direction TB
+        LoadFile["SELECT file_attachments<br/>WHERE id=file_id"]
+        DecryptText["EncryptedText type<br/>→ auto-decrypt on read"]
+        LLMSummarize["GeminiService<br/>summarize_text()"]
+        PersistSummary["persist_tool_interaction()<br/>type=PDF_SUMMARY"]
+
+        LoadFile --> DecryptText
+        DecryptText --> LLMSummarize
+        LLMSummarize --> PersistSummary
+    end
+
+    subgraph GEMINI_API["☁️ Google Gemini"]
+        GModel["generate_content()<br/>(simple mode, no tools)"]
+    end
+
+    subgraph DATABASE["🗄️ Database"]
+        FileTable["file_attachments<br/>(storage_key🔒, extracted_text🔒)"]
+        MsgTable["chat_messages<br/>(type=FILE_UPLOAD / PDF_SUMMARY)"]
+    end
+
+    %% Upload flow
+    DragDrop -->|"POST multipart"| UploadEP
+    UploadEP --> JWT --> RBAC_UP
+    RBAC_UP --> Validate
+    STORAGE -->|"store encrypted bytes"| FileTable
+    SaveMeta -->|"INSERT"| FileTable
+    SaveMeta -->|"{file_id, file_name, size}"| UploadEP
+    UploadEP --> UploadPreview
+
+    %% Summarize flow
+    UploadPreview -->|"click Tóm tắt PDF"| SummarizeEP
+    SummarizeEP --> JWT
+    JWT --> RBAC_TOOL
+    RBAC_TOOL --> LoadFile
+    LoadFile -->|"query"| FileTable
+    LLMSummarize --> GModel
+    GModel --> LLMSummarize
+    PersistSummary -->|"INSERT"| MsgTable
+    PersistSummary -->|"{summary}"| SummarizeEP
+    SummarizeEP --> SummaryView
+
+    %% Styles
+    classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef api fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef upload fill:#10b981,color:#fff,stroke:#047857
+    classDef crypto fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef storage fill:#6366f1,color:#fff,stroke:#4338ca
+    classDef summarize fill:#14b8a6,color:#fff,stroke:#0d9488
+    classDef cloud fill:#f97316,color:#fff,stroke:#c2410c
+    classDef db fill:#06b6d4,color:#fff,stroke:#0e7490
+
+    class DragDrop,UploadPreview,SummaryView frontend
+    class UploadEP,SummarizeEP,JWT,RBAC_UP,RBAC_TOOL api
+    class Validate,ExtractText,SaveMeta upload
+    class CryptoMgr,GenIV crypto
+    class LocalStore,S3Store storage
+    class LoadFile,DecryptText,LLMSummarize,PersistSummary summarize
+    class GModel cloud
+    class FileTable,MsgTable db
+```
+
+#### 5.2.6 Component Diagram — Retraction Scan
+
+```mermaid
+graph TB
+    subgraph FRONTEND["⚛️ Frontend (Next.js)"]
+        direction TB
+        ChatView["ChatView<br/>components/chat-view.tsx"]
+        APIClient["API Client<br/>lib/api.ts"]
+        RetractCard["RetractionReportCard<br/>components/tool-results.tsx"]
+
+        ChatView -->|"user nhập text chứa DOIs"| APIClient
+        ChatView -->|"render kết quả"| RetractCard
+    end
+
+    subgraph API_GATEWAY["🔒 API Gateway (FastAPI)"]
+        direction TB
+        ToolEP["POST /api/v1/tools/retraction-scan<br/>endpoints/tools.py"]
+        ChatEP["POST /api/v1/chat/{session_id}<br/>endpoints/chat.py"]
+
+        subgraph AUTH["Middleware Chain"]
+            RateLimit["Rate Limiter"]
+            JWT["JWT Verification<br/>(HS256, 1h TTL)"]
+            RBAC["RBAC Check<br/>Permission.TOOL_EXECUTE"]
+        end
+
+        RateLimit --> JWT --> RBAC
+    end
+
+    subgraph LLM_LAYER["🤖 LLM Service — Gemini Function Calling"]
+        direction TB
+        ChatSvc["ChatService<br/>complete_chat()"]
+        FileCtx["_build_file_context()<br/>→ extract DOI from PDF"]
+        GeminiSvc["GeminiService<br/>_generate_with_fc()"]
+        GeminiAPI["Google Gemini API<br/>gemini-flash-latest"]
+        FCLoop["FC Loop (max 5 iter)<br/>AFC disabled — manual control"]
+        FnCall["function_call:<br/>scan_retraction_and_pubpeer(text)"]
+
+        ChatSvc --> FileCtx
+        FileCtx --> GeminiSvc
+        GeminiSvc --> FCLoop
+        FCLoop --> GeminiAPI
+        GeminiAPI -->|"function_call"| FnCall
+        FnCall -->|"execute locally"| FCLoop
+    end
+
+    subgraph SCANNER["🔍 RetractionScanner<br/>services/tools/retraction_scan.py"]
+        direction TB
+        ExtractDOI["extract_doi(text)<br/>regex: 10.XXXX/... (case-insensitive)<br/>→ sorted unique DOI list"]
+        ScanBatch["scan(text) — batch<br/>Loop all DOIs → scan_doi()"]
+
+        subgraph SCAN_DOI["scan_doi(doi) — per DOI"]
+            direction TB
+
+            subgraph SRC1["Source 1: Crossref"]
+                CR_Hab["Habanero SDK<br/>cr.works(ids=doi)"]
+                CR_HTTP["httpx fallback<br/>GET /works/{doi}"]
+                CR_Parse["Parse metadata:<br/>• title, journal, year<br/>• update-to → retraction/concern<br/>• Title prefix: RETRACTED:"]
+                CR_Hab -->|"fail"| CR_HTTP
+                CR_Hab -->|"success"| CR_Parse
+                CR_HTTP --> CR_Parse
+            end
+
+            subgraph SRC2["Source 2: OpenAlex"]
+                OA_Query["httpx GET<br/>api.openalex.org/works<br/>?filter=doi:{doi}"]
+                OA_Parse["Parse response:<br/>• is_retracted (bool)<br/>• display_name, year<br/>• openalex_id"]
+                OA_Query --> OA_Parse
+            end
+
+            subgraph SRC3["Source 3: PubPeer v3"]
+                PP_Query["httpx POST<br/>pubpeer.com/v3/publications<br/>{dois: [doi], devkey}"]
+                PP_Check{"HTTP 200<br/>+ JSON?"}
+                PP_Parse["Parse feedbacks:<br/>• total_comments<br/>• url → direct link"]
+                PP_Dead["⚠️ Graceful fallback<br/>pubpeer_comments = 0"]
+                PP_URL["Always set:<br/>pubpeer.com/search?q={doi}"]
+                PP_Query --> PP_Check
+                PP_Check -->|"Yes"| PP_Parse
+                PP_Check -->|"No"| PP_Dead
+                PP_Parse --> PP_URL
+                PP_Dead --> PP_URL
+            end
+
+            subgraph RISK_CALC["Risk Calculation"]
+                CalcRisk["_calculate_risk()"]
+                R_CRIT["🔴 CRITICAL<br/>has_retraction OR<br/>is_retracted_openalex"]
+                R_HIGH["🟠 HIGH<br/>Expression of Concern OR<br/>PubPeer ≥ 5"]
+                R_MED["🟡 MEDIUM<br/>has_correction OR<br/>PubPeer ≥ 2"]
+                R_LOW["🟢 LOW<br/>PubPeer ≥ 1"]
+                R_NONE["⚪ NONE"]
+                CalcRisk --> R_CRIT
+                CalcRisk --> R_HIGH
+                CalcRisk --> R_MED
+                CalcRisk --> R_LOW
+                CalcRisk --> R_NONE
             end
         end
+
+        Summary["get_summary()<br/>retracted / concerns / corrected<br/>critical_risk / pubpeer_discussions"]
     end
 
-    CitChk-->>API: List[CitationCheckResult]
-    API->>API: Convert to CitationItem schemas
-    API->>DB: persist_tool_interaction(CITATION_REPORT)
-    API-->>FE: {type: "citation_report", data: [...], text: summary}
-    FE->>FE: Render CitationReportCard<br/>(verified badges, DOI links, confidence)
-    FE-->>User: Hiển thị kết quả
-```
-
-#### 5.2.4 Sequence Diagram — Journal Recommendation Tool
-
-```mermaid
-sequenceDiagram
-    actor User as 👤 User
-    participant FE as Frontend
-    participant API as FastAPI<br/>(/tools)
-    participant JF as JournalFinder
-    participant Model as SPECTER2<br/>(sentence-transformers)
-    participant DB as Database
-
-    User->>FE: Nhập abstract bài báo
-    FE->>API: POST /api/v1/tools/journal-match<br/>{session_id, abstract}
-
-    API->>JF: recommend(abstract, top_k=5)
-    JF->>JF: _detect_domains(text)<br/>(keyword matching → domain categories)
-
-    alt ML Model loaded (use_ml=True)
-        JF->>Model: encode([abstract])
-        Model-->>JF: 768-dim embedding vector
-        JF->>JF: cosine_similarity(abstract_emb,<br/>journal_embeddings)
-    else Fallback (use_ml=False)
-        JF->>JF: TF-IDF vectorize + cosine_similarity
+    subgraph PERSIST["📊 Endpoint Processing"]
+        Convert["Convert RetractionResult<br/>→ RetractionItem (Pydantic)"]
+        FnResp["FunctionCallingResponse<br/>message_type=RETRACTION_REPORT"]
+        PersistDB["ChatService.persist<br/>→ INSERT chat_messages"]
     end
 
-    JF->>JF: Sort by score, filter by domain
-    JF-->>API: List[dict] (journal, score, reason, url, ...)
-
-    API->>API: Convert to JournalItem schemas
-    API->>DB: persist_tool_interaction(JOURNAL_LIST)
-    API-->>FE: {type: "journal_list", data: [...], text: summary}
-    FE->>FE: Render JournalListCard<br/>(IF, h-index, review time, Open Access)
-    FE-->>User: Hiển thị danh sách tạp chí
-```
-
-#### 5.2.5 Sequence Diagram — File Upload & PDF Summary
-
-```mermaid
-sequenceDiagram
-    actor User as 👤 User
-    participant FE as Frontend<br/>(useFileUpload)
-    participant API as FastAPI<br/>(/upload + /tools)
-    participant FileSvc as FileService
-    participant Storage as StorageService
-    participant Crypto as CryptoManager
-    participant LLM as GeminiService
-    participant Gemini as Google Gemini
-    participant DB as Database
-
-    User->>FE: Kéo thả file PDF
-    FE->>FE: Validate (size, type)
-    FE->>API: POST /api/v1/upload<br/>(multipart/form-data)
-
-    API->>FileSvc: save_upload(db, user, session_id, file)
-    FileSvc->>FileSvc: Validate file type + size
-    FileSvc->>Crypto: encrypt(file_bytes)
-    Crypto->>Crypto: AES-256-GCM<br/>(random IV + auth tag)
-    Crypto-->>FileSvc: encrypted_bytes
-    FileSvc->>Storage: store(key, encrypted_bytes)
-    Storage-->>FileSvc: storage_url
-    FileSvc->>FileSvc: extract_text(PyMuPDF)
-    FileSvc->>DB: INSERT file_attachments<br/>(encrypted storage_key, extracted_text)
-    FileSvc-->>API: FileAttachment record
-    API-->>FE: {file_id, file_name, size_bytes}
-    FE-->>User: Hiển thị file đã upload
-
-    User->>FE: Click "Tóm tắt PDF"
-    FE->>API: POST /api/v1/tools/summarize-pdf<br/>{session_id, file_id}
-    API->>DB: SELECT file_attachments WHERE id=file_id
-    DB-->>API: attachment (with extracted_text)
-    API->>LLM: summarize_text(extracted_text)
-    LLM->>Gemini: generate_content(summary_prompt)
-    Gemini-->>LLM: Summary text
-    LLM-->>API: summary
-    API->>DB: persist_tool_interaction(PDF_SUMMARY)
-    API-->>FE: {file_id, file_name, text: summary}
-    FE-->>User: Hiển thị bản tóm tắt PDF
-```
-
-#### 5.2.6 Sequence Diagram — Retraction Scan
-
-```mermaid
-sequenceDiagram
-    actor User as 👤 User
-    participant FE as Frontend
-    participant API as FastAPI<br/>(/tools)
-    participant RS as RetractionScanner
-    participant CR as Crossref API
-    participant OA as OpenAlex API
-    participant PP as PubPeer API
-    participant DB as Database
-
-    User->>FE: Nhập text chứa DOIs
-    FE->>API: POST /api/v1/tools/retraction-scan<br/>{session_id, text}
-    API->>RS: scan(text)
-    RS->>RS: _extract_dois(text)<br/>(regex: 10.XXXX/...)
-
-    loop For each DOI
-        RS->>RS: scan_doi(doi)
-
-        RS->>CR: GET api.crossref.org/works/{doi}
-        CR-->>RS: Crossref metadata<br/>(title, journal, year, update-to)
-        RS->>RS: Check title.startswith("RETRACTED:")
-        RS->>RS: Check update-to field for retractions
-
-        RS->>OA: GET api.openalex.org/works/doi:{doi}
-        OA-->>RS: OpenAlex data<br/>(is_retracted flag)
-
-        RS->>PP: POST pubpeer.com/v3/publications<br/>{dois: [doi], devkey}
-        PP-->>RS: {feedbacks: [{total_comments, url}]}
-
-        RS->>RS: Compute risk_level<br/>(CRITICAL/HIGH/MEDIUM/LOW/NONE)
-        RS->>RS: Collect risk_factors[]
+    subgraph DATABASE["🗄️ Database"]
+        MsgTable["chat_messages<br/>(role=ASSISTANT,<br/>type=RETRACTION_REPORT,<br/>tool_results🔒)"]
     end
 
-    RS-->>API: List[RetractionResult]
-    API->>API: Convert to RetractionItem schemas
-    API->>DB: persist_tool_interaction(RETRACTION_REPORT)
-    API-->>FE: {type: "retraction_report", data: [...], text: summary}
-    FE->>FE: Render RetractionReportCard<br/>(risk colors, retraction details)
-    FE-->>User: Hiển thị báo cáo retraction
+    subgraph EXTERNAL["🌐 External APIs"]
+        CrossrefAPI["Crossref API<br/>api.crossref.org/works"]
+        OpenAlexAPI["OpenAlex API<br/>api.openalex.org/works"]
+        PubPeerAPI["PubPeer API v3<br/>pubpeer.com/v3/publications<br/>(POST + devkey)"]
+    end
+
+    %% Flow connections
+    APIClient -->|"POST {session_id, text}"| ToolEP
+    APIClient -->|"POST {user_message}"| ChatEP
+    ToolEP --> AUTH
+    ChatEP --> AUTH
+    RBAC -->|"direct mode"| ExtractDOI
+    RBAC -->|"general_qa mode"| ChatSvc
+
+    GeminiAPI -->|"function_call"| ExtractDOI
+    FCLoop -->|"function_response"| GeminiAPI
+
+    ExtractDOI --> ScanBatch
+    ScanBatch -->|"for each DOI"| SRC1
+    ScanBatch -->|"for each DOI"| SRC2
+    ScanBatch -->|"for each DOI"| SRC3
+
+    CR_Hab -->|"SDK call"| CrossrefAPI
+    CR_HTTP -->|"HTTP GET"| CrossrefAPI
+    OA_Query -->|"HTTP GET"| OpenAlexAPI
+    PP_Query -->|"HTTP POST"| PubPeerAPI
+
+    SRC1 --> RISK_CALC
+    SRC2 --> RISK_CALC
+    SRC3 --> RISK_CALC
+
+    ScanBatch --> Summary
+    Summary --> Convert
+    Convert --> FnResp
+    FnResp --> PersistDB
+    PersistDB -->|"INSERT"| MsgTable
+
+    FnResp -->|"JSON response"| APIClient
+    APIClient --> RetractCard
+
+    %% Styles
+    classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef api fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef llm fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef scanner fill:#10b981,color:#fff,stroke:#047857
+    classDef source fill:#6366f1,color:#fff,stroke:#4338ca
+    classDef risk fill:#ef4444,color:#fff,stroke:#b91c1c
+    classDef db fill:#06b6d4,color:#fff,stroke:#0e7490
+    classDef external fill:#8b5cf6,color:#fff,stroke:#6d28d9
+    classDef persist fill:#14b8a6,color:#fff,stroke:#0d9488
+    classDef dead fill:#6b7280,color:#fff,stroke:#4b5563
+
+    class ChatView,APIClient,RetractCard frontend
+    class ToolEP,ChatEP,RateLimit,JWT,RBAC api
+    class ChatSvc,FileCtx,GeminiSvc,GeminiAPI,FCLoop,FnCall llm
+    class ExtractDOI,ScanBatch,Summary scanner
+    class CR_Hab,CR_HTTP,CR_Parse,OA_Query,OA_Parse,PP_Query,PP_Parse,PP_URL source
+    class CalcRisk,R_CRIT,R_HIGH,R_MED,R_LOW,R_NONE risk
+    class MsgTable db
+    class CrossrefAPI,OpenAlexAPI external
+    class PubPeerAPI,PP_Dead,PP_Check dead
+    class Convert,FnResp,PersistDB persist
 ```
 
 ---
@@ -1539,38 +2042,87 @@ Gemini **không bao giờ tự bịa dữ liệu học thuật**. Thay vào đó
 #### 7.2.2 Function Calling Flow
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant CS as ChatService
-    participant GS as GeminiService
-    participant G as Gemini API
-    participant T as Tool Functions
-    participant DB as Database
-
-    U->>CS: "Check DOI 10.1007/... for retraction"
-    CS->>CS: Load history (chat_context_window=8)
-    CS->>GS: generate_response(history, user_text)
-    GS->>GS: _build_contents(history, user_text)
-    GS->>G: generate_content(contents, tools=[4 functions], AFC=disabled)
-
-    Note over G: Gemini phân tích prompt<br/>→ quyết định gọi tool
-
-    G-->>GS: Response with function_call:<br/>scan_retraction_and_pubpeer(text="10.1007/...")
-
-    rect rgb(255, 243, 224)
-        Note over GS,T: FC Loop — Iteration 1
-        GS->>T: scan_retraction_and_pubpeer(text)
-        T->>T: retraction_scanner.scan(text)
-        Note over T: Crossref → OpenAlex → PubPeer v3 POST
-        T-->>GS: {results: [...], summary: {...}}
-        GS->>G: function_response(name, response=result)
+graph TB
+    subgraph USER_INPUT["📥 User Input"]
+        Prompt["User Prompt<br/>+ Chat History"]
+        FileCtx["File Context Injection<br/><Attached_Document> XML"]
     end
 
-    G-->>GS: Final text response (grounded in tool data)
-    GS-->>CS: FunctionCallingResponse(text, tool_calls, message_type, tool_results)
+    subgraph CHAT_SVC["💬 ChatService"]
+        BuildCtx["_build_file_context()<br/>Append extracted PDF text"]
+        LoadHist["Load history<br/>(chat_context_window=8)"]
+        SaveMsg["_save_message()<br/>role=ASSISTANT"]
+    end
 
-    CS->>DB: Save assistant message<br/>message_type=RETRACTION_REPORT<br/>tool_results={type, data}
-    CS-->>U: Rich tool result card + synthesised text
+    subgraph GEMINI_SVC["🤖 GeminiService — _generate_with_fc()"]
+        BuildContent["_build_contents()<br/>History → Content objects"]
+        GenContent["generate_content()<br/>tools=[4 functions]<br/>AFC=disabled"]
+        CheckResp{"Response has<br/>function_call?"}
+        ExecTool["_execute_function_call()<br/>Run Python tool locally"]
+        AppendFR["Append function_response<br/>to contents"]
+        IterCheck{"Iteration < 5?"}
+        ExtractText["Extract final text<br/>+ determine MessageType"]
+        BudgetExc["⚠️ Budget exceeded<br/>(max 5 iterations)"]
+    end
+
+    subgraph TOOLS["🔧 Tool Functions (Local Execution)"]
+        T1["scan_retraction_and_pubpeer()"]
+        T2["verify_citation()"]
+        T3["match_journal()"]
+        T4["detect_ai_writing()"]
+    end
+
+    subgraph GEMINI_API["☁️ Google Gemini API"]
+        GModel["gemini-flash-latest<br/>System Prompt: Vietnamese<br/>anti-hallucination"]
+    end
+
+    subgraph RESPONSE["📤 Response"]
+        FCResp["FunctionCallingResponse<br/>text + message_type<br/>+ tool_results"]
+    end
+
+    %% Flow
+    Prompt --> BuildCtx
+    FileCtx --> BuildCtx
+    BuildCtx --> LoadHist
+    LoadHist --> BuildContent
+    BuildContent --> GenContent
+    GenContent --> GModel
+    GModel --> CheckResp
+
+    CheckResp -->|"Yes"| ExecTool
+    ExecTool --> T1
+    ExecTool --> T2
+    ExecTool --> T3
+    ExecTool --> T4
+    T1 --> AppendFR
+    T2 --> AppendFR
+    T3 --> AppendFR
+    T4 --> AppendFR
+    AppendFR --> IterCheck
+    IterCheck -->|"Yes"| GenContent
+    IterCheck -->|"No"| BudgetExc
+
+    CheckResp -->|"No (final text)"| ExtractText
+    ExtractText --> FCResp
+    BudgetExc --> FCResp
+    FCResp --> SaveMsg
+
+    %% Styles
+    classDef input fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef chatsvc fill:#14b8a6,color:#fff,stroke:#0d9488
+    classDef gemini fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef tools fill:#10b981,color:#fff,stroke:#047857
+    classDef cloud fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef response fill:#06b6d4,color:#fff,stroke:#0e7490
+    classDef error fill:#ef4444,color:#fff,stroke:#b91c1c
+
+    class Prompt,FileCtx input
+    class BuildCtx,LoadHist,SaveMsg chatsvc
+    class BuildContent,GenContent,CheckResp,ExecTool,AppendFR,IterCheck,ExtractText gemini
+    class T1,T2,T3,T4 tools
+    class GModel cloud
+    class FCResp response
+    class BudgetExc error
 ```
 
 #### 7.2.3 Phương thức tích hợp
@@ -2169,92 +2721,178 @@ decoded = jwt.decode(token, settings.jwt_secret_key, algorithms=["HS256"])
 | 12 | python-jose | Library | `jose` | — (required) | ✅ OK | <0.01s |
 | 13 | PyCryptodome | Library | `Crypto` | — (required) | ✅ OK | <0.01s |
 
-### 7.14 Sequence Diagram — Luồng xác minh Citation với fallback chain
+### 7.14 Component Diagram — Citation Verification với Fallback Chain
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant API as FastAPI Endpoint
-    participant CC as CitationChecker
-    participant CR as Crossref (habanero)
-    participant CR2 as Crossref (httpx)
-    participant OA as OpenAlex (pyalex)
-    participant OA2 as OpenAlex (httpx)
-
-    U->>API: POST /tools/verify-citation<br/>{text: "...doi:10.1038/nature12373"}
-    API->>CC: verify(text)
-    CC->>CC: extract_citations(text)<br/>6 regex patterns
-
-    Note over CC: DOI found → verify via Crossref
-    CC->>CR: cr.works(ids=doi)
-    alt Habanero Success
-        CR-->>CC: metadata (title, authors, DOI)
-        CC->>CC: status = DOI_VERIFIED
-    else Habanero Fail
-        CR-->>CC: Exception
-        CC->>CR2: httpx.get(api.crossref.org/works/{doi})
-        alt httpx Success
-            CR2-->>CC: JSON response
-            CC->>CC: status = DOI_VERIFIED
-        else httpx Fail
-            CR2-->>CC: Exception
-            Note over CC: Chuyển sang OpenAlex
-        end
+graph LR
+    subgraph INPUT["📥 Input"]
+        UserText["User text containing<br/>citations / DOIs"]
     end
 
-    Note over CC: Title-based verification
-    CC->>OA: Works().search(title).get()
-    alt PyAlex Success
-        OA-->>CC: matching works
-        CC->>CC: fuzzy match authors (SequenceMatcher)
-    else PyAlex Fail
-        OA-->>CC: Exception
-        CC->>OA2: httpx.get(api.openalex.org/works)
-        OA2-->>CC: results
+    subgraph EXTRACT["🔎 Citation Extraction"]
+        RegexEngine["6 Regex Patterns"]
+        DOI_Pat["DOI: 10.xxxx/..."]
+        APA_Pat["APA: Author (Year)"]
+        IEEE_Pat["IEEE: [1] Author..."]
+        Num_Pat["Numbered: [1]-[99]"]
+        Van_Pat["Vancouver format"]
+        Paren_Pat["Parenthetical (Author, Year)"]
+
+        RegexEngine --> DOI_Pat
+        RegexEngine --> APA_Pat
+        RegexEngine --> IEEE_Pat
+        RegexEngine --> Num_Pat
+        RegexEngine --> Van_Pat
+        RegexEngine --> Paren_Pat
     end
 
-    CC-->>API: [CitationCheckResult]
-    API->>API: CitationItem(**asdict(result))
-    API-->>U: CitationReportResponse
+    subgraph CROSSREF_CHAIN["🔗 Crossref Verification (DOI path)"]
+        Hab["Habanero SDK<br/>cr.works(ids=doi)"]
+        HabFail{"Success?"}
+        HTTPX_CR["httpx fallback<br/>GET api.crossref.org<br/>/works/{doi}"]
+        CR_Result["DOI_VERIFIED<br/>confidence = 1.0"]
+
+        Hab --> HabFail
+        HabFail -->|"Yes"| CR_Result
+        HabFail -->|"No"| HTTPX_CR
+        HTTPX_CR --> CR_Result
+    end
+
+    subgraph OPENALEX_CHAIN["🔬 OpenAlex Verification (Author path)"]
+        PyAlexSDK["PyAlex SDK<br/>Works().search_filter()"]
+        PyAlexFail{"Success?"}
+        HTTPX_OA["httpx fallback<br/>GET api.openalex.org<br/>/works?search="]
+        FuzzyMatch["Fuzzy Author Match<br/>SequenceMatcher"]
+        OA_Result["VALID (≥0.85)<br/>PARTIAL_MATCH (≥0.5)<br/>UNVERIFIED / HALLUCINATED"]
+
+        PyAlexSDK --> PyAlexFail
+        PyAlexFail -->|"Yes"| FuzzyMatch
+        PyAlexFail -->|"No"| HTTPX_OA
+        HTTPX_OA --> FuzzyMatch
+        FuzzyMatch --> OA_Result
+    end
+
+    subgraph OUTPUT["📤 Output"]
+        Merge["Merge results<br/>get_statistics()"]
+        Schema["CitationCheckResult<br/>→ CitationItem (Pydantic)"]
+    end
+
+    %% Flow
+    UserText --> RegexEngine
+    DOI_Pat -->|"has DOI"| Hab
+    APA_Pat -->|"author-year"| PyAlexSDK
+    IEEE_Pat -->|"author-year"| PyAlexSDK
+    Num_Pat -->|"author-year"| PyAlexSDK
+    Van_Pat -->|"author-year"| PyAlexSDK
+    Paren_Pat -->|"author-year"| PyAlexSDK
+
+    CR_Result --> Merge
+    OA_Result --> Merge
+    Merge --> Schema
+
+    %% Styles
+    classDef input fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef extract fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef crossref fill:#10b981,color:#fff,stroke:#047857
+    classDef openalex fill:#6366f1,color:#fff,stroke:#4338ca
+    classDef output fill:#06b6d4,color:#fff,stroke:#0e7490
+    classDef fail fill:#ef4444,color:#fff,stroke:#b91c1c
+
+    class UserText input
+    class RegexEngine,DOI_Pat,APA_Pat,IEEE_Pat,Num_Pat,Van_Pat,Paren_Pat extract
+    class Hab,HTTPX_CR,CR_Result crossref
+    class PyAlexSDK,HTTPX_OA,FuzzyMatch,OA_Result openalex
+    class Merge,Schema output
+    class HabFail,PyAlexFail fail
 ```
 
-### 7.15 Sequence Diagram — Luồng Retraction Scan đa nguồn
+### 7.15 Component Diagram — Retraction Scan đa nguồn
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant API as FastAPI Endpoint
-    participant RS as RetractionScanner
-    participant CR as Crossref
-    participant OA as OpenAlex
-    participant PP as PubPeer v3
-
-    U->>API: POST /tools/retraction-scan<br/>{text: "10.1016/S0140-6736(97)11096-0"}
-    API->>RS: scan(text)
-    RS->>RS: Trích xuất DOIs bằng regex
-
-    loop Cho mỗi DOI
-        Note over RS: Source 1: Crossref
-        RS->>CR: cr.works(ids=doi)
-        CR-->>RS: metadata + update-to field
-        RS->>RS: Kiểm tra update-to retraction/correction
-        RS->>RS: Kiểm tra title prefix "RETRACTED:"
-
-        Note over RS: Source 2: OpenAlex
-        RS->>OA: httpx.get(openalex/works/{doi})
-        OA-->>RS: {is_retracted: true/false}
-
-        Note over RS: Source 3: PubPeer
-        RS->>PP: POST /v3/publications?devkey=PubMedChrome<br/>{dois: [doi]}
-        PP-->>RS: {feedbacks: [{total_comments, url}]}
-        RS->>RS: Extract comment count + direct URL
-
-        RS->>RS: Tính risk_level<br/>(CRITICAL/HIGH/MEDIUM/LOW/NONE)
+graph LR
+    subgraph INPUT["📥 Input"]
+        DOI["Extracted DOI<br/>10.xxxx/..."]
     end
 
-    RS-->>API: [RetractionResult]
-    API->>API: RetractionItem(**asdict(result))
-    API-->>U: RetractionScanResponse
+    subgraph SRC1["🔗 Source 1: Crossref"]
+        CR_SDK["Habanero SDK<br/>cr.works(ids=doi)"]
+        CR_HTTP["httpx fallback<br/>GET /works/{doi}"]
+        CR_Parse["Parse:<br/>• title, journal, year<br/>• update-to field<br/>• RETRACTED: prefix"]
+        CR_SDK -->|"fail"| CR_HTTP
+        CR_SDK -->|"success"| CR_Parse
+        CR_HTTP --> CR_Parse
+    end
+
+    subgraph SRC2["🔬 Source 2: OpenAlex"]
+        OA_GET["httpx GET<br/>api.openalex.org/works<br/>?filter=doi:{doi}"]
+        OA_Parse["Parse:<br/>• is_retracted (bool)<br/>• display_name<br/>• publication_year"]
+        OA_GET --> OA_Parse
+    end
+
+    subgraph SRC3["💬 Source 3: PubPeer v3"]
+        PP_POST["httpx POST<br/>pubpeer.com/v3/publications<br/>{dois: [doi], devkey: PubMedChrome}"]
+        PP_Check{"HTTP 200<br/>+ JSON?"}
+        PP_OK["Parse feedbacks:<br/>• total_comments<br/>• url"]
+        PP_Fail["⚠️ Fallback:<br/>comments = 0"]
+        PP_Link["Always set:<br/>pubpeer.com/search?q={doi}"]
+
+        PP_POST --> PP_Check
+        PP_Check -->|"Yes"| PP_OK
+        PP_Check -->|"No"| PP_Fail
+        PP_OK --> PP_Link
+        PP_Fail --> PP_Link
+    end
+
+    subgraph RISK["⚖️ Risk Engine"]
+        Combine["Combine all sources"]
+        Calc["_calculate_risk()"]
+        CRIT["🔴 CRITICAL"]
+        HIGH["🟠 HIGH"]
+        MED["🟡 MEDIUM"]
+        LOW["🟢 LOW"]
+        NONE["⚪ NONE"]
+        Status["Status: RETRACTED →<br/>CONCERN → CORRECTED →<br/>ACTIVE → UNKNOWN"]
+
+        Combine --> Calc
+        Calc --> CRIT
+        Calc --> HIGH
+        Calc --> MED
+        Calc --> LOW
+        Calc --> NONE
+        Calc --> Status
+    end
+
+    subgraph OUTPUT["📤 Output"]
+        Result["RetractionResult<br/>dataclass"]
+    end
+
+    %% Flow
+    DOI --> CR_SDK
+    DOI --> OA_GET
+    DOI --> PP_POST
+
+    CR_Parse --> Combine
+    OA_Parse --> Combine
+    PP_Link --> Combine
+
+    Status --> Result
+
+    %% Styles
+    classDef input fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef crossref fill:#10b981,color:#fff,stroke:#047857
+    classDef openalex fill:#6366f1,color:#fff,stroke:#4338ca
+    classDef pubpeer fill:#f97316,color:#fff,stroke:#c2410c
+    classDef risk fill:#ef4444,color:#fff,stroke:#b91c1c
+    classDef output fill:#06b6d4,color:#fff,stroke:#0e7490
+    classDef dead fill:#6b7280,color:#fff,stroke:#4b5563
+
+    class DOI input
+    class CR_SDK,CR_HTTP,CR_Parse crossref
+    class OA_GET,OA_Parse openalex
+    class PP_POST,PP_OK,PP_Link pubpeer
+    class PP_Check,PP_Fail dead
+    class Combine,Calc,CRIT,HIGH,MED,LOW,NONE,Status risk
+    class Result output
 ```
 
 ---
