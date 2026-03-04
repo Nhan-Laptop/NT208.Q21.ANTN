@@ -371,6 +371,54 @@ class GeminiService:
         return _inner()
 
     # ------------------------------------------------------------------
+    # Heuristic fallback helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _try_heuristic_fallback(contents: list) -> FunctionCallingResponse | None:
+        """Extract user text + file context from the Gemini ``contents``
+        list and attempt a heuristic tool execution.
+
+        Returns a ``FunctionCallingResponse`` if a tool was successfully
+        executed, or ``None`` if no intent was detected.
+        """
+        from app.services.heuristic_router import fallback_process_request
+
+        # Extract the last user message and any <Attached_Document> text
+        user_text = ""
+        file_context: str | None = None
+        for content_obj in reversed(contents):
+            role = getattr(content_obj, "role", None)
+            if role != "user":
+                continue
+            parts = getattr(content_obj, "parts", [])
+            for part in parts:
+                text = getattr(part, "text", "") or ""
+                if not text:
+                    continue
+                if "<Attached_Document>" in text:
+                    file_context = text
+                elif not user_text:
+                    user_text = text
+            if user_text or file_context:
+                break  # found the latest user turn
+
+        if not user_text and not file_context:
+            return None
+
+        result = fallback_process_request(user_text, file_context)
+        if result is None:
+            return None
+
+        logger.info("Heuristic fallback produced a response (type=%s).", result["message_type"])
+        return FunctionCallingResponse(
+            text=result["text"],
+            tool_calls=result.get("tool_calls", []),
+            message_type=result["message_type"],
+            tool_results=result.get("tool_results"),
+        )
+
+    # ------------------------------------------------------------------
     # Build multi-turn contents
     # ------------------------------------------------------------------
 
@@ -450,6 +498,11 @@ class GeminiService:
                     "Gemini API error after retries (iter %d): %s",
                     iteration, exc, exc_info=True,
                 )
+                # ── Heuristic Fallback ──────────────────────────────
+                fallback = self._try_heuristic_fallback(contents)
+                if fallback is not None:
+                    return fallback
+                # ── Static error (no intent detected) ──────────────
                 return FunctionCallingResponse(
                     text=(
                         "⚠️ Hệ thống AI hiện đang quá tải "
@@ -465,6 +518,11 @@ class GeminiService:
                     "Unexpected error calling Gemini (iter %d): %s",
                     iteration, exc,
                 )
+                # ── Heuristic Fallback ──────────────────────────────
+                fallback = self._try_heuristic_fallback(contents)
+                if fallback is not None:
+                    return fallback
+                # ── Static error ───────────────────────────────────
                 return FunctionCallingResponse(
                     text=(
                         "⚠️ Đã xảy ra lỗi không xác định khi kết nối "
