@@ -195,8 +195,12 @@ def _template_journal(results: dict) -> str:
     ]
     for i, j in enumerate(journals[:3], 1):
         name = j.get("name", j.get("journal_name", "N/A"))
-        score = j.get("similarity_score", j.get("score", 0))
-        lines.append(f"  {i}. {name} (score: {score:.1%})")
+        score = j.get("similarity_score", j.get("score", j.get("match_score", 0)))
+        try:
+            score_str = f"{float(score):.1%}"
+        except (TypeError, ValueError):
+            score_str = str(score)
+        lines.append(f"  {i}. {name} (score: {score_str})")
     if count > 3:
         lines.append(f"  … và {count - 3} tạp chí khác.")
     lines.append("\nXem chi tiết ở bảng kết quả bên dưới.")
@@ -205,7 +209,12 @@ def _template_journal(results: dict) -> str:
 
 def _template_ai_detect(results: dict) -> str:
     """Generate fallback text for AI writing detection results."""
-    score = results.get("score", 0)
+    # The AI detector may return the score under different keys
+    score = results.get("final_score", results.get("ml_score", results.get("score", 0)))
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        score = 0.0
     verdict = results.get("verdict", "UNKNOWN")
     lines = [
         "🤖 **(Chế độ dự phòng — Gemini offline)**",
@@ -287,7 +296,9 @@ def fallback_process_request(
             # Use file content if available, otherwise user text
             input_text = (file_context or user_text or "")[:5000]
             if len(input_text.strip()) < 50:
-                return None  # too short to analyse
+                logger.warning("Fallback AI Detect: text too short (%d chars < 50).", len(input_text.strip()))
+                return None
+            logger.info("Fallback executing AI Writing Detector (%d chars)...", len(input_text))
             tool_name = "detect_ai_writing"
             raw = detect_ai_writing(text=input_text)
             text = _template_ai_detect(raw)

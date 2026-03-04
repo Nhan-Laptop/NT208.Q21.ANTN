@@ -381,42 +381,63 @@ class GeminiService:
 
         Returns a ``FunctionCallingResponse`` if a tool was successfully
         executed, or ``None`` if no intent was detected.
+
+        This method is wrapped in a top-level ``try/except`` so it can
+        **never** propagate an exception — the worst-case return is
+        ``None``, which lets the caller show the static error message.
         """
-        from app.services.heuristic_router import fallback_process_request
+        try:
+            # 1. Safely import the router (handle both possible locations)
+            try:
+                from app.services.heuristic_router import fallback_process_request
+            except ModuleNotFoundError:
+                from app.services.tools.heuristic_router import fallback_process_request  # type: ignore[no-redef]
 
-        # Extract the last user message and any <Attached_Document> text
-        user_text = ""
-        file_context: str | None = None
-        for content_obj in reversed(contents):
-            role = getattr(content_obj, "role", None)
-            if role != "user":
-                continue
-            parts = getattr(content_obj, "parts", [])
-            for part in parts:
-                text = getattr(part, "text", "") or ""
-                if not text:
+            # 2. Extract the last user message and any <Attached_Document>
+            user_text = ""
+            file_context: str | None = None
+            for content_obj in reversed(contents):
+                role = getattr(content_obj, "role", None)
+                if role != "user":
                     continue
-                if "<Attached_Document>" in text:
-                    file_context = text
-                elif not user_text:
-                    user_text = text
-            if user_text or file_context:
-                break  # found the latest user turn
+                parts = getattr(content_obj, "parts", [])
+                for part in parts:
+                    text = getattr(part, "text", "") or ""
+                    if not text:
+                        continue
+                    if "<Attached_Document>" in text:
+                        file_context = text
+                    elif not user_text:
+                        user_text = text
+                if user_text or file_context:
+                    break  # found the latest user turn
 
-        if not user_text and not file_context:
+            if not user_text and not file_context:
+                logger.warning("Heuristic fallback: no user_text or file_context found in contents.")
+                return None
+
+            logger.info(
+                "Heuristic fallback triggered. user_text=%d chars, file_context=%s",
+                len(user_text),
+                f"{len(file_context)} chars" if file_context else "None",
+            )
+
+            # 3. Execute the heuristic router
+            result = fallback_process_request(user_text, file_context)
+            if result is None:
+                logger.warning("Heuristic fallback returned None (no intent matched).")
+                return None
+
+            logger.info("Heuristic fallback succeeded (type=%s).", result["message_type"])
+            return FunctionCallingResponse(
+                text=result["text"],
+                tool_calls=result.get("tool_calls", []),
+                message_type=result["message_type"],
+                tool_results=result.get("tool_results"),
+            )
+        except Exception as exc:
+            logger.exception("CRITICAL: _try_heuristic_fallback crashed: %s", exc)
             return None
-
-        result = fallback_process_request(user_text, file_context)
-        if result is None:
-            return None
-
-        logger.info("Heuristic fallback produced a response (type=%s).", result["message_type"])
-        return FunctionCallingResponse(
-            text=result["text"],
-            tool_calls=result.get("tool_calls", []),
-            message_type=result["message_type"],
-            tool_results=result.get("tool_results"),
-        )
 
     # ------------------------------------------------------------------
     # Build multi-turn contents
