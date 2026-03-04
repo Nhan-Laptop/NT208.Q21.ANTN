@@ -8,7 +8,7 @@ import {
   MessageSquarePlus,
   Moon,
   Search,
-  Settings,
+  Shield,
   Sun,
   Trash2,
   MessageSquare,
@@ -138,6 +138,15 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="border-t border-border dark:border-dark-border p-3 space-y-2">
+        {user?.role === "admin" && (
+          <Link
+            href="/admin"
+            className="flex items-center gap-2.5 w-full px-3 py-2.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-800 text-sm font-semibold hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-400 dark:hover:bg-amber-900/30 transition-colors"
+          >
+            <Shield size={16} />
+            Admin Dashboard
+          </Link>
+        )}
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-full bg-accent/10 dark:bg-dark-accent/10 flex items-center justify-center text-xs font-bold text-accent dark:text-dark-accent">
             {user?.email?.charAt(0).toUpperCase() ?? "?"}
@@ -150,24 +159,13 @@ export function Sidebar() {
               {user?.role}
             </div>
           </div>
-          <div className="flex items-center gap-1">
-            {user?.role === "admin" && (
-              <Link
-                href="/admin"
-                className="p-1.5 rounded-lg text-text-secondary hover:bg-bg-secondary dark:text-dark-text-secondary dark:hover:bg-dark-surface-hover transition-colors"
-                title="Admin"
-              >
-                <Settings size={16} />
-              </Link>
-            )}
-            <button
-              onClick={logout}
-              className="p-1.5 rounded-lg text-text-secondary hover:bg-bg-secondary hover:text-danger dark:text-dark-text-secondary dark:hover:bg-dark-surface-hover transition-colors"
-              title="Logout"
-            >
-              <LogOut size={16} />
-            </button>
-          </div>
+          <button
+            onClick={logout}
+            className="p-1.5 rounded-lg text-text-secondary hover:bg-bg-secondary hover:text-danger dark:text-dark-text-secondary dark:hover:bg-dark-surface-hover transition-colors"
+            title="Logout"
+          >
+            <LogOut size={16} />
+          </button>
         </div>
       </div>
     </aside>

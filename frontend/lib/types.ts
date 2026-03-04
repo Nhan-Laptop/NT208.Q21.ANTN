@@ -74,6 +74,8 @@ export interface AdminOverview {
   files: number;
   total_storage_bytes: number;
   total_storage_mb: number;
+  active_admins: number;
+  active_researchers: number;
 }
 
 export interface StorageHealth {

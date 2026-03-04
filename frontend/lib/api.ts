@@ -270,6 +270,17 @@ export const api = {
     );
   },
 
+  async adminUpdateRole(token: string, userId: string, role: "admin" | "researcher"): Promise<User> {
+    return request<User>(
+      `/api/v1/admin/users/${userId}/role`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ role }),
+      },
+      token,
+    );
+  },
+
   async adminStorage(token: string): Promise<StorageStats> {
     return request<StorageStats>("/api/v1/admin/storage", {}, token);
   },

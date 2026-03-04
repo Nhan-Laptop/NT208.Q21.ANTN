@@ -10,8 +10,8 @@ from app.core.database import get_db
 from app.models.chat_message import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.file_attachment import FileAttachment
-from app.models.user import User
-from app.schemas.admin import AdminOverview, AdminUserOut
+from app.models.user import User, UserRole
+from app.schemas.admin import AdminOverview, AdminUserOut, RoleUpdateRequest
 from app.schemas.upload import (
     FileAttachmentOut,
     FileListResponse,
@@ -34,10 +34,14 @@ def overview(
     sessions = db.query(func.count(ChatSession.id)).scalar() or 0
     messages = db.query(func.count(ChatMessage.id)).scalar() or 0
     files = db.query(func.count(FileAttachment.id)).scalar() or 0
-    
+
     # Calculate total storage used
     total_storage = db.query(func.sum(FileAttachment.size_bytes)).scalar() or 0
-    
+
+    # Count by role
+    admins = db.query(func.count(User.id)).filter(User.role == UserRole.ADMIN).scalar() or 0
+    researchers = db.query(func.count(User.id)).filter(User.role == UserRole.RESEARCHER).scalar() or 0
+
     return AdminOverview(
         users=users,
         sessions=sessions,
@@ -45,6 +49,8 @@ def overview(
         files=files,
         total_storage_bytes=total_storage,
         total_storage_mb=round(total_storage / (1024 * 1024), 2),
+        active_admins=admins,
+        active_researchers=researchers,
     )
 
 
@@ -58,6 +64,36 @@ def list_users(
     """List all users (admin only) with pagination."""
     _ = current_user
     return db.query(User).order_by(User.created_at.desc()).offset(offset).limit(limit).all()
+
+
+@router.patch("/users/{user_id}/role", response_model=AdminUserOut)
+def update_user_role(
+    user_id: str,
+    payload: RoleUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.ADMIN_MANAGE))],
+) -> AdminUserOut:
+    """Update a user's role (admin only). Supports promote and demote."""
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot change your own role")
+    old_role = target.role.value
+    target.role = payload.role
+    db.add(target)
+    db.commit()
+    db.refresh(target)
+    log_audit_event(
+        event="admin.update_role",
+        actor_id=current_user.id,
+        actor_role=current_user.role.value,
+        outcome="success",
+        resource_type="user",
+        resource_id=target.id,
+        details={"old_role": old_role, "new_role": target.role.value},
+    )
+    return target
 
 
 @router.get("/files", response_model=FileListResponse)

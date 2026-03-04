@@ -16,6 +16,11 @@ class AdminUserOut(BaseModel):
     created_at: datetime
 
 
+class RoleUpdateRequest(BaseModel):
+    """Request body for PATCH /admin/users/{user_id}/role."""
+    role: UserRole
+
+
 class AdminOverview(BaseModel):
     """Admin dashboard overview statistics."""
     users: int
@@ -24,3 +29,5 @@ class AdminOverview(BaseModel):
     files: int
     total_storage_bytes: int = 0
     total_storage_mb: float = 0.0
+    active_admins: int = 0
+    active_researchers: int = 0
