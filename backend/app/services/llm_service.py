@@ -20,6 +20,7 @@ from typing import Any, Sequence
 
 from tenacity import (
     retry,
+    RetryError,
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
@@ -363,7 +364,6 @@ class GeminiService:
             wait=wait_exponential(multiplier=1, min=4, max=10),
             retry=retry_if_exception_type(retry_types),
             before_sleep=before_sleep_log(logger, logging.WARNING),
-            reraise=True,
         )
         def _inner():
             return self._client.models.generate_content(**kwargs)  # type: ignore[union-attr]
@@ -431,6 +431,11 @@ class GeminiService:
 
         all_tool_calls: list[dict[str, Any]] = []
 
+        # Build the set of SDK exception types for explicit catching
+        _sdk_errors: tuple = ()
+        if genai_errors is not None:
+            _sdk_errors = (genai_errors.ServerError, genai_errors.APIError)
+
         for iteration in range(_MAX_FC_ITERATIONS):
             try:
                 response = self._call_generate_content(
@@ -438,28 +443,33 @@ class GeminiService:
                     contents=contents,
                     config=config,
                 )
-            except Exception as exc:
+            except (*_sdk_errors, RetryError) as exc:
+                # Tenacity RetryError (all retries exhausted) or SDK
+                # error that bypassed the retry filter.
                 logger.error(
-                    "Gemini generate_content failed after retries (iter %d): %s",
+                    "Gemini API error after retries (iter %d): %s",
                     iteration, exc, exc_info=True,
                 )
-                # Classify the error for a user-friendly message
-                err_msg = str(exc).lower()
-                is_overload = any(kw in err_msg for kw in (
-                    "503", "429", "quota", "resource_exhausted",
-                    "unavailable", "overloaded", "high demand",
-                ))
-                if is_overload:
-                    return FunctionCallingResponse(
-                        text=(
-                            "⚠️ Hệ thống AI đang quá tải do giới hạn API. "
-                            "Vui lòng đợi trong giây lát và thử lại."
-                        ),
-                        message_type="TEXT",
-                        tool_results=None,
-                    )
                 return FunctionCallingResponse(
-                    text="Xin lỗi, đã xảy ra lỗi khi gọi Gemini. Vui lòng thử lại sau.",
+                    text=(
+                        "⚠️ Hệ thống AI hiện đang quá tải "
+                        "(Lỗi 503/429 từ Google). "
+                        "Vui lòng đợi vài phút và thử lại."
+                    ),
+                    message_type="TEXT",
+                    tool_results=None,
+                )
+            except Exception as exc:
+                # Any other unexpected error — NEVER propagate.
+                logger.exception(
+                    "Unexpected error calling Gemini (iter %d): %s",
+                    iteration, exc,
+                )
+                return FunctionCallingResponse(
+                    text=(
+                        "⚠️ Đã xảy ra lỗi không xác định khi kết nối "
+                        "với AI. Vui lòng thử lại sau."
+                    ),
                     message_type="TEXT",
                     tool_results=None,
                 )
@@ -564,7 +574,20 @@ class GeminiService:
             )
 
         contents = self._build_contents(history, user_text)
-        return self._generate_with_fc(contents, SYSTEM_PROMPT)
+        try:
+            return self._generate_with_fc(contents, SYSTEM_PROMPT)
+        except Exception as exc:
+            # Ultimate safety net — should never be reached, but
+            # guarantees the backend NEVER crashes on a Gemini failure.
+            logger.exception("Unhandled error in generate_response: %s", exc)
+            return FunctionCallingResponse(
+                text=(
+                    "⚠️ Đã xảy ra lỗi hệ thống. "
+                    "Vui lòng thử lại sau."
+                ),
+                message_type="TEXT",
+                tool_results=None,
+            )
 
     # ------------------------------------------------------------------
     # Simple generation (no tools — for summarization, etc.)
@@ -587,7 +610,7 @@ class GeminiService:
             )
             text = getattr(result, "text", "") or ""
             return text.strip() or None
-        except Exception:
+        except (RetryError, Exception):
             logger.exception("Gemini generate_content (simple) failed after retries.")
             return None
 
