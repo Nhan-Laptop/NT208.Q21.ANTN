@@ -1738,6 +1738,161 @@ graph TB
     class Convert,FnResp,PersistDB persist
 ```
 
+#### 5.2.7 Component Diagram — AI Writing Detection Tool
+
+```mermaid
+graph TB
+    subgraph FRONTEND["⚛️ Frontend (Next.js)"]
+        direction TB
+        ChatView["ChatView<br/>components/chat-view.tsx"]
+        ModeSelect["ModeSelector<br/>mode = AI_DETECTION"]
+        Store["ChatStore (useReducer)<br/>dispatch SEND_MESSAGE"]
+        RenderResult["AIDetectionCard<br/>components/tool-results.tsx"]
+
+        ChatView --> ModeSelect
+        ModeSelect --> Store
+    end
+
+    subgraph API_GATEWAY["🔐 API Gateway (FastAPI)"]
+        direction TB
+        DirectEP["POST /api/v1/tools/detect-ai-writing<br/>endpoints/tools.py"]
+        AliasEP["POST /api/v1/tools/ai-detect<br/>(alias → detect_ai_writing)"]
+        ChatEP["POST /api/v1/chat/completions<br/>endpoints/chat.py"]
+
+        subgraph AUTH["Middleware"]
+            JWT["JWT Verification"]
+            RBAC_TOOL["Permission.TOOL_EXECUTE"]
+            RBAC_MSG["Permission.MESSAGE_WRITE"]
+        end
+
+        AliasEP -.->|"delegates"| DirectEP
+    end
+
+    subgraph CHAT_SVC["💬 ChatService — Mode Router"]
+        direction TB
+        SaveUser["_save_message(role=USER)"]
+        FileCtx["_build_file_context()<br/>→ &lt;Attached_Document&gt; XML"]
+        ModeCheck{{"mode == AI_DETECTION?"}}
+        RunTool["_run_mode_tool(AI_DETECTION, text)"]
+        SaveAssist["_save_message(role=ASSISTANT)<br/>type=AI_WRITING_DETECTION"]
+
+        SaveUser --> FileCtx
+        FileCtx --> ModeCheck
+        ModeCheck -->|"Yes"| RunTool
+    end
+
+    subgraph FC_PATH["🤖 Gemini Function Calling Path"]
+        direction TB
+        GeminiSvc["GeminiService<br/>generate_response()"]
+        GenContent["generate_content()<br/>tools=[4 functions]<br/>AFC=disabled"]
+        FCDetect["function_call:<br/>detect_ai_writing(text)"]
+        FnResp["function_response<br/>→ Gemini final answer"]
+
+        GeminiSvc --> GenContent
+        GenContent --> FCDetect
+        FCDetect --> FnResp
+    end
+
+    subgraph DETECTOR["🔬 AIWritingDetector (Singleton)"]
+        direction TB
+        Analyze["analyze(text)<br/>min 50 chars gate"]
+        ChunkAPI["analyze_chunks(text, 500)<br/>(long document splitting)"]
+
+        subgraph ML_PATH["🧠 ML Path — RoBERTa"]
+            direction TB
+            LoadModel["_load_model()<br/>roberta-base-openai-detector"]
+            Tokenize["AutoTokenizer<br/>truncation=True, max_length=512"]
+            Inference["torch.no_grad()<br/>model(**inputs).logits"]
+            Softmax["softmax → probs[0][1]<br/>= ml_score (0.0–1.0)"]
+            DeviceSelect["Device: CUDA / CPU<br/>(auto-detect)"]
+            GlobalCache["Global cache:<br/>_detector_model singleton"]
+
+            LoadModel --> DeviceSelect
+            DeviceSelect --> GlobalCache
+            Tokenize --> Inference
+            Inference --> Softmax
+        end
+
+        subgraph RULE_PATH["📏 Rule-Based Heuristics (7 features)"]
+            direction TB
+            F1["① AI Patterns<br/>(30 regex × 0.25 weight)"]
+            F2["② Filler Phrases<br/>(20 patterns × 0.15 weight)"]
+            F3["③ Transition Words<br/>(26 words × 0.10 weight)"]
+            F4["④ Sentence Uniformity<br/>(CV-based × 0.20 weight)"]
+            F5["⑤ Vocabulary Diversity<br/>(TTR × 0.15 weight)"]
+            F6["⑥ Repetition Score<br/>(starter freq × 0.10 weight)"]
+            F7["⑦ Hapax Ratio<br/>(unique words × 0.05 weight)"]
+        end
+
+        subgraph ENSEMBLE["⚖️ Ensemble Scoring"]
+            direction TB
+            MLAvail{{"ML available?"}}
+            EnsembleCalc["final = 0.7 × ml_score<br/>+ 0.3 × rule_score"]
+            RuleOnly["final = rule_score"]
+            VerdictMap["Verdict Mapping:<br/>&lt;0.25 LIKELY_HUMAN<br/>&lt;0.40 POSSIBLY_HUMAN<br/>&lt;0.60 UNCERTAIN<br/>&lt;0.75 POSSIBLY_AI<br/>≥0.75 LIKELY_AI"]
+            ConfidenceCalc["Confidence:<br/>&lt;100 tokens → LOW<br/>&lt;300 tokens → MEDIUM<br/>else → HIGH"]
+
+            MLAvail -->|"Yes"| EnsembleCalc
+            MLAvail -->|"No"| RuleOnly
+            EnsembleCalc --> VerdictMap
+            RuleOnly --> VerdictMap
+            VerdictMap --> ConfidenceCalc
+        end
+
+        Analyze --> ML_PATH
+        Analyze --> RULE_PATH
+        ML_PATH --> MLAvail
+        RULE_PATH --> MLAvail
+    end
+
+    subgraph DATABASE["🗄️ Database"]
+        MsgTable["chat_messages<br/>(type=AI_WRITING_DETECTION)"]
+    end
+
+    %% Direct endpoint flow
+    Store -->|"POST {text, session_id}"| DirectEP
+    DirectEP --> JWT --> RBAC_TOOL
+    RBAC_TOOL --> Analyze
+    Analyze -->|"DetectionResult"| DirectEP
+    DirectEP -->|"persist_tool_interaction()"| MsgTable
+    DirectEP -->|"AIWritingDetectResponse"| RenderResult
+
+    %% Chat mode flow
+    Store -->|"POST {session_id, message, mode}"| ChatEP
+    ChatEP --> JWT
+    JWT --> RBAC_MSG
+    RBAC_MSG --> SaveUser
+    ModeCheck -->|"No (GENERAL_QA)"| GeminiSvc
+    FCDetect -->|"execute locally"| Analyze
+    FnResp -->|"grounded text"| SaveAssist
+    RunTool -->|"ai_writing_detector.analyze()"| Analyze
+    RunTool --> SaveAssist
+    SaveAssist -->|"INSERT"| MsgTable
+    SaveAssist -->|"ChatCompletionResponse"| ChatEP
+    ChatEP --> RenderResult
+
+    %% Styles
+    classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef api fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef chatsvc fill:#14b8a6,color:#fff,stroke:#0d9488
+    classDef fc fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef ml fill:#ec4899,color:#fff,stroke:#be185d
+    classDef rules fill:#8b5cf6,color:#fff,stroke:#6d28d9
+    classDef ensemble fill:#f97316,color:#fff,stroke:#c2410c
+    classDef db fill:#06b6d4,color:#fff,stroke:#0e7490
+    classDef detector fill:#10b981,color:#fff,stroke:#047857
+
+    class ChatView,ModeSelect,Store,RenderResult frontend
+    class DirectEP,AliasEP,ChatEP,JWT,RBAC_TOOL,RBAC_MSG api
+    class SaveUser,FileCtx,ModeCheck,RunTool,SaveAssist chatsvc
+    class GeminiSvc,GenContent,FCDetect,FnResp fc
+    class LoadModel,Tokenize,Inference,Softmax,DeviceSelect,GlobalCache ml
+    class F1,F2,F3,F4,F5,F6,F7 rules
+    class MLAvail,EnsembleCalc,RuleOnly,VerdictMap,ConfidenceCalc ensemble
+    class MsgTable db
+    class Analyze,ChunkAPI detector
+```
+
 ---
 
 ## 6. Thiết kế Cơ sở dữ liệu (ERD)
@@ -2561,6 +2716,32 @@ final_score = 0.7 * ai_prob + 0.3 * rule_based_score
 - Nếu `transformers` / `torch` không cài → chỉ dùng rule-based (7 features)
 - Nếu model load fail → rule-based only, `method = "rule_based_heuristics"`
 - Verdict scale: LIKELY_HUMAN → POSSIBLY_HUMAN → UNCERTAIN → POSSIBLY_AI → LIKELY_AI
+
+**Singleton & Long-Document Chunking:**
+
+```python
+# Module-level singleton — loaded once, reused globally
+ai_writing_detector = AIWritingDetector(use_ml=True)
+
+# Long-document analysis: splits into 500-word chunks
+def analyze_chunks(self, text: str, chunk_size: int = 500) -> list[DetectionResult]:
+    words = text.split()
+    chunks = [" ".join(words[i:i + chunk_size])
+              for i in range(0, len(words), chunk_size)
+              if len(words[i:i + chunk_size]) >= 50]
+    return [self.analyze(c) for c in chunks]
+```
+
+- Singleton `ai_writing_detector` được import bởi `chat_service.py`, `llm_service.py`, và `endpoints/tools.py`
+- `analyze_chunks()` chia văn bản dài thành đoạn 500 từ, phân tích từng đoạn riêng biệt
+- Global cache cho RoBERTa model (`_detector_model`, `_detector_tokenizer`) — chỉ load lần đầu
+
+**Endpoint Alias:**
+
+| Endpoint | Method | Vai trò |
+|----------|--------|--------|
+| `/api/v1/tools/detect-ai-writing` | POST | Primary endpoint |
+| `/api/v1/tools/ai-detect` | POST | Alias → delegates to `detect_ai_writing()` |
 
 ### 7.9 PyMuPDF (fitz) — PDF Processing
 
