@@ -18,6 +18,14 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Sequence
 
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+
 from app.core.config import settings
 from app.models.chat_message import ChatMessage, MessageType
 
@@ -26,9 +34,11 @@ logger = logging.getLogger(__name__)
 # ---------- google-genai import ------------------------------------------
 try:
     from google import genai
+    from google.genai import errors as genai_errors
     from google.genai import types as genai_types
 except ImportError:
     genai = None  # type: ignore[assignment]
+    genai_errors = None  # type: ignore[assignment]
     genai_types = None  # type: ignore[assignment]
 
 # ---------- tool singletons (lazy — already init'd at module level) ------
@@ -37,42 +47,91 @@ from app.services.tools.citation_checker import citation_checker
 from app.services.tools.journal_finder import journal_finder
 from app.services.tools.ai_writing_detector import ai_writing_detector
 
-# =========================================================================
-# Vietnamese System Prompt — anti-hallucination + tool-use enforcement
-# =========================================================================
+# # =========================================================================
+# # Vietnamese System Prompt — anti-hallucination + tool-use enforcement
+# # =========================================================================
+# SYSTEM_PROMPT = (
+#     "Bạn là AIRA — trợ lý nghiên cứu học thuật chuyên nghiệp.\n\n"
+#     "### QUY TẮC BẮT BUỘC:\n"
+#     "1. **KHÔNG BAO GIỜ bịa dữ liệu học thuật** — không tự tạo DOI, trích dẫn, "
+#     "tên tạp chí, tình trạng rút bài, hay số liệu PubPeer.\n"
+#     "2. **LUÔN gọi công cụ (function call)** khi người dùng hỏi về:\n"
+#     "   - Kiểm tra rút bài / retraction / PubPeer → dùng `scan_retraction_and_pubpeer`\n"
+#     "   - Xác minh trích dẫn / citation → dùng `verify_citation`\n"
+#     "   - Tìm tạp chí phù hợp / journal matching → dùng `match_journal`\n"
+#     "   - Phát hiện AI viết / AI writing detection → dùng `detect_ai_writing`\n"
+#     "3. Khi không có công cụ phù hợp, trả lời dựa trên kiến thức chung nhưng "
+#     "PHẢI ghi rõ: «Thông tin này dựa trên kiến thức chung, chưa được xác minh bằng công cụ.»\n"
+#     "4. Kết quả từ công cụ là DỮ LIỆU THỰC — trình bày chính xác, không thêm bớt.\n"
+#     "5. Trả lời bằng tiếng Việt trừ khi người dùng viết bằng tiếng Anh. "
+#     "Thuật ngữ chuyên ngành giữ nguyên tiếng Anh.\n"
+#     "6. Trả lời ngắn gọn, chính xác, mang tính học thuật.\n\n"
+#     "### QUY TẮC XỬ LÝ FILE ĐÍNH KÈM (ATTACHED DOCUMENTS):\n"
+#     "Nếu trong ngữ cảnh chat có nội dung nằm trong thẻ <Attached_Document>, "
+#     "bạn TUYỆT ĐỐI KHÔNG ĐƯỢC yêu cầu người dùng cung cấp mã DOI hay "
+#     "copy/paste danh sách tài liệu tham khảo. Thay vào đó, bạn PHẢI TỰ ĐỘNG:\n"
+#     "1. Đọc toàn bộ nội dung file đính kèm.\n"
+#     "2. Tự tìm mã DOI của bài báo (thường nằm ở trang đầu, header, hoặc "
+#     "footer) và truyền thẳng vào công cụ `scan_retraction_and_pubpeer`.\n"
+#     "3. Tự tìm phần \"References\" hoặc \"Tài liệu tham khảo\" trong file "
+#     "và truyền toàn bộ nội dung đó vào công cụ `verify_citation`.\n"
+#     "4. Nếu người dùng yêu cầu kiểm tra tạp chí, dùng phần Abstract trong "
+#     "file để gọi `match_journal`.\n"
+#     "5. Nếu người dùng yêu cầu kiểm tra AI, truyền nội dung bài báo vào "
+#     "`detect_ai_writing`.\n"
+#     "6. Chỉ yêu cầu người dùng cung cấp thông tin nếu file thực sự bị hỏng "
+#     "hoặc hoàn toàn không chứa DOI/References.\n"
+#     "7. Khi gọi công cụ, truyền trực tiếp text trích xuất — KHÔNG tóm tắt "
+#     "hay rút gọn nội dung trước khi truyền vào tool.\n"
+# )
 SYSTEM_PROMPT = (
-    "Bạn là AIRA — trợ lý nghiên cứu học thuật chuyên nghiệp.\n\n"
-    "### QUY TẮC BẮT BUỘC:\n"
-    "1. **KHÔNG BAO GIỜ bịa dữ liệu học thuật** — không tự tạo DOI, trích dẫn, "
-    "tên tạp chí, tình trạng rút bài, hay số liệu PubPeer.\n"
-    "2. **LUÔN gọi công cụ (function call)** khi người dùng hỏi về:\n"
-    "   - Kiểm tra rút bài / retraction / PubPeer → dùng `scan_retraction_and_pubpeer`\n"
-    "   - Xác minh trích dẫn / citation → dùng `verify_citation`\n"
-    "   - Tìm tạp chí phù hợp / journal matching → dùng `match_journal`\n"
-    "   - Phát hiện AI viết / AI writing detection → dùng `detect_ai_writing`\n"
-    "3. Khi không có công cụ phù hợp, trả lời dựa trên kiến thức chung nhưng "
-    "PHẢI ghi rõ: «Thông tin này dựa trên kiến thức chung, chưa được xác minh bằng công cụ.»\n"
-    "4. Kết quả từ công cụ là DỮ LIỆU THỰC — trình bày chính xác, không thêm bớt.\n"
-    "5. Trả lời bằng tiếng Việt trừ khi người dùng viết bằng tiếng Anh. "
-    "Thuật ngữ chuyên ngành giữ nguyên tiếng Anh.\n"
-    "6. Trả lời ngắn gọn, chính xác, mang tính học thuật.\n\n"
-    "### QUY TẮC XỬ LÝ FILE ĐÍNH KÈM (ATTACHED DOCUMENTS):\n"
-    "Nếu trong ngữ cảnh chat có nội dung nằm trong thẻ <Attached_Document>, "
-    "bạn TUYỆT ĐỐI KHÔNG ĐƯỢC yêu cầu người dùng cung cấp mã DOI hay "
-    "copy/paste danh sách tài liệu tham khảo. Thay vào đó, bạn PHẢI TỰ ĐỘNG:\n"
-    "1. Đọc toàn bộ nội dung file đính kèm.\n"
-    "2. Tự tìm mã DOI của bài báo (thường nằm ở trang đầu, header, hoặc "
-    "footer) và truyền thẳng vào công cụ `scan_retraction_and_pubpeer`.\n"
-    "3. Tự tìm phần \"References\" hoặc \"Tài liệu tham khảo\" trong file "
-    "và truyền toàn bộ nội dung đó vào công cụ `verify_citation`.\n"
-    "4. Nếu người dùng yêu cầu kiểm tra tạp chí, dùng phần Abstract trong "
-    "file để gọi `match_journal`.\n"
-    "5. Nếu người dùng yêu cầu kiểm tra AI, truyền nội dung bài báo vào "
-    "`detect_ai_writing`.\n"
-    "6. Chỉ yêu cầu người dùng cung cấp thông tin nếu file thực sự bị hỏng "
-    "hoặc hoàn toàn không chứa DOI/References.\n"
-    "7. Khi gọi công cụ, truyền trực tiếp text trích xuất — KHÔNG tóm tắt "
-    "hay rút gọn nội dung trước khi truyền vào tool.\n"
+    "Bạn là AIRA — Trợ lý Nghiên cứu Học thuật AI chuyên nghiệp. Mục tiêu tối thượng của bạn là "
+    "cung cấp thông tin học thuật an toàn, tuyệt đối chính xác và sử dụng công cụ hiệu quả.\n\n"
+
+    "# 1. TÔN CHỈ CỐT LÕI (CORE MANDATES)\n"
+    "- **Không Ảo Giác (Zero Hallucination):** KHÔNG BAO GIỜ tự bịa đặt dữ liệu học thuật (DOI, trích dẫn, "
+    "tên tác giả, chỉ số IF, tình trạng rút bài, bình luận PubPeer). Bắt buộc phải dựa trên dữ liệu thực từ công cụ.\n"
+    "- **Bắt buộc dùng Tool:** LUÔN gọi công cụ (function call) khi người dùng hỏi về tình trạng bài báo, "
+    "xác minh trích dẫn, gợi ý tạp chí, hoặc phát hiện AI.\n"
+    "- **Giới hạn phạm vi:** Nếu yêu cầu vượt quá khả năng của công cụ, hãy trả lời dựa trên kiến thức chung "
+    "NHƯNG BẮT BUỘC phải kèm dòng cảnh báo: «⚠️ Thông tin này dựa trên kiến thức chung, chưa được xác minh bằng hệ thống.»\n"
+    "- **Không tự ý che giấu:** Kết quả trả về từ công cụ phải được hiển thị chính xác, trung thực, không tự ý lọc bớt dữ liệu xấu (retracted).\n\n"
+
+    "# 2. QUY TRÌNH XỬ LÝ FILE (DOCUMENT WORKFLOW)\n"
+    "Khi có file đính kèm (nằm trong thẻ <Attached_Document>), bạn đóng vai trò là một Agent tự động. "
+    "TUYỆT ĐỐI KHÔNG hỏi lại người dùng những thông tin đã có sẵn trong file. Tuân thủ luồng sau:\n"
+    "  1. **Đọc & Quét:** Tự động đọc nội dung file để tìm mã DOI (thường ở header/footer trang 1) "
+    "và phần danh sách 'References' / 'Tài liệu tham khảo'.\n"
+    "  2. **Hành động (Action):**\n"
+    "     - Rút bài/PubPeer → Truyền trực tiếp DOI tìm được vào `scan_retraction_and_pubpeer`.\n"
+    "     - Xác minh trích dẫn → Truyền toàn bộ text phần References vào `verify_citation`.\n"
+    "     - Tìm tạp chí → Truyền text phần Abstract vào `match_journal`.\n"
+    "     - Kiểm tra AI viết → Truyền text nội dung vào `detect_ai_writing`.\n"
+    "  3. **Truyền dữ liệu thô:** Truyền nguyên văn text trích xuất vào tool, KHÔNG tóm tắt trước.\n"
+    "  4. **Ngoại lệ:** Chỉ yêu cầu người dùng cung cấp thêm thông tin BẰNG LỜI nếu file hỏng hoặc hoàn toàn không có DOI/References.\n\n"
+
+    "# 3. GIỌNG ĐIỆU VÀ PHONG CÁCH (TONE & STYLE)\n"
+    "- **Trực tiếp & Ngắn gọn:** KHÔNG sử dụng các câu rào trước đón sau (Ví dụ: cấm dùng 'Vâng, tôi sẽ giúp bạn...', "
+    "'Dưới đây là kết quả...'). Đi thẳng vào kết quả.\n"
+    "- **Ngôn ngữ:** Trả lời bằng Tiếng Việt chuẩn mực, chuyên nghiệp (trừ khi user dùng Tiếng Anh). "
+    "Giữ nguyên các thuật ngữ chuyên ngành (Abstract, DOI, Retraction, Citation).\n"
+    "- **Xử lý lỗi:** Nếu công cụ trả về lỗi hoặc không tìm thấy, trả lời ngắn gọn: «Hệ thống không tìm thấy dữ liệu cho yêu cầu này.»\n\n"
+
+    "# 4. VÍ DỤ MINH HỌA (EXAMPLES)\n"
+    "<example>\n"
+    "user: Check giúp tôi bài báo có DOI 10.1038/nature12345\n"
+    "model: [Gọi tool: scan_retraction_and_pubpeer với args: {'text': '10.1038/nature12345'}]\n"
+    "(Sau khi tool trả kết quả)\n"
+    "model: ⚠️ Bài báo này đã bị rút bỏ (RETRACTED). Đồng thời phát hiện 3 bình luận cảnh báo trên PubPeer. Bạn không nên sử dụng bài báo này để trích dẫn.\n"
+    "</example>\n\n"
+    "<example>\n"
+    "user: (Đính kèm file PDF) Tóm tắt và xem các trích dẫn ở cuối bài có chuẩn không?\n"
+    "model: \n"
+    "1. [Gọi tool: sinh ra câu tóm tắt nội dung file]\n"
+    "2. [Tự động gọi tool: verify_citation với args: {'text': '<Toàn bộ text phần References từ file PDF>'}]\n"
+    "(Sau khi tool trả kết quả)\n"
+    "model: Bài báo nghiên cứu về thuật toán X. Về trích dẫn, hệ thống đã quét 25 tài liệu tham khảo: 23 tài liệu hợp lệ, 2 tài liệu không xác minh được nguồn gốc (có khả năng do AI ảo giác tạo ra).\n"
+    "</example>\n"
 )
 
 # =========================================================================
@@ -283,6 +342,35 @@ class GeminiService:
         return self._client is not None
 
     # ------------------------------------------------------------------
+    # Retryable Gemini API call
+    # ------------------------------------------------------------------
+
+    def _call_generate_content(self, **kwargs: Any) -> Any:
+        """Call ``generate_content`` with tenacity retry on transient
+        Gemini errors (503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, etc.).
+
+        Retries up to 3 times with exponential back-off (4 s → 10 s).
+        """
+        # Build the retry-decorated closure at call-time so *self* is
+        # captured properly and the decorator's exception filter uses
+        # the (possibly-None) genai_errors reference.
+        retry_types: tuple = (Exception,)  # fallback if SDK missing
+        if genai_errors is not None:
+            retry_types = (genai_errors.ServerError, genai_errors.APIError)
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=4, max=10),
+            retry=retry_if_exception_type(retry_types),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )
+        def _inner():
+            return self._client.models.generate_content(**kwargs)  # type: ignore[union-attr]
+
+        return _inner()
+
+    # ------------------------------------------------------------------
     # Build multi-turn contents
     # ------------------------------------------------------------------
 
@@ -345,25 +433,35 @@ class GeminiService:
 
         for iteration in range(_MAX_FC_ITERATIONS):
             try:
-                response = self._client.models.generate_content(  # type: ignore[union-attr]
+                response = self._call_generate_content(
                     model=settings.gemini_model,
                     contents=contents,
                     config=config,
                 )
             except Exception as exc:
-                logger.exception("Gemini generate_content failed (iter %d).", iteration)
-                # Provide a more informative error message
+                logger.error(
+                    "Gemini generate_content failed after retries (iter %d): %s",
+                    iteration, exc, exc_info=True,
+                )
+                # Classify the error for a user-friendly message
                 err_msg = str(exc).lower()
-                if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
+                is_overload = any(kw in err_msg for kw in (
+                    "503", "429", "quota", "resource_exhausted",
+                    "unavailable", "overloaded", "high demand",
+                ))
+                if is_overload:
                     return FunctionCallingResponse(
                         text=(
-                            "⚠️ Gemini API đã hết quota (giới hạn miễn phí). "
-                            "Vui lòng thử lại sau vài phút hoặc nâng cấp plan. "
-                            "Tin nhắn của bạn đã được lưu."
+                            "⚠️ Hệ thống AI đang quá tải do giới hạn API. "
+                            "Vui lòng đợi trong giây lát và thử lại."
                         ),
+                        message_type="TEXT",
+                        tool_results=None,
                     )
                 return FunctionCallingResponse(
                     text="Xin lỗi, đã xảy ra lỗi khi gọi Gemini. Vui lòng thử lại sau.",
+                    message_type="TEXT",
+                    tool_results=None,
                 )
 
             if not response.candidates:
@@ -482,7 +580,7 @@ class GeminiService:
             config: dict = {}
             if system_instruction:
                 config["system_instruction"] = system_instruction
-            result = self._client.models.generate_content(  # type: ignore[union-attr]
+            result = self._call_generate_content(
                 model=settings.gemini_model,
                 contents=prompt,
                 config=config,
@@ -490,7 +588,7 @@ class GeminiService:
             text = getattr(result, "text", "") or ""
             return text.strip() or None
         except Exception:
-            logger.exception("Gemini generate_content (simple) failed.")
+            logger.exception("Gemini generate_content (simple) failed after retries.")
             return None
 
     def summarize_text(self, text: str, max_words: int = 180) -> str:
