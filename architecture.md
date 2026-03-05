@@ -1,7 +1,7 @@
 # 📐 AIRA — Kiến trúc Hệ thống & Thiết kế Chi tiết
 
 > **AIRA** (Academic Integrity & Research Assistant) — Nền tảng hỗ trợ nghiên cứu khoa học tích hợp AI  
-> Phiên bản: 1.0 | Cập nhật: 28/02/2026
+> Phiên bản: 2.0 | Cập nhật: 06/06/2026
 
 ---
 
@@ -13,8 +13,9 @@
 4. [Sơ đồ Component — Luồng Upload & Xử lý file PDF](#4-sơ-đồ-component--luồng-upload--xử-lý-file-pdf)
 5. [Sơ đồ UML](#5-sơ-đồ-uml)
    - 5.1 [Use-case Diagram](#51-use-case-diagram)
-   - 5.2 [Component Flow Diagrams](#52-component-flow-diagrams)
+   - 5.2 [Component Flow Diagrams](#52-component-flow-diagrams) (incl. 5.2.8 Grammar Checker)
 6. [Thiết kế Cơ sở dữ liệu (ERD)](#6-thiết-kế-cơ-sở-dữ-liệu-erd)
+7. [Tích hợp API & Dịch vụ bên ngoài](#7-tích-hợp-api--dịch-vụ-bên-ngoài) (incl. 7.2.6 Resiliency & Fallback 3-tier)
 
 ---
 
@@ -70,6 +71,12 @@ graph TB
             JournalFinder["JournalFinder<br/>(SPECTER2 + TF-IDF)"]
             RetractScan["RetractionScanner<br/>(Crossref + OpenAlex + PubPeer)"]
             AIDetector["AIWritingDetector<br/>(RoBERTa ensemble)"]
+            GrammarCheck["GrammarChecker<br/>(LanguageTool JVM)"]
+        end
+
+        subgraph FALLBACK_LAYER["Resiliency Layer"]
+            Tenacity["Tenacity Retry<br/>(3× exponential backoff)"]
+            HeuristicEngine["Heuristic Fallback Engine<br/>(SemanticIntentRouter +<br/>Direct Tool Execution)"]
         end
     end
 
@@ -102,9 +109,12 @@ graph TB
     SERVICE_LAYER --> TOOL_LAYER
 
     ChatSvc --> LLMSvc
+    LLMSvc --> Tenacity
+    Tenacity --> HeuristicEngine
     ChatSvc --> CitChecker
     ChatSvc --> JournalFinder
     ChatSvc --> RetractScan
+    ChatSvc --> GrammarCheck
     FileSvc --> StorageSvc
     StorageSvc --> CryptoMgr
 
@@ -128,7 +138,7 @@ graph TB
     classDef storage fill:#ec4899,color:#fff,stroke:#be185d
 
     class Pages,Components,Hooks,Store,APIClient frontend
-    class AuthEP,SessionEP,ChatEP,ToolsEP,UploadEP,AdminEP,RateLimit,CORS,SecurityHeaders,JWTAuth,RBAC,ChatSvc,FileSvc,LLMSvc,StorageSvc,CryptoMgr,CitChecker,JournalFinder,RetractScan,AIDetector backend
+    class AuthEP,SessionEP,ChatEP,ToolsEP,UploadEP,AdminEP,RateLimit,CORS,SecurityHeaders,JWTAuth,RBAC,ChatSvc,FileSvc,LLMSvc,StorageSvc,CryptoMgr,CitChecker,JournalFinder,RetractScan,AIDetector,GrammarCheck,Tenacity,HeuristicEngine backend
     class SQLite database
     class Gemini,OpenAlex,Crossref,PubPeer,HuggingFace external
     class LocalFS,S3 storage
@@ -221,6 +231,7 @@ graph LR
 | **JournalFinder** | `tools/journal_finder.py` | SPECTER2 (768-dim) / SciBERT / TF-IDF | Recommend journals: encode abstract → cosine similarity với 35+ journal embeddings |
 | **RetractionScanner** | `tools/retraction_scan.py` | Crossref + OpenAlex + PubPeer | Scan DOIs: check retraction status, risk level, title-based detection, PubPeer comments |
 | **AIWritingDetector** | `tools/ai_writing_detector.py` | RoBERTa (`roberta-base-openai-detector`) | Detect AI text: ensemble 70% ML (RoBERTa) + 30% rule-based (7 features) |
+| **GrammarChecker** | `tools/grammar_checker.py` | LanguageTool (JVM server) | Offline grammar & spell checking: singleton JVM, lazy init, rule-based corrections |
 
 ### 2.5 Security & Middleware
 
@@ -328,12 +339,14 @@ graph TB
     P4_2["4.2<br/>Journal<br/>Recommendation"]
     P4_3["4.3<br/>Retraction<br/>Scanning"]
     P4_4["4.4<br/>AI Writing<br/>Detection"]
+    P4_5["4.5<br/>Grammar &<br/>Spell Check"]
 
     OpenAlex[("OpenAlex API")]
     Crossref[("Crossref API")]
     PubPeer[("PubPeer API")]
     SPECTER2[("SPECTER2 Model")]
     RoBERTa[("RoBERTa Model")]
+    LangTool[("LanguageTool<br/>JVM Server")]
 
     User -->|"text with citations"| P4_1
     P4_1 <-->|"DOI lookup"| OpenAlex
@@ -357,6 +370,11 @@ graph TB
     P4_4 <-->|"ML inference"| RoBERTa
     P4_4 -->|"detection result"| DS3
     P4_4 -->|"AI score + verdict"| User
+
+    User -->|"text to proofread"| P4_5
+    P4_5 <-->|"grammar rules"| LangTool
+    P4_5 -->|"grammar report"| DS3
+    P4_5 -->|"corrections + issues"| User
 ```
 
 ---
@@ -1893,6 +1911,100 @@ graph TB
     class Analyze,ChunkAPI detector
 ```
 
+#### 5.2.8 Component Diagram — Grammar & Spell Checker
+
+```mermaid
+graph TB
+    subgraph FRONTEND["⚛️ Frontend"]
+        ChatView["ChatView<br/>user types text"]
+        ModeSelect["ModeSelector<br/>mode: general_qa / manual"]
+        Store["ChatStore<br/>dispatch(SEND_MESSAGE)"]
+        RenderResult["ToolResultRenderer<br/>→ GrammarReportCard"]
+    end
+
+    subgraph API["🔌 API Layer"]
+        DirectEP["POST /tools/check-grammar<br/>(direct endpoint)"]
+        ChatEP["POST /chat/completions<br/>(FC auto-routing)"]
+        JWT["JWT Auth"]
+        RBAC["RBAC: tool:execute"]
+    end
+
+    subgraph CHAT_SVC["💬 ChatService"]
+        SaveUser["save_user_message()"]
+        FileCtx["Build file context<br/>(if PDF attached)"]
+        CallLLM["gemini_service.generate_response()"]
+        SaveAssist["save_assistant_message()<br/>type=GRAMMAR_REPORT"]
+    end
+
+    subgraph GEMINI["🤖 Gemini FC / Heuristic Fallback"]
+        GeminiFC["Gemini Function Calling"]
+        HeuristicFB["SemanticIntentRouter<br/>intent=GRAMMAR"]
+        FCDecision{"Gemini available?"}
+    end
+
+    subgraph GRAMMAR_TOOL["✍️ GrammarChecker (Singleton)"]
+        direction TB
+        EnsureTool["_ensure_tool()<br/>Double-checked locking"]
+        JVMStart["Start LanguageTool<br/>JVM Server (lazy)"]
+        RunCheck["tool.check(text)"]
+        CorrectText["utils.correct(text, matches)"]
+        BuildResult["Build result dict:<br/>total_errors, issues[], corrected_text"]
+    end
+
+    subgraph LANG_TOOL["☕ LanguageTool JVM"]
+        LTServer["Local language-tool-python<br/>server (en-US)"]
+        Rules["5000+ grammar rules<br/>(English)"]
+        SpellDict["Spell check dictionary"]
+    end
+
+    %% Frontend flow
+    ChatView --> ModeSelect --> Store
+    Store -->|"API call"| ChatEP
+    Store -->|"Direct"| DirectEP
+
+    %% API routing
+    DirectEP --> JWT --> RBAC
+    ChatEP --> JWT
+
+    %% Direct endpoint path
+    RBAC -->|"text"| GRAMMAR_TOOL
+
+    %% Chat path
+    JWT -->|"chat"| CHAT_SVC
+    SaveUser --> FileCtx --> CallLLM
+    CallLLM --> FCDecision
+    FCDecision -->|"Online"| GeminiFC
+    FCDecision -->|"Offline/Error"| HeuristicFB
+    GeminiFC -->|"check_grammar(text)"| GRAMMAR_TOOL
+    HeuristicFB -->|"check_grammar(text)"| GRAMMAR_TOOL
+    CallLLM --> SaveAssist
+
+    %% Grammar tool internals
+    EnsureTool --> JVMStart --> RunCheck
+    RunCheck --> CorrectText --> BuildResult
+    RunCheck --> LTServer
+    LTServer --> Rules
+    LTServer --> SpellDict
+
+    %% Response
+    BuildResult -->|"grammar_report"| RenderResult
+
+    %% Styles
+    classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef api fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef chatsvc fill:#14b8a6,color:#fff,stroke:#0d9488
+    classDef gemini fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef grammar fill:#10b981,color:#fff,stroke:#047857
+    classDef jvm fill:#ef4444,color:#fff,stroke:#dc2626
+
+    class ChatView,ModeSelect,Store,RenderResult frontend
+    class DirectEP,ChatEP,JWT,RBAC api
+    class SaveUser,FileCtx,CallLLM,SaveAssist chatsvc
+    class GeminiFC,HeuristicFB,FCDecision gemini
+    class EnsureTool,JVMStart,RunCheck,CorrectText,BuildResult grammar
+    class LTServer,Rules,SpellDict jvm
+```
+
 ---
 
 ## 6. Thiết kế Cơ sở dữ liệu (ERD)
@@ -2357,19 +2469,82 @@ Bạn là AIRA — trợ lý nghiên cứu học thuật chuyên nghiệp.
    - Citation → verify_citation
    - Journal matching → match_journal
    - AI detection → detect_ai_writing
+   - Kiểm tra ngữ pháp / chính tả / sửa lỗi văn bản → check_grammar
 3. Nếu không có tool phù hợp → ghi rõ "kiến thức chung, chưa xác minh"
 4. Kết quả tool = DỮ LIỆU THỰC — trình bày chính xác
 5. Trả lời tiếng Việt (trừ khi user viết tiếng Anh)
 6. Ngắn gọn, chính xác, học thuật
 ```
 
-#### 7.2.6 Cơ chế Fallback
+#### 7.2.6 Cơ chế Resilience & Fallback (3 tầng)
 
+AIRA triển khai kiến trúc **3 tầng chịu lỗi** để đảm bảo hệ thống không bao giờ trả lỗi trắng cho người dùng:
+
+```mermaid
+graph TB
+    A["User gửi message<br/>(generate_response)"] --> B["_generate_with_fc()"]
+
+    subgraph TIER1["Tầng 1: Tenacity Retry"]
+        B --> C["_call_generate_content()"]
+        C --> D{Gemini trả 503/429?}
+        D -->|"Có"| E["Retry (exp backoff)<br/>4s → 10s, tối đa 3 lần"]
+        E --> C
+        D -->|"Không"| F["Response OK"]
+    end
+
+    subgraph TIER2["Tầng 2: Heuristic Fallback Engine"]
+        direction TB
+        G["_try_heuristic_fallback()"] --> H["SemanticIntentRouter<br/>(all-MiniLM-L6-v2, 384-dim)"]
+        H --> I["3-layer intent detection"]
+        I --> I1["Layer 1: Smart Defaults<br/>DOI→Retraction, >350 chars→AI/Grammar"]
+        I --> I2["Layer 2: Semantic Routing<br/>cosine similarity ≥ 0.35"]
+        I --> I3["Layer 3: Keyword Fallback<br/>exact substring matching"]
+        I1 --> J["Intent detected?"]
+        I2 --> J
+        I3 --> J
+        J -->|"Có"| K["Direct Tool Execution<br/>(bypass Gemini entirely)"]
+        K --> L["Template Response Generator<br/>+ FunctionCallingResponse"]
+    end
+
+    subgraph TIER3["Tầng 3: Static Error Message"]
+        M["Thông báo lỗi thân thiện<br/>(KHÔNG crash, KHÔNG lộ stack trace)"]
+    end
+
+    F --> N{RetryError /<br/>SDK Exception?}
+    N -->|"Có"| G
+    N -->|"Không"| O["Return FC Response"]
+    J -->|"Không"| M
+    L --> O
+
+    style E fill:#f59e0b,stroke:#d97706,color:#fff
+    style K fill:#3b82f6,stroke:#2563eb,color:#fff
+    style M fill:#ef4444,stroke:#dc2626,color:#fff
+    style O fill:#10b981,stroke:#059669,color:#fff
+```
+
+**Chi tiết các tầng:**
+
+| Tầng | Component | File | Hành vi |
+|------|-----------|------|---------|
+| **Tầng 1** — Retry | `tenacity` decorator trên `_call_generate_content()` | `llm_service.py` | 3 lần retry, exponential backoff (4s→10s), chỉ retry `ServerError`/`APIError` |
+| **Tầng 2** — Heuristic | `_try_heuristic_fallback()` → `fallback_process_request()` | `heuristic_router.py` | Trích user_text + file_context từ Gemini contents → SemanticIntentRouter xác định intent → gọi trực tiếp tool Python → template response |
+| **Tầng 3** — Static | Hard-coded error message | `llm_service.py` | Luôn trả `FunctionCallingResponse` hợp lệ, KHÔNG raise exception |
+
+**SemanticIntentRouter — Intent Detection (5 intents):**
+
+| Intent | Mô tả | Threshold |
+|--------|-------|-----------|
+| `RETRACTION` | Kiểm tra thu hồi bài báo | Default khi có DOI |
+| `CITATION` | Xác minh trích dẫn/tài liệu tham khảo | ≥ 0.35 |
+| `JOURNAL` | Gợi ý tạp chí phù hợp | ≥ 0.35 |
+| `AI_DETECT` | Phát hiện văn bản AI | ≥ 0.35 (hoặc >350 chars) |
+| `GRAMMAR` | Kiểm tra ngữ pháp/chính tả | ≥ 0.35 (hoặc grammar hints) |
+
+**Cơ chế bổ sung:**
 - Nếu `GOOGLE_API_KEY` không set → log warning, disable Gemini, trả message mặc định
 - Nếu SDK `google-genai` không cài → disable Gemini
 - Nếu tool execution fail → trả `{"error": "..."}` → Gemini nhận lỗi, thông báo cho user
 - Nếu FC loop vượt 5 iterations → trả budget-exceeded message
-- Nếu API call thất bại (network, quota) → trả message lỗi thân thiện, KHÔNG crash
 - `summarize_text()` sử dụng `generate_simple()` (không có tools) với fallback cắt text
 
 #### 7.2.7 FunctionCallingResponse Dataclass
@@ -3100,6 +3275,7 @@ graph LR
 | POST | `/api/v1/tools/summarize-pdf` | ✅ JWT | Tóm tắt PDF |
 | POST | `/api/v1/tools/detect-ai-writing` | ✅ JWT | Phát hiện văn bản AI |
 | POST | `/api/v1/tools/ai-detect` | ✅ JWT | Alias detect-ai-writing |
+| POST | `/api/v1/tools/check-grammar` | ✅ JWT | Kiểm tra ngữ pháp & chính tả (LanguageTool) |
 | POST | `/api/v1/upload` | ✅ JWT | Upload file |
 | GET | `/api/v1/upload/{file_id}` | ✅ JWT | Download file |
 | GET | `/api/v1/upload/list_files` | ✅ JWT | Liệt kê files (pagination) |

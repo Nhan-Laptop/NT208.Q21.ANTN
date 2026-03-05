@@ -2,7 +2,7 @@
 
 > **Project**: AIRA — Academic Integrity & Research Assistant  
 > **Version**: 1.0.0  
-> **Last Updated**: 2026-03-04  
+> **Last Updated**: 2026-06-06  
 > **Stack**: Next.js 15 (App Router) · React 18 · TypeScript · Tailwind CSS v4 · TanStack React Query
 
 ---
@@ -45,6 +45,9 @@
 12. [Next.js Configuration](#12-nextjs-configuration)
     - 12.1 [API Proxy Rewrites](#121-api-proxy-rewrites)
     - 12.2 [Hydration Safety](#122-hydration-safety)
+13. [Admin Dashboard](#13-admin-dashboard)
+    - 13.1 [Route Protection](#131-route-protection)
+    - 13.2 [Dashboard Page Architecture](#132-dashboard-page-architecture)
 
 ---
 
@@ -523,6 +526,7 @@ graph TB
         CheckRR{{"retraction_report?"}}
         CheckAI{{"ai_writing_detection?"}}
         CheckPDF{{"pdf_summary?"}}
+        CheckGR{{"grammar_report?"}}
         Fallback["&lt;pre&gt; JSON.stringify &lt;/pre&gt;"]
 
         Input --> ExtractType
@@ -532,7 +536,8 @@ graph TB
         CheckCR -->|"No"| CheckRR
         CheckRR -->|"No"| CheckAI
         CheckAI -->|"No"| CheckPDF
-        CheckPDF -->|"No"| Fallback
+        CheckPDF -->|"No"| CheckGR
+        CheckGR -->|"No"| Fallback
     end
 
     subgraph CARDS["🃏 Specialized Cards"]
@@ -543,6 +548,7 @@ graph TB
         RC["⚠️ RetractionReportCard<br/>Risk level colors:<br/>CRITICAL/HIGH → red<br/>MEDIUM → amber<br/>LOW/NONE → green"]
         AC["🧠 AIDetectionCard<br/>Score bar (0–100%),<br/>verdict badge, ML/Rule breakdown,<br/>flag chips"]
         PC["📄 PdfSummaryCard<br/>Summary text block"]
+        GC["✍️ GrammarReportCard<br/>Error count, issue list,<br/>corrected text, rule categories"]
     end
 
     CheckFU -->|"Yes"| FC
@@ -551,14 +557,15 @@ graph TB
     CheckRR -->|"Yes"| RC
     CheckAI -->|"Yes"| AC
     CheckPDF -->|"Yes"| PC
+    CheckGR -->|"Yes"| GC
 
     %% Styles
     classDef dispatch fill:#f59e0b,color:#fff,stroke:#d97706
     classDef card fill:#10b981,color:#fff,stroke:#059669
     classDef fallback fill:#6b7280,color:#fff,stroke:#4b5563
 
-    class Input,ExtractType,CheckFU,CheckJL,CheckCR,CheckRR,CheckAI,CheckPDF dispatch
-    class FC,JC,CC,RC,AC,PC card
+    class Input,ExtractType,CheckFU,CheckJL,CheckCR,CheckRR,CheckAI,CheckPDF,CheckGR dispatch
+    class FC,JC,CC,RC,AC,PC,GC card
     class Fallback fallback
 ```
 
@@ -1023,4 +1030,107 @@ async rewrites() {
 
 ---
 
-> **Document generated from codebase analysis** — reflects the state of the frontend application as of 2026-03-04.
+## 13. Admin Dashboard
+
+### 13.1 Route Protection
+
+**Files**: `app/admin/layout.tsx`, `components/auth-guard.tsx`
+
+The admin area uses a dedicated layout wrapper that enforces admin-only access:
+
+```tsx
+// app/admin/layout.tsx
+export default function AdminLayout({ children }) {
+  return <AuthGuard requireAdmin>{children}</AuthGuard>;
+}
+```
+
+`AuthGuard` with `requireAdmin=true` performs a **3-state check**:
+
+| State | Behavior |
+|-------|----------|
+| `loading` | Full-screen `Loader2` spinner |
+| `!token` | Redirect → `/login` |
+| `user.role !== 'admin'` | Redirect → `/chat` (non-admin cannot even see the page) |
+| Valid admin | Render `children` |
+
+**Self-protection**: The admin dashboard prevents administrators from toggling their own role or deleting their own account (checked via `currentUserId` comparison).
+
+### 13.2 Dashboard Page Architecture
+
+**File**: `app/admin/page.tsx` (~496 LOC)
+
+```mermaid
+graph TB
+    subgraph ENTRY["🔐 Admin Entry"]
+        SidebarBtn["Sidebar → Settings icon<br/>(visible only if role=admin)"]
+        Guard["AuthGuard<br/>requireAdmin=true"]
+    end
+
+    subgraph DASHBOARD["📊 Admin Dashboard"]
+        direction TB
+        Header["Header<br/>← Back to Chat | AIRA Admin | Theme Toggle"]
+
+        subgraph STATS["📈 StatCard Grid (4 cards)"]
+            S1["👥 Total Users"]
+            S2["💬 Total Sessions"]
+            S3["📄 Total Files"]
+            S4["💾 Storage Used"]
+        end
+
+        subgraph TABS["🗂️ Tab Navigation"]
+            T1["Users Tab<br/>(default)"]
+            T2["Files Tab"]
+        end
+
+        subgraph USERS_TAB["👥 Users Table"]
+            Search["Search input<br/>(email filter)"]
+            Table["UserRow × N<br/>email, role, created_at,<br/>sessions, messages"]
+            Actions["Toggle Role ↕<br/>Delete User 🗑️"]
+        end
+
+        subgraph FILES_TAB["📄 Files Table"]
+            FileList["FileRow × N<br/>filename, size, owner,<br/>encrypted badge, created_at"]
+            FileActions["Delete File 🗑️"]
+        end
+    end
+
+    subgraph DATA["📡 Data Layer"]
+        RQ1["useQuery('admin-overview')<br/>→ GET /admin/overview"]
+        RQ2["useQuery('admin-users')<br/>→ GET /admin/users"]
+        MUT1["useMutation<br/>→ POST /auth/promote"]
+        MUT2["useMutation<br/>→ DELETE /admin/users/:id"]
+    end
+
+    SidebarBtn --> Guard --> Header
+    Header --> STATS --> TABS
+    T1 --> USERS_TAB
+    T2 --> FILES_TAB
+    Search --> Table --> Actions
+    RQ1 --> STATS
+    RQ2 --> Table
+    MUT1 --> Actions
+    MUT2 --> Actions
+
+    classDef entry fill:#f59e0b,color:#fff,stroke:#d97706
+    classDef dashboard fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef data fill:#10b981,color:#fff,stroke:#059669
+
+    class SidebarBtn,Guard entry
+    class Header,S1,S2,S3,S4,T1,T2,Search,Table,Actions,FileList,FileActions dashboard
+    class RQ1,RQ2,MUT1,MUT2 data
+```
+
+**Key components:**
+
+| Component | Purpose | Props |
+|-----------|---------|-------|
+| `StatCard` | Displays metric with icon and subtitle | `label`, `value`, `sub`, `icon`, `color` |
+| `RoleBadge` | Amber (Admin) or blue (Researcher) pill | `role: UserRole` |
+| `UserRow` | Table row with role toggle + delete actions | `user`, `currentUserId`, `onToggleRole`, `isPending` |
+
+**Data fetching**: Uses TanStack React Query with `refetchOnWindowFocus: false`. Mutations call `queryClient.invalidateQueries()` to refresh the overview and user list after role changes or deletions.
+
+---
+
+> **Document generated from codebase analysis** — reflects the state of the frontend application as of 2026-06-06.

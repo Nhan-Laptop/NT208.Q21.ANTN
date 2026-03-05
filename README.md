@@ -66,6 +66,7 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 | 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by semantic similarity, impact factor, and domain match | SPECTER2 / SciBERT |
 | 🔍 **Retraction Scanning** | Check DOIs against retraction databases → multi-source risk assessment (NONE → CRITICAL) | Crossref + OpenAlex + PubPeer |
 | 🤖 **AI Writing Detection** | Ensemble analysis: 70% RoBERTa ML classifier + 30% rule-based heuristics (7 linguistic features) → 5-level verdict scale | RoBERTa + Custom Rules |
+| ✍️ **Grammar & Spell Check** | Offline grammar/spelling analysis powered by LanguageTool JVM server — detects errors, suggests fixes, returns corrected text | LanguageTool |
 | 📄 **PDF Summarization** | Upload PDF → automatic text extraction → AI-powered summary generation | PyMuPDF + Gemini |
 | 🔐 **End-to-End Encryption** | 5-layer security: HTTPS → JWT (HS256) → DB encryption (AES-256-GCM) → File encryption → Optional client-side payload encryption | PyCryptodome |
 | 🌙 **Dark Mode** | System preference detection + manual toggle, powered by Tailwind CSS v4 design tokens | Tailwind v4 |
@@ -99,7 +100,11 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 │  │  Services: ChatService │ FileService │ GeminiService     │     │
 │  ├─────────────────────────────────────────────────────────┤     │
 │  │  ML Tools: JournalFinder │ CitationChecker │             │     │
-│  │            RetractionScanner │ AIWritingDetector          │     │
+│  │            RetractionScanner │ AIWritingDetector │        │     │
+│  │            GrammarChecker (LanguageTool JVM)              │     │
+│  ├─────────────────────────────────────────────────────────┤     │
+│  │  Resiliency: Tenacity retry (3×) → Heuristic Fallback   │     │
+│  │              SemanticIntentRouter (all-MiniLM-L6-v2)     │     │
 │  ├─────────────────────────────────────────────────────────┤     │
 │  │  Storage: S3 / Local (Strategy Pattern) + AES-256-GCM   │     │
 │  ├─────────────────────────────────────────────────────────┤     │
@@ -130,7 +135,8 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 | **SQLAlchemy** | ≥2.0.30 | ORM with transparent encryption (custom TypeDecorators) |
 | **Pydantic** | v2 | Request/response validation, settings management |
 | **Google GenAI SDK** | ≥1.0.0 | Gemini LLM integration (chat + summarization + function calling) |
-| **Sentence-Transformers** | ≥2.2.0 | SPECTER2 / SciBERT embedding models |
+| **Tenacity** | ≥8.2.0 | Retry with exponential backoff for Gemini 503/429 errors |
+| **Sentence-Transformers** | ≥2.2.0 | SPECTER2 / SciBERT embedding models + intent routing (all-MiniLM-L6-v2) |
 | **Transformers + PyTorch** | ≥4.35 / ≥2.0 | RoBERTa AI writing detection pipeline |
 | **PyAlex** | ≥0.13 | OpenAlex API wrapper (citation verification) |
 | **Habanero** | ≥1.2.0 | Crossref API wrapper (DOI verification, retraction scan) |
@@ -141,6 +147,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 | **boto3** | ≥1.34 | AWS S3 storage backend (optional) |
 | **httpx** | ≥0.27 | Async HTTP client with retry transport |
 | **scikit-learn** | ≥1.3 | TF-IDF fallback for journal matching |
+| **language_tool_python** | ≥2.8 | LanguageTool JVM wrapper for offline grammar/spell checking |
 
 ### Frontend
 
@@ -172,6 +179,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 - **Node.js** 18+ (20 LTS recommended)
 - **npm** 9+ or **pnpm**
 - **Git**
+- *(Optional)* **Java 17+** for Grammar Checker (LanguageTool JVM) — `sudo apt install openjdk-17-jre-headless`
 - *(Optional)* A [Google AI Studio API Key](https://aistudio.google.com/apikey) for Gemini LLM features
 - *(Optional)* A [Hugging Face Token](https://huggingface.co/settings/tokens) for authenticated model downloads
 
@@ -408,14 +416,14 @@ NT208.Q21.ANTN/
 
 ## 🔌 API Endpoints
 
-**34 endpoints** across 6 modules under `/api/v1`:
+**35 endpoints** across 6 modules under `/api/v1`:
 
 | Module | Endpoints | Key Routes |
 |--------|-----------|------------|
 | **Auth** | 4 | `POST /register`, `POST /login`, `GET /me`, `POST /admin/promote` |
 | **Sessions** | 6 | `POST/GET/PATCH/DELETE /sessions`, `GET /sessions/{id}/messages` |
 | **Chat** | 3 | `POST /chat/{session_id}`, `POST /chat/completions`, `POST /chat/completions/encrypted` |
-| **Tools** | 6 | `POST /tools/verify-citation`, `/journal-match`, `/retraction-scan`, `/detect-ai-writing`, `/ai-detect`, `/summarize-pdf` |
+| **Tools** | 7 | `POST /tools/verify-citation`, `/journal-match`, `/retraction-scan`, `/detect-ai-writing`, `/ai-detect`, `/check-grammar`, `/summarize-pdf` |
 | **Upload** | 8 | `POST/GET/DELETE /upload`, `GET /upload/stats/*`, presigned URL support |
 | **Admin** | 7 | `GET /admin/overview`, `/users`, `/files`, `/storage`, `DELETE /admin/files/{id}` |
 
@@ -432,16 +440,25 @@ NT208.Q21.ANTN/
 | **SPECTER2** (`allenai/specter2_base`) | 110M | Scientific paper embeddings (768-dim) for journal matching | ~3.9s (first load) |
 | **SciBERT** (`allenai/scibert_scivocab_uncased`) | 110M | Fallback embeddings with science-optimized vocabulary | ~3s |
 | **RoBERTa** (`roberta-base-openai-detector`) | 125M | Binary classifier: Human vs AI-generated text | ~4.8s (first load) |
-| **all-MiniLM-L6-v2** | 22M | Ultimate fallback: general-purpose sentence embeddings | ~1s |
+| **all-MiniLM-L6-v2** | 22M | Semantic intent routing (384-dim embeddings for heuristic fallback engine) | ~1s |
 
 ### Fallback Chain (Graceful Degradation)
 
 ```
 Journal Matching:  SPECTER2 → SciBERT → MiniLM-L6-v2 → TF-IDF (no ML)
 AI Detection:      RoBERTa ensemble (70/30) → Rule-based only (no ML)
+Grammar Check:     LanguageTool JVM → Error response (Java <17)
 ```
 
-All ML models load with `local_files_only=True` retry — if network is unavailable, cached models are used automatically.
+**3-Tier Resiliency** (when Gemini is unavailable):
+```
+Tier 1: Tenacity retry (3× exponential backoff: 4s → 10s)
+Tier 2: Heuristic Fallback Engine
+        → SemanticIntentRouter (all-MiniLM-L6-v2, cosine ≥ 0.35)
+        → Direct tool execution (bypass Gemini entirely)
+        → Template response generation
+Tier 3: Static error message (never crashes)
+```
 
 ### AI Writing Detection — Ensemble Method
 
@@ -515,6 +532,9 @@ python security/pentest/quick_audit.py --base-url http://localhost:8000
 - [x] Dark/Light mode with system preference
 - [x] Security hardening (38 audit issues → 28+ fixed)
 - [x] Gemini Function Calling integration
+- [x] Grammar & Spell Checker (LanguageTool JVM, offline)
+- [x] Semantic intent routing (all-MiniLM-L6-v2 heuristic fallback engine)
+- [x] 3-tier resiliency architecture (tenacity retry → heuristic fallback → static error)
 
 ### 🔴 High Priority
 
@@ -546,5 +566,5 @@ This project was developed as part of the **NT208 — Web Application Developmen
 ---
 
 <p align="center">
-  Made with ❤️ by the AIRA Team
+  From MIXI with ❤️ by the AIRA Team
 </p>
