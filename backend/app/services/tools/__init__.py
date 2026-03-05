@@ -15,6 +15,7 @@ from app.services.tools.ai_writing_detector import AIWritingDetector, ai_writing
 from app.services.tools.citation_checker import CitationChecker, citation_checker
 from app.services.tools.journal_finder import JournalFinder, journal_finder
 from app.services.tools.retraction_scan import RetractionScanner, retraction_scanner
+from app.services.tools.grammar_checker import GrammarChecker, grammar_checker
 
 __all__ = [
     "AIWritingDetector",
@@ -25,4 +26,6 @@ __all__ = [
     "journal_finder",
     "RetractionScanner",
     "retraction_scanner",
+    "GrammarChecker",
+    "grammar_checker",
 ]

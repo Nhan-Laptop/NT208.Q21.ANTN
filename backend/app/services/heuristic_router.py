@@ -102,6 +102,7 @@ class _Intent:
     CITATION = "citation"
     JOURNAL = "journal"
     AI_DETECT = "ai_detect"
+    GRAMMAR = "grammar"
 
 
 _INTENT_KEYWORDS: dict[str, list[str]] = {
@@ -120,6 +121,11 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
     _Intent.AI_DETECT: [
         "ai viết", "ai writing", "phát hiện ai", "detect ai",
         "ai detection", "chatgpt", "gpt viết", "máy viết",
+    ],
+    _Intent.GRAMMAR: [
+        "ngữ pháp", "chính tả", "grammar", "spelling", "typo",
+        "sửa lỗi", "lỗi chữ", "spell check", "proofread",
+        "kiểm tra lỗi", "chỉnh sửa văn bản",
     ],
 }
 
@@ -230,6 +236,35 @@ def _template_ai_detect(results: dict) -> str:
     return "\n".join(lines)
 
 
+def _template_grammar(results: dict) -> str:
+    """Generate fallback text for grammar checking results."""
+    total = results.get("total_errors", 0)
+    error_msg = results.get("error")
+    if error_msg:
+        return (
+            "✍️ **(Chế độ dự phòng — Gemini offline)**\n"
+            f"⚠️ Không thể khởi động LanguageTool: {error_msg}"
+        )
+    lines = [
+        "✍️ **(Chế độ dự phòng — Gemini offline)**",
+        f"Đã kiểm tra đoạn văn. Phát hiện **{total}** lỗi.",
+    ]
+    if total == 0:
+        lines.append("✅ Không phát hiện lỗi ngữ pháp hay chính tả.")
+    else:
+        # Show first 5 issues inline
+        for i, issue in enumerate(results.get("issues", [])[:5], 1):
+            msg = issue.get("message", "")
+            replacements = issue.get("replacements", [])
+            fix = f" → {replacements[0]}" if replacements else ""
+            lines.append(f"  {i}. {msg}{fix}")
+        remaining = total - 5
+        if remaining > 0:
+            lines.append(f"  … và {remaining} lỗi khác.")
+        lines.append("\nVui lòng xem văn bản đã sửa bên dưới.")
+    return "\n".join(lines)
+
+
 # =========================================================================
 # Public API
 # =========================================================================
@@ -266,6 +301,7 @@ def fallback_process_request(
         verify_citation,
         match_journal,
         detect_ai_writing,
+        check_grammar,
         _make_serializable,
     )
 
@@ -302,6 +338,17 @@ def fallback_process_request(
             tool_name = "detect_ai_writing"
             raw = detect_ai_writing(text=input_text)
             text = _template_ai_detect(raw)
+
+        elif intent == _Intent.GRAMMAR:
+            input_text = (file_context or user_text or "")[:10000]
+            if len(input_text.strip()) < 10:
+                logger.warning("Fallback Grammar: text too short (%d chars).", len(input_text.strip()))
+                return None
+            logger.info("Fallback executing Grammar Checker (%d chars)...", len(input_text))
+            tool_name = "check_grammar"
+            raw = check_grammar(text=input_text)
+            raw = _make_serializable(raw)
+            text = _template_grammar(raw)
 
         else:
             return None

@@ -47,6 +47,7 @@ from app.services.tools.retraction_scan import retraction_scanner
 from app.services.tools.citation_checker import citation_checker
 from app.services.tools.journal_finder import journal_finder
 from app.services.tools.ai_writing_detector import ai_writing_detector
+from app.services.tools.grammar_checker import grammar_checker
 
 # # =========================================================================
 # # Vietnamese System Prompt — anti-hallucination + tool-use enforcement
@@ -108,6 +109,7 @@ SYSTEM_PROMPT = (
     "     - Xác minh trích dẫn → Truyền toàn bộ text phần References vào `verify_citation`.\n"
     "     - Tìm tạp chí → Truyền text phần Abstract vào `match_journal`.\n"
     "     - Kiểm tra AI viết → Truyền text nội dung vào `detect_ai_writing`.\n"
+    "     - Kiểm tra ngữ pháp / chính tả / sửa lỗi văn bản → dùng `check_grammar`.\n"
     "  3. **Truyền dữ liệu thô:** Truyền nguyên văn text trích xuất vào tool, KHÔNG tóm tắt trước.\n"
     "  4. **Ngoại lệ:** Chỉ yêu cầu người dùng cung cấp thêm thông tin BẰNG LỜI nếu file hỏng hoặc hoàn toàn không có DOI/References.\n\n"
 
@@ -265,6 +267,31 @@ def detect_ai_writing(text: str) -> dict:
         return {"error": str(exc), "score": 0.5, "verdict": "ERROR"}
 
 
+def check_grammar(text: str) -> dict:
+    """Check text for grammar and spelling errors using LanguageTool.
+
+    Use this tool when the user asks about:
+    - Grammar checking or proofreading
+    - Spelling mistakes or typos
+    - Text correction or editing suggestions
+    - Improving writing quality
+
+    Args:
+        text: The text to check for grammar and spelling errors
+              (any length).
+
+    Returns:
+        A dict with total_errors count, a list of issues (each with
+        rule_id, message, offset, length, replacements), and the
+        corrected_text.
+    """
+    try:
+        return _make_serializable(grammar_checker.check_grammar(text))
+    except Exception as exc:
+        logger.error("check_grammar failed: %s", exc, exc_info=True)
+        return {"error": str(exc), "total_errors": -1, "issues": [], "corrected_text": text}
+
+
 # ---- registries ---------------------------------------------------------
 
 _TOOL_FUNCTIONS: dict[str, Any] = {
@@ -272,6 +299,7 @@ _TOOL_FUNCTIONS: dict[str, Any] = {
     "verify_citation": verify_citation,
     "match_journal": match_journal,
     "detect_ai_writing": detect_ai_writing,
+    "check_grammar": check_grammar,
 }
 
 _TOOL_CALLABLES: list = [
@@ -279,6 +307,7 @@ _TOOL_CALLABLES: list = [
     verify_citation,
     match_journal,
     detect_ai_writing,
+    check_grammar,
 ]
 
 _TOOL_MESSAGE_TYPE: dict[str, MessageType] = {
@@ -286,6 +315,7 @@ _TOOL_MESSAGE_TYPE: dict[str, MessageType] = {
     "verify_citation": MessageType.CITATION_REPORT,
     "match_journal": MessageType.JOURNAL_LIST,
     "detect_ai_writing": MessageType.AI_WRITING_DETECTION,
+    "check_grammar": MessageType.GRAMMAR_REPORT,
 }
 
 # Map tool name → key used inside tool_results["data"]
@@ -294,6 +324,7 @@ _TOOL_DATA_KEY: dict[str, str] = {
     "verify_citation": "results",
     "match_journal": "journals",
     "detect_ai_writing": "",  # entire dict *is* the data
+    "check_grammar": "",  # entire dict *is* the data
 }
 
 _MAX_FC_ITERATIONS = 5
@@ -435,7 +466,7 @@ class GeminiService:
                 message_type=result["message_type"],
                 tool_results=result.get("tool_results"),
             )
-        except Exception as exc:
+        except Exception as exc:    
             logger.exception("CRITICAL: _try_heuristic_fallback crashed: %s", exc)
             return None
 

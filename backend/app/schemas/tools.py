@@ -109,3 +109,32 @@ class AIWritingDetectResponse(BaseModel):
     type: str = "ai_writing_detection"
     data: AIWritingDetectResult
     text: str
+
+
+# Grammar Checking
+class GrammarCheckRequest(BaseModel):
+    session_id: str
+    text: str = Field(min_length=1)
+
+
+class GrammarIssue(BaseModel):
+    rule_id: str
+    message: str
+    offset: int
+    length: int
+    replacements: list[str] = []
+    category: str | None = None
+    context: str | None = None
+
+
+class GrammarCheckResult(BaseModel):
+    total_errors: int
+    issues: list[GrammarIssue] = []
+    corrected_text: str
+    error: str | None = None
+
+
+class GrammarCheckResponse(BaseModel):
+    type: str = "grammar_report"
+    data: GrammarCheckResult
+    text: str

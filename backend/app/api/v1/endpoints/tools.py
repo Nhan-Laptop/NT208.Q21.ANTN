@@ -14,6 +14,10 @@ from app.schemas.tools import (
     AIWritingDetectResult,
     CitationItem,
     CitationReportResponse,
+    GrammarCheckRequest,
+    GrammarCheckResponse,
+    GrammarCheckResult,
+    GrammarIssue,
     JournalItem,
     JournalMatchRequest,
     JournalMatchResponse,
@@ -28,6 +32,7 @@ from app.services.chat_service import chat_service
 from app.services.file_service import file_service
 from app.services.llm_service import gemini_service
 from app.services.tools.ai_writing_detector import ai_writing_detector
+from app.services.tools.grammar_checker import grammar_checker
 from app.services.tools.citation_checker import citation_checker
 from app.services.tools.journal_finder import journal_finder
 from app.services.tools.retraction_scan import retraction_scanner
@@ -217,3 +222,39 @@ def detect_ai_writing_alias(
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
 ) -> AIWritingDetectResponse:
     return detect_ai_writing(payload=payload, db=db, current_user=current_user)
+
+
+@router.post("/check-grammar", response_model=GrammarCheckResponse)
+def check_grammar(
+    payload: GrammarCheckRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
+) -> GrammarCheckResponse:
+    """Check text for grammar and spelling errors using LanguageTool."""
+    raw = grammar_checker.check_grammar(payload.text)
+
+    total = raw.get("total_errors", 0)
+    if total == 0:
+        summary = "✅ Không phát hiện lỗi ngữ pháp hay chính tả."
+    else:
+        summary = f"✍️ Phát hiện {total} lỗi ngữ pháp/chính tả. Văn bản đã được sửa tự động."
+
+    issues = [GrammarIssue(**i) for i in raw.get("issues", [])]
+    data = GrammarCheckResult(
+        total_errors=raw.get("total_errors", 0),
+        issues=issues,
+        corrected_text=raw.get("corrected_text", payload.text),
+        error=raw.get("error"),
+    )
+
+    chat_service.persist_tool_interaction(
+        db=db,
+        current_user=current_user,
+        session_id=payload.session_id,
+        user_input=payload.text[:500] + ("..." if len(payload.text) > 500 else ""),
+        message_type=MessageType.GRAMMAR_REPORT,
+        summary=summary,
+        tool_payload={"type": "grammar_report", "data": data.model_dump()},
+    )
+
+    return GrammarCheckResponse(data=data, text=summary)

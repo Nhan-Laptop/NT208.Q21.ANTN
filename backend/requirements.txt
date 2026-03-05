@@ -37,3 +37,6 @@ huggingface-hub>=0.20.0  # Model downloads + authentication
 # API Wrappers - Citation & Retraction Checking
 pyalex>=0.13  # OpenAlex API wrapper
 habanero>=1.2.0  # Crossref API wrapper
+
+# Grammar & Spell Checking (runs a local LanguageTool JVM server)
+language_tool_python>=2.8

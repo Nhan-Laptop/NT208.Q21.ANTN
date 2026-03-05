@@ -25,6 +25,7 @@ class MessageType(str, Enum):
     FILE_UPLOAD = "file_upload"
     PDF_SUMMARY = "pdf_summary"
     AI_WRITING_DETECTION = "ai_writing_detection"
+    GRAMMAR_REPORT = "grammar_report"
 
 
 class ChatMessage(Base):
