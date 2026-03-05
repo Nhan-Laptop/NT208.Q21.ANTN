@@ -11,8 +11,14 @@ import {
   HelpCircle,
   ShieldCheck,
   Brain,
+  SpellCheck,
+  Copy,
+  Check,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import clsx from "clsx";
+import { useState, useCallback } from "react";
 
 /* ====================================================================
  * Shared helpers
@@ -420,6 +426,171 @@ export function AIDetectionCard({ data }: { data: AIDetectionData }) {
 }
 
 /* ====================================================================
+ * GrammarReportCard — for grammar_report results
+ * ==================================================================== */
+
+interface GrammarIssue {
+  rule_id?: string;
+  message?: string;
+  offset?: number;
+  length?: number;
+  replacements?: string[];
+  category?: string;
+  context?: string;
+}
+
+interface GrammarReportData {
+  total_errors?: number;
+  issues?: GrammarIssue[];
+  corrected_text?: string;
+  error?: string;
+}
+
+export function GrammarReportCard({ data }: { data: GrammarReportData }) {
+  const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const total = data.total_errors ?? 0;
+  const issues = data.issues ?? [];
+  const corrected = data.corrected_text ?? "";
+  const errorMsg = data.error;
+  const VISIBLE_COUNT = 5;
+  const hasMore = issues.length > VISIBLE_COUNT;
+  const visibleIssues = expanded ? issues : issues.slice(0, VISIBLE_COUNT);
+
+  const handleCopy = useCallback(async () => {
+    if (!corrected) return;
+    try {
+      await navigator.clipboard.writeText(corrected);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard API may be blocked */
+    }
+  }, [corrected]);
+
+  // Error state (LanguageTool unavailable)
+  if (errorMsg) {
+    return (
+      <div className="mt-3 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-900/10 p-4">
+        <div className="flex items-center gap-1.5 mb-1">
+          <SpellCheck size={14} className="text-amber-600 dark:text-amber-400" />
+          <span className="text-xs font-semibold text-text-primary dark:text-dark-text-primary">
+            Grammar & Spelling Report
+          </span>
+        </div>
+        <p className="text-xs text-amber-700 dark:text-amber-400">
+          ⚠️ LanguageTool unavailable: {errorMsg}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-xl border border-border dark:border-dark-border bg-surface dark:bg-dark-surface p-4">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-1.5">
+          <SpellCheck size={14} className="text-accent dark:text-dark-accent" />
+          <span className="text-xs font-semibold text-text-primary dark:text-dark-text-primary">
+            Grammar & Spelling Report
+          </span>
+        </div>
+        {/* Status badge */}
+        {total === 0 ? (
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400">
+            <CheckCircle2 size={10} />
+            Perfect — 0 errors
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400">
+            <AlertTriangle size={10} />
+            {total} error{total > 1 ? "s" : ""} found
+          </span>
+        )}
+      </div>
+
+      {/* Issues list */}
+      {visibleIssues.length > 0 && (
+        <div className="space-y-1.5 mb-3">
+          {visibleIssues.map((issue, i) => (
+            <div
+              key={i}
+              className="flex items-start gap-2 rounded-lg bg-bg-secondary dark:bg-dark-bg-secondary px-3 py-2"
+            >
+              <span className="text-[10px] font-bold text-text-tertiary dark:text-dark-text-tertiary mt-0.5 shrink-0">
+                {i + 1}.
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-text-primary dark:text-dark-text-primary leading-relaxed">
+                  {issue.message || "Unknown issue"}
+                </p>
+                <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                  {issue.replacements && issue.replacements.length > 0 && (
+                    <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-accent/10 text-accent dark:bg-dark-accent/15 dark:text-dark-accent">
+                      → {issue.replacements[0]}
+                    </span>
+                  )}
+                  {issue.category && (
+                    <span className="text-[10px] text-text-tertiary dark:text-dark-text-tertiary">
+                      [{issue.category}]
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+          {/* Expand / collapse toggle */}
+          {hasMore && (
+            <button
+              onClick={() => setExpanded((v) => !v)}
+              className="flex items-center gap-1 text-[11px] font-medium text-accent dark:text-dark-accent hover:underline mt-1 ml-1"
+            >
+              {expanded ? (
+                <>
+                  <ChevronUp size={12} /> Show fewer
+                </>
+              ) : (
+                <>
+                  <ChevronDown size={12} /> …and {issues.length - VISIBLE_COUNT} more
+                </>
+              )}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Corrected text */}
+      {corrected && (
+        <div className="rounded-lg border border-emerald-200 dark:border-emerald-800/50 bg-emerald-50/40 dark:bg-emerald-900/10 p-3">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+              Corrected text
+            </span>
+            <button
+              onClick={handleCopy}
+              className={clsx(
+                "inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md transition-colors",
+                copied
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  : "bg-white dark:bg-dark-surface text-text-secondary dark:text-dark-text-secondary hover:text-accent dark:hover:text-dark-accent border border-border dark:border-dark-border",
+              )}
+              title="Copy corrected text"
+            >
+              {copied ? <Check size={10} /> : <Copy size={10} />}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p className="text-xs leading-relaxed text-text-primary dark:text-dark-text-primary whitespace-pre-wrap">
+            {corrected}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ====================================================================
  * PdfSummaryCard — for pdf_summary results
  * ==================================================================== */
 
@@ -494,6 +665,12 @@ export function ToolResultsRenderer({
     // data could be the detection result directly or nested under .data
     const detection = (rows ?? toolResults) as AIDetectionData | undefined;
     if (detection) return <AIDetectionCard data={detection} />;
+  }
+
+  // --- Grammar report ---
+  if (messageType === "grammar_report" || type === "grammar_report") {
+    const grammar = (rows ?? toolResults) as GrammarReportData | undefined;
+    if (grammar) return <GrammarReportCard data={grammar} />;
   }
 
   // --- PDF summary (usually just content text, but handle if in tool_results) ---
