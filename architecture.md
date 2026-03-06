@@ -61,17 +61,23 @@ graph TB
         subgraph SERVICE_LAYER["Service Layer"]
             ChatSvc["ChatService"]
             FileSvc["FileService"]
-            LLMSvc["LLM Service<br/>(GeminiService)"]
+            LLMSvc["LLM Service<br/>(GroqLLMService — LLaMA 3.1)"]
             StorageSvc["StorageService"]
             CryptoMgr["CryptoManager<br/>(AES-256-GCM)"]
         end
 
         subgraph TOOL_LAYER["ML Tool Services"]
             CitChecker["CitationChecker<br/>(PyAlex + Habanero + httpx)"]
-            JournalFinder["JournalFinder<br/>(SPECTER2 + TF-IDF)"]
+            JournalFinder["JournalFinder<br/>(ChromaDB + SentenceTransformer)"]
             RetractScan["RetractionScanner<br/>(Crossref + OpenAlex + PubPeer)"]
             AIDetector["AIWritingDetector<br/>(RoBERTa ensemble)"]
             GrammarCheck["GrammarChecker<br/>(LanguageTool JVM)"]
+        end
+
+        subgraph DATA_PIPELINE["Data Engineering Pipeline"]
+            Crawler["UniversalScraper<br/>(cloudscraper + sources.json)"]
+            DbBuilder["DbBuilder<br/>(SentenceTransformer → ChromaDB)"]
+            ChromaDB["ChromaDB<br/>(Persistent Vector Store)"]
         end
 
         subgraph FALLBACK_LAYER["Resiliency Layer"]
@@ -90,11 +96,12 @@ graph TB
     end
 
     subgraph EXTERNAL["🌐 External Services"]
-        Gemini["Google Gemini API<br/>(google-genai SDK)"]
+        GroqAPI["Groq API — LLaMA 3.1<br/>(groq SDK, LPU inference)"]
         OpenAlex["OpenAlex API<br/>(Academic metadata)"]
         Crossref["Crossref API<br/>(DOI resolution)"]
         PubPeer["PubPeer API<br/>(Post-pub review)"]
         HuggingFace["HuggingFace Hub<br/>(ML model hosting)"]
+        Publishers["Publisher Sites<br/>(Elsevier, MDPI, IEEE)"]
     end
 
     Browser --> Pages
@@ -122,13 +129,16 @@ graph TB
     StorageSvc --> LocalFS
     StorageSvc --> S3
 
-    LLMSvc --> Gemini
+    LLMSvc --> GroqAPI
     CitChecker --> OpenAlex
     CitChecker --> Crossref
     RetractScan --> Crossref
     RetractScan --> OpenAlex
     RetractScan --> PubPeer
-    JournalFinder --> HuggingFace
+    JournalFinder --> ChromaDB
+    Crawler --> Publishers
+    Crawler --> DbBuilder
+    DbBuilder --> ChromaDB
     AIDetector --> HuggingFace
 
     classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
@@ -138,9 +148,9 @@ graph TB
     classDef storage fill:#ec4899,color:#fff,stroke:#be185d
 
     class Pages,Components,Hooks,Store,APIClient frontend
-    class AuthEP,SessionEP,ChatEP,ToolsEP,UploadEP,AdminEP,RateLimit,CORS,SecurityHeaders,JWTAuth,RBAC,ChatSvc,FileSvc,LLMSvc,StorageSvc,CryptoMgr,CitChecker,JournalFinder,RetractScan,AIDetector,GrammarCheck,Tenacity,HeuristicEngine backend
+    class AuthEP,SessionEP,ChatEP,ToolsEP,UploadEP,AdminEP,RateLimit,CORS,SecurityHeaders,JWTAuth,RBAC,ChatSvc,FileSvc,LLMSvc,StorageSvc,CryptoMgr,CitChecker,JournalFinder,RetractScan,AIDetector,GrammarCheck,Tenacity,HeuristicEngine,Crawler,DbBuilder,ChromaDB backend
     class SQLite database
-    class Gemini,OpenAlex,Crossref,PubPeer,HuggingFace external
+    class GroqAPI,OpenAlex,Crossref,PubPeer,HuggingFace,Publishers external
     class LocalFS,S3 storage
 ```
 
@@ -177,7 +187,7 @@ graph LR
     L3 -->|"Method calls"| L4
     L3 -->|"ORM queries"| L5
     L5 -->|"SQL/Storage I/O"| L6
-    L4 -->|"HTTP/SDK"| EXT["External APIs<br/>Gemini, OpenAlex,<br/>Crossref, HuggingFace"]
+    L4 -->|"HTTP/SDK"| EXT["External APIs<br/>Groq (LLaMA 3.1), OpenAlex,<br/>Crossref, HuggingFace,<br/>ChromaDB (local)"]
 
     classDef layer fill:#1e293b,color:#e2e8f0,stroke:#334155
     class L1,L2,L3,L4,L5,L6 layer
@@ -217,7 +227,7 @@ graph LR
 | Service | File | Chức năng |
 |---------|------|-----------|
 | **ChatService** | `services/chat_service.py` | Orchestration: tạo session, lưu message, gọi LLM/tools theo mode, auto-detect title |
-| **LLMService** (GeminiService) | `services/llm_service.py` | Wrapper Google Gemini với **Function Calling**: `generate_response()` (FC loop + 4 tools), `summarize_text()`, `generate_simple()` — dùng `google-genai` SDK |
+| **LLMService** (GroqLLMService) | `services/llm_service.py` | Wrapper Groq (LLaMA 3.1) với **Function Calling**: `generate_response()` (FC loop + 5 tools), `summarize_text()`, `generate_simple()` — dùng `groq` SDK với OpenAI-compatible tool schemas |
 | **FileService** | `services/file_service.py` | Upload workflow: validate → encrypt → store → extract text (PDF via PyMuPDF) |
 | **StorageService** | `services/storage_service.py` | Dual-backend abstraction: Local FS hoặc AWS S3, AES-256-GCM encryption, pre-signed URLs |
 | **CryptoManager** | `core/crypto.py` | Master key management, AES-256-GCM encrypt/decrypt cho files và DB columns |
@@ -228,7 +238,7 @@ graph LR
 | Tool | File | ML Model / API | Chức năng |
 |------|------|----------------|-----------|
 | **CitationChecker** | `tools/citation_checker.py` | PyAlex + Habanero + httpx | Verify citations: extract DOI → query OpenAlex/Crossref → fuzzy match → confidence score |
-| **JournalFinder** | `tools/journal_finder.py` | SPECTER2 (768-dim) / SciBERT / TF-IDF | Recommend journals: encode abstract → cosine similarity với 35+ journal embeddings |
+| **JournalFinder** | `tools/journal_finder.py` | ChromaDB + SentenceTransformer (all-MiniLM-L6-v2) | Recommend journals: query ChromaDB `journal_cfps` collection with embedded abstract → cosine similarity ranking. Data seeded by `backend/crawler/` pipeline |
 | **RetractionScanner** | `tools/retraction_scan.py` | Crossref + OpenAlex + PubPeer | Scan DOIs: check retraction status, risk level, title-based detection, PubPeer comments |
 | **AIWritingDetector** | `tools/ai_writing_detector.py` | RoBERTa (`roberta-base-openai-detector`) | Detect AI text: ensemble 70% ML (RoBERTa) + 30% rule-based (7 features) |
 | **GrammarChecker** | `tools/grammar_checker.py` | LanguageTool (JVM server) | Offline grammar & spell checking: singleton JVM, lazy init, rule-based corrections |
@@ -258,7 +268,7 @@ graph LR
         System["AIRA Platform"]
     end
 
-    Gemini[("Google Gemini<br/>AI Service")]
+    GroqLLM["🤖 Groq API<br/>(LLaMA 3.1)"]
     AcademicDB[("OpenAlex /<br/>Crossref /<br/>PubPeer")]
     HF[("HuggingFace<br/>ML Models")]
     Storage[("File Storage<br/>Local / S3")]
@@ -266,9 +276,9 @@ graph LR
     User -->|"Đăng nhập, Chat,<br/>Upload PDF, Chọn tool"| System
     System -->|"AI response, Tool results,<br/>File summaries"| User
 
-    System <-->|"Generate text,<br/>Summarize"| Gemini
+    System <-->|"Generate text,<br/>Summarize"| GroqLLM
     System <-->|"Verify citations,<br/>Check retractions"| AcademicDB
-    System <-->|"Load SPECTER2,<br/>RoBERTa models"| HF
+    System <-->|"Load MiniLM,<br/>RoBERTa models"| HF
     System <-->|"Store/Retrieve<br/>encrypted files"| Storage
 ```
 
@@ -291,9 +301,9 @@ graph TB
     DS4[("D4: file_attachments")]
     DS5[("D5: File Storage")]
 
-    Gemini[("Google Gemini")]
+    GroqLLM[("Groq LLaMA 3.1")]
     ExtAPIs[("OpenAlex /<br/>Crossref")]
-    MLModels[("SPECTER2 /<br/>RoBERTa")]
+    MLModels[("all-MiniLM-L6-v2 /<br/>RoBERTa")]
 
     User -->|"email, password"| P1
     P1 -->|"JWT token"| User
@@ -306,7 +316,7 @@ graph TB
     User -->|"message + mode"| P3
     P3 <-->|"save messages"| DS3
     P3 -->|"AI response"| User
-    P3 <-->|"prompt/response"| Gemini
+    P3 <-->|"prompt/response"| GroqLLM
     P3 -->|"route to tool"| P4
 
     User -->|"text + DOI"| P4
@@ -344,7 +354,7 @@ graph TB
     OpenAlex[("OpenAlex API")]
     Crossref[("Crossref API")]
     PubPeer[("PubPeer API")]
-    SPECTER2[("SPECTER2 Model")]
+    ChromaDB[("ChromaDB +<br/>SentenceTransformer")]
     RoBERTa[("RoBERTa Model")]
     LangTool[("LanguageTool<br/>JVM Server")]
 
@@ -355,7 +365,7 @@ graph TB
     P4_1 -->|"verified/hallucinated"| User
 
     User -->|"abstract text"| P4_2
-    P4_2 <-->|"encode abstract"| SPECTER2
+    P4_2 <-->|"query ChromaDB"| ChromaDB
     P4_2 -->|"journal list"| DS3
     P4_2 -->|"ranked journals"| User
 
@@ -420,7 +430,7 @@ graph TB
         direction TB
         FileSvc["FileService<br/>services/file_service.py"]
         ChatSvc["ChatService<br/>services/chat_service.py"]
-        LLMSvc["GeminiService<br/>services/llm_service.py"]
+        LLMSvc["GroqLLMService<br/>services/llm_service.py"]
 
         subgraph FILE_OPS["FileService Operations"]
             Validate["validate_mime_type()<br/>sanitize_filename()<br/>_is_pdf_payload()"]
@@ -466,7 +476,7 @@ graph TB
     end
 
     subgraph EXTERNAL["🌐 External"]
-        Gemini["Google Gemini API<br/>→ summarize_text()"]
+        GroqLLM["Groq API (LLaMA 3.1)<br/>→ summarize_text()"]
     end
 
     %% Upload flow connections
@@ -494,8 +504,8 @@ graph TB
     SessionACL --> FileSvc
     FileSvc -->|"get_attachment()"| FileTable
     FileTable -->|"extracted_text (decrypted)"| LLMSvc
-    LLMSvc -->|"summarize_text()"| Gemini
-    Gemini -->|"summary"| LLMSvc
+    LLMSvc -->|"summarize_text()"| GroqLLM
+    GroqLLM -->|"summary"| LLMSvc
     LLMSvc -->|"summary text"| SummarizeEP
     ChatSvc -->|"persist_tool_interaction<br/>(PDF_SUMMARY)"| MsgTable
 
@@ -525,7 +535,7 @@ graph TB
     class StorageSvc,GenKey,Upload,Download,Checksum,LocalFS,S3 storage
     class CryptoMgr,EncBytes,DecBytes,MasterKey crypto
     class FileTable,MsgTable db
-    class Gemini external
+    class GroqLLM external
 ```
 
 ### 4.2 Component Diagram — Chi tiết xử lý nội bộ FileService
@@ -621,7 +631,7 @@ graph LR
         T1["ToolsEndpoint<br/>summarize_pdf()"]
         T2["FileService<br/>get_attachment(db, user,<br/>session_id, file_id)"]
         T3{"extracted_text<br/>exists?"}
-        T4["GeminiService<br/>summarize_text(extracted_text)"]
+        T4["GroqLLMService<br/>summarize_text(extracted_text)"]
         T5["Return error msg<br/>'Không có nội dung text<br/>để tóm tắt'"]
         T6["ChatService<br/>persist_tool_interaction()<br/>type=PDF_SUMMARY"]
 
@@ -636,8 +646,8 @@ graph LR
         DB2["chat_messages<br/>INSERT (role=ASSISTANT,<br/>type=PDF_SUMMARY)"]
     end
 
-    subgraph GEMINI["🤖 Google Gemini"]
-        GEM["models.generate_content()<br/>model: gemini-flash-latest<br/>→ summary text"]
+    subgraph GROQ_API["🤖 Groq API (LLaMA 3.1)"]
+        GEM["chat.completions.create()<br/>model: llama-3.1-8b-instant<br/>→ summary text"]
     end
 
     subgraph RENDER["🎨 Frontend Render"]
@@ -658,7 +668,7 @@ graph LR
     classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
     classDef backend fill:#10b981,color:#fff,stroke:#047857
     classDef db fill:#06b6d4,color:#fff,stroke:#0e7490
-    classDef gemini fill:#8b5cf6,color:#fff,stroke:#6d28d9
+    classDef groq fill:#8b5cf6,color:#fff,stroke:#6d28d9
     classDef render fill:#ec4899,color:#fff,stroke:#be185d
     classDef decision fill:#f59e0b,color:#000,stroke:#b45309
 
@@ -666,7 +676,7 @@ graph LR
     class FE1 frontend
     class T1,T2,T4,T5,T6 backend
     class DB1,DB2 db
-    class GEM gemini
+    class GEM groq
     class Card render
     class T3 decision
 ```
@@ -952,7 +962,7 @@ graph TB
     subgraph uc_chat["Chat & AI"]
         UC4["Tạo phiên chat mới"]
         UC5["Gửi tin nhắn"]
-        UC6["Nhận phản hồi AI<br/>(Gemini)"]
+        UC6["Nhận phản hồi AI<br/>(Groq LLaMA 3.1)"]
         UC7["Chọn chế độ chat<br/>(General QA / Verification /<br/>Journal Match)"]
     end
 
@@ -1119,16 +1129,16 @@ graph TB
         FileCtx --> ModeRoute
     end
 
-    subgraph GENERAL_QA["🤖 General QA Path — Gemini FC"]
+    subgraph GENERAL_QA["🤖 General QA Path — Groq FC"]
         direction TB
-        GeminiSvc["GeminiService<br/>generate_response()"]
-        BuildContent["_build_contents()<br/>History → Content objects"]
-        GenContent["generate_content()<br/>tools=[4 functions], AFC=disabled"]
-        FCCheck{"function_call?"}
-        ExecTool["Execute tool locally<br/>→ send function_response"]
+        GroqSvc["GroqLLMService<br/>generate_response()"]
+        BuildContent["_build_messages()<br/>History → messages array"]
+        GenContent["chat.completions.create()<br/>tools=[5 functions], tool_choice=auto"]
+        FCCheck{"tool_calls?"}
+        ExecTool["Execute tool locally<br/>→ append tool message"]
         FinalText["Final text response<br/>FunctionCallingResponse"]
 
-        GeminiSvc --> BuildContent
+        GroqSvc --> BuildContent
         BuildContent --> GenContent
         GenContent --> FCCheck
         FCCheck -->|"Yes"| ExecTool
@@ -1150,8 +1160,8 @@ graph TB
         RunTool --> T_AI
     end
 
-    subgraph GEMINI_API["☁️ Google Gemini"]
-        GModel["gemini-flash-latest<br/>Vietnamese system prompt"]
+    subgraph GROQ_API["☁️ Groq API (LLaMA 3.1)"]
+        GModel["llama-3.1-8b-instant<br/>Vietnamese system prompt"]
     end
 
     subgraph DATABASE["🗄️ Database"]
@@ -1165,7 +1175,7 @@ graph TB
     RBAC --> SaveUser
     SaveUser -->|"INSERT"| MsgTable
 
-    ModeRoute -->|"GENERAL_QA"| GeminiSvc
+    ModeRoute -->|"GENERAL_QA"| GroqSvc
     ModeRoute -->|"VERIFICATION / RETRACTION<br/>JOURNAL_MATCH / AI_DETECTION"| RunTool
 
     GenContent --> GModel
@@ -1192,7 +1202,7 @@ graph TB
     class ChatView,Store,APIClient,Render,ToolCards frontend
     class ChatEP,JWT,RBAC api
     class SaveUser,LoadCtx,FileCtx,ModeRoute,SaveAssist chatsvc
-    class GeminiSvc,BuildContent,GenContent,FCCheck,ExecTool,FinalText llm
+    class GroqSvc,BuildContent,GenContent,FCCheck,ExecTool,FinalText llm
     class RunTool,T_Cite,T_Retract,T_Journal,T_AI tools
     class GModel cloud
     class MsgTable,SessionTable db
@@ -1226,20 +1236,20 @@ graph TB
         RateLimit --> JWT --> RBAC
     end
 
-    subgraph LLM_LAYER["🤖 LLM Service — Gemini Function Calling"]
+    subgraph LLM_LAYER["🤖 LLM Service — Groq Function Calling"]
         direction TB
         ChatSvc["ChatService<br/>complete_chat()"]
         FileCtx["_build_file_context()<br/>→ <Attached_Document> XML"]
-        GeminiSvc["GeminiService<br/>_generate_with_fc()"]
-        GeminiAPI["Google Gemini API<br/>gemini-flash-latest"]
-        FCLoop["FC Loop (max 5 iter)<br/>AFC disabled — manual control"]
+        GroqSvc["GroqLLMService<br/>_generate_with_fc()"]
+        GroqAPI["Groq API (LLaMA 3.1)<br/>llama-3.1-8b-instant"]
+        FCLoop["FC Loop (max 5 iter)<br/>tool_choice=auto — manual control"]
         FnCall["function_call:<br/>verify_citation(text)"]
 
         ChatSvc --> FileCtx
-        FileCtx --> GeminiSvc
-        GeminiSvc --> FCLoop
-        FCLoop --> GeminiAPI
-        GeminiAPI -->|"function_call"| FnCall
+        FileCtx --> GroqSvc
+        GroqSvc --> FCLoop
+        FCLoop --> GroqAPI
+        GroqAPI -->|"function_call"| FnCall
         FnCall -->|"execute locally"| FCLoop
     end
 
@@ -1293,8 +1303,8 @@ graph TB
     RBAC -->|"direct mode"| Extract
     RBAC -->|"general_qa mode"| ChatSvc
 
-    GeminiAPI -->|"function_call"| Extract
-    FCLoop -->|"function_response"| GeminiAPI
+    GroqAPI -->|"function_call"| Extract
+    FCLoop -->|"function_response"| GroqAPI
 
     Extract -->|"DOI found"| VERIFY_DOI
     Extract -->|"author-year found"| VERIFY_AUTHOR
@@ -1326,7 +1336,7 @@ graph TB
 
     class ChatView,APIClient,CitCard frontend
     class ToolEP,ChatEP,RateLimit,JWT,RBAC api
-    class ChatSvc,FileCtx,GeminiSvc,GeminiAPI,FCLoop,FnCall llm
+    class ChatSvc,FileCtx,GroqSvc,GroqAPI,FCLoop,FnCall llm
     class Extract,HabSDK,HabHTTP,DOI_OK,PyAlexSDK,PyAlexHTTP,FuzzyMatch,StatusDecide,Stats checker
     class MsgTable db
     class CrossrefAPI,OpenAlexAPI external
@@ -1361,20 +1371,20 @@ graph TB
         RateLimit --> JWT --> RBAC
     end
 
-    subgraph LLM_LAYER["🤖 LLM Service — Gemini Function Calling"]
+    subgraph LLM_LAYER["🤖 LLM Service — Groq Function Calling"]
         direction TB
         ChatSvc["ChatService<br/>complete_chat()"]
         FileCtx["_build_file_context()<br/>→ extract Abstract from PDF"]
-        GeminiSvc["GeminiService<br/>_generate_with_fc()"]
-        GeminiAPI["Google Gemini API<br/>gemini-flash-latest"]
-        FCLoop["FC Loop (max 5 iter)<br/>AFC disabled — manual control"]
+        GroqSvc["GroqLLMService<br/>_generate_with_fc()"]
+        GroqAPI["Groq API (LLaMA 3.1)<br/>llama-3.1-8b-instant"]
+        FCLoop["FC Loop (max 5 iter)<br/>tool_choice=auto — manual control"]
         FnCall["function_call:<br/>match_journal(abstract, title)"]
 
         ChatSvc --> FileCtx
-        FileCtx --> GeminiSvc
-        GeminiSvc --> FCLoop
-        FCLoop --> GeminiAPI
-        GeminiAPI -->|"function_call"| FnCall
+        FileCtx --> GroqSvc
+        GroqSvc --> FCLoop
+        FCLoop --> GroqAPI
+        GroqAPI -->|"function_call"| FnCall
         FnCall -->|"execute locally"| FCLoop
     end
 
@@ -1382,21 +1392,14 @@ graph TB
         direction TB
         DetectDomain["_detect_domains(text)<br/>keyword matching → domain list<br/>(CS, Medicine, Physics, etc.)"]
 
-        subgraph ML_PATH["ML Path (use_ml=True)"]
+        subgraph CHROMA_PATH["ChromaDB Semantic Search"]
             direction TB
-            subgraph MODEL_CHAIN["Model Candidate Chain (fallback)"]
-                SPECTER2["SPECTER2<br/>allenai/specter2_base<br/>768-dim embeddings"]
-                SciBERT["SciBERT fallback<br/>sentence-transformers"]
-                MiniLM["MiniLM-L6-v2 fallback<br/>all-MiniLM-L6-v2"]
+            EmbedQuery["SentenceTransformer<br/>all-MiniLM-L6-v2<br/>encode(abstract) → 384-dim"]
+            QueryDB["ChromaDB.query()<br/>collection: journal_cfps<br/>n_results=top_k"]
+            ParseResults["Parse metadata:<br/>journal, issn, domains,<br/>acceptance_rate, h_index"]
 
-                SPECTER2 -->|"load fail"| SciBERT
-                SciBERT -->|"load fail"| MiniLM
-            end
-            Encode["model.encode([abstract])<br/>→ embedding vector"]
-            CosineSim["cosine_similarity()<br/>abstract_emb vs journal_embs<br/>(precomputed 35 journals)"]
-
-            MODEL_CHAIN --> Encode
-            Encode --> CosineSim
+            EmbedQuery --> QueryDB
+            QueryDB --> ParseResults
         end
 
         subgraph TFIDF_PATH["TF-IDF Fallback (use_ml=False)"]
@@ -1432,14 +1435,14 @@ graph TB
     RBAC -->|"direct mode"| DetectDomain
     RBAC -->|"general_qa mode"| ChatSvc
 
-    GeminiAPI -->|"function_call"| DetectDomain
-    FCLoop -->|"function_response"| GeminiAPI
+    GroqAPI -->|"function_call"| DetectDomain
+    FCLoop -->|"function_response"| GroqAPI
 
-    DetectDomain -->|"ML available"| ML_PATH
-    DetectDomain -->|"ML unavailable"| TFIDF_PATH
-    MODEL_CHAIN -->|"download / cache"| HFHub
+    DetectDomain -->|"ChromaDB available"| CHROMA_PATH
+    DetectDomain -->|"ChromaDB empty/missing"| TFIDF_PATH
+    EmbedQuery -->|"download / cache"| HFHub
 
-    CosineSim --> DomainBonus
+    ParseResults --> DomainBonus
     TFCosine --> DomainBonus
     DomainBonus --> Sort
     Sort --> Convert
@@ -1463,9 +1466,9 @@ graph TB
 
     class ChatView,APIClient,JournalCard frontend
     class ToolEP,ChatEP,RateLimit,JWT,RBAC api
-    class ChatSvc,FileCtx,GeminiSvc,GeminiAPI,FCLoop,FnCall llm
+    class ChatSvc,FileCtx,GroqSvc,GroqAPI,FCLoop,FnCall llm
     class DetectDomain,DomainBonus,Sort finder
-    class SPECTER2,SciBERT,MiniLM,Encode,CosineSim ml
+    class EmbedQuery,QueryDB,ParseResults ml
     class TFIDF,TFCosine tfidf
     class MsgTable db
     class HFHub hf
@@ -1525,7 +1528,7 @@ graph TB
         direction TB
         LoadFile["SELECT file_attachments<br/>WHERE id=file_id"]
         DecryptText["EncryptedText type<br/>→ auto-decrypt on read"]
-        LLMSummarize["GeminiService<br/>summarize_text()"]
+        LLMSummarize["GroqLLMService<br/>summarize_text()"]
         PersistSummary["persist_tool_interaction()<br/>type=PDF_SUMMARY"]
 
         LoadFile --> DecryptText
@@ -1533,8 +1536,8 @@ graph TB
         LLMSummarize --> PersistSummary
     end
 
-    subgraph GEMINI_API["☁️ Google Gemini"]
-        GModel["generate_content()<br/>(simple mode, no tools)"]
+    subgraph GROQ_SUM["☁️ Groq API (LLaMA 3.1)"]
+        GModel["chat.completions.create()<br/>(simple mode, no tools)"]
     end
 
     subgraph DATABASE["🗄️ Database"]
@@ -1611,20 +1614,20 @@ graph TB
         RateLimit --> JWT --> RBAC
     end
 
-    subgraph LLM_LAYER["🤖 LLM Service — Gemini Function Calling"]
+    subgraph LLM_LAYER["🤖 LLM Service — Groq Function Calling"]
         direction TB
         ChatSvc["ChatService<br/>complete_chat()"]
         FileCtx["_build_file_context()<br/>→ extract DOI from PDF"]
-        GeminiSvc["GeminiService<br/>_generate_with_fc()"]
-        GeminiAPI["Google Gemini API<br/>gemini-flash-latest"]
-        FCLoop["FC Loop (max 5 iter)<br/>AFC disabled — manual control"]
+        GroqSvc["GroqLLMService<br/>_generate_with_fc()"]
+        GroqAPI["Groq API (LLaMA 3.1)<br/>llama-3.1-8b-instant"]
+        FCLoop["FC Loop (max 5 iter)<br/>tool_choice=auto — manual control"]
         FnCall["function_call:<br/>scan_retraction_and_pubpeer(text)"]
 
         ChatSvc --> FileCtx
-        FileCtx --> GeminiSvc
-        GeminiSvc --> FCLoop
-        FCLoop --> GeminiAPI
-        GeminiAPI -->|"function_call"| FnCall
+        FileCtx --> GroqSvc
+        GroqSvc --> FCLoop
+        FCLoop --> GroqAPI
+        GroqAPI -->|"function_call"| FnCall
         FnCall -->|"execute locally"| FCLoop
     end
 
@@ -1706,8 +1709,8 @@ graph TB
     RBAC -->|"direct mode"| ExtractDOI
     RBAC -->|"general_qa mode"| ChatSvc
 
-    GeminiAPI -->|"function_call"| ExtractDOI
-    FCLoop -->|"function_response"| GeminiAPI
+    GroqAPI -->|"function_call"| ExtractDOI
+    FCLoop -->|"function_response"| GroqAPI
 
     ExtractDOI --> ScanBatch
     ScanBatch -->|"for each DOI"| SRC1
@@ -1746,7 +1749,7 @@ graph TB
 
     class ChatView,APIClient,RetractCard frontend
     class ToolEP,ChatEP,RateLimit,JWT,RBAC api
-    class ChatSvc,FileCtx,GeminiSvc,GeminiAPI,FCLoop,FnCall llm
+    class ChatSvc,FileCtx,GroqSvc,GroqAPI,FCLoop,FnCall llm
     class ExtractDOI,ScanBatch,Summary scanner
     class CR_Hab,CR_HTTP,CR_Parse,OA_Query,OA_Parse,PP_Query,PP_Parse,PP_URL source
     class CalcRisk,R_CRIT,R_HIGH,R_MED,R_LOW,R_NONE risk
@@ -1799,14 +1802,14 @@ graph TB
         ModeCheck -->|"Yes"| RunTool
     end
 
-    subgraph FC_PATH["🤖 Gemini Function Calling Path"]
+    subgraph FC_PATH["🤖 Groq Function Calling Path"]
         direction TB
-        GeminiSvc["GeminiService<br/>generate_response()"]
-        GenContent["generate_content()<br/>tools=[4 functions]<br/>AFC=disabled"]
+        GroqSvc["GroqLLMService<br/>generate_response()"]
+        GenContent["chat.completions.create()<br/>tools=[5 functions]<br/>tool_choice=auto"]
         FCDetect["function_call:<br/>detect_ai_writing(text)"]
-        FnResp["function_response<br/>→ Gemini final answer"]
+        FnResp["tool message<br/>→ Groq final answer"]
 
-        GeminiSvc --> GenContent
+        GroqSvc --> GenContent
         GenContent --> FCDetect
         FCDetect --> FnResp
     end
@@ -1880,7 +1883,7 @@ graph TB
     ChatEP --> JWT
     JWT --> RBAC_MSG
     RBAC_MSG --> SaveUser
-    ModeCheck -->|"No (GENERAL_QA)"| GeminiSvc
+    ModeCheck -->|"No (GENERAL_QA)"| GroqSvc
     FCDetect -->|"execute locally"| Analyze
     FnResp -->|"grounded text"| SaveAssist
     RunTool -->|"ai_writing_detector.analyze()"| Analyze
@@ -1903,7 +1906,7 @@ graph TB
     class ChatView,ModeSelect,Store,RenderResult frontend
     class DirectEP,AliasEP,ChatEP,JWT,RBAC_TOOL,RBAC_MSG api
     class SaveUser,FileCtx,ModeCheck,RunTool,SaveAssist chatsvc
-    class GeminiSvc,GenContent,FCDetect,FnResp fc
+    class GroqSvc,GenContent,FCDetect,FnResp fc
     class LoadModel,Tokenize,Inference,Softmax,DeviceSelect,GlobalCache ml
     class F1,F2,F3,F4,F5,F6,F7 rules
     class MLAvail,EnsembleCalc,RuleOnly,VerdictMap,ConfidenceCalc ensemble
@@ -1932,14 +1935,14 @@ graph TB
     subgraph CHAT_SVC["💬 ChatService"]
         SaveUser["save_user_message()"]
         FileCtx["Build file context<br/>(if PDF attached)"]
-        CallLLM["gemini_service.generate_response()"]
+        CallLLM["groq_llm_service.generate_response()"]
         SaveAssist["save_assistant_message()<br/>type=GRAMMAR_REPORT"]
     end
 
-    subgraph GEMINI["🤖 Gemini FC / Heuristic Fallback"]
-        GeminiFC["Gemini Function Calling"]
+    subgraph GROQ_FC["🤖 Groq FC / Heuristic Fallback"]
+        GroqFC["Groq Function Calling"]
         HeuristicFB["SemanticIntentRouter<br/>intent=GRAMMAR"]
-        FCDecision{"Gemini available?"}
+        FCDecision{"Groq available?"}
     end
 
     subgraph GRAMMAR_TOOL["✍️ GrammarChecker (Singleton)"]
@@ -1973,9 +1976,9 @@ graph TB
     JWT -->|"chat"| CHAT_SVC
     SaveUser --> FileCtx --> CallLLM
     CallLLM --> FCDecision
-    FCDecision -->|"Online"| GeminiFC
+    FCDecision -->|"Online"| GroqFC
     FCDecision -->|"Offline/Error"| HeuristicFB
-    GeminiFC -->|"check_grammar(text)"| GRAMMAR_TOOL
+    GroqFC -->|"check_grammar(text)"| GRAMMAR_TOOL
     HeuristicFB -->|"check_grammar(text)"| GRAMMAR_TOOL
     CallLLM --> SaveAssist
 
@@ -1993,14 +1996,14 @@ graph TB
     classDef frontend fill:#3b82f6,color:#fff,stroke:#1e40af
     classDef api fill:#f59e0b,color:#fff,stroke:#b45309
     classDef chatsvc fill:#14b8a6,color:#fff,stroke:#0d9488
-    classDef gemini fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef groq fill:#a855f7,color:#fff,stroke:#7e22ce
     classDef grammar fill:#10b981,color:#fff,stroke:#047857
     classDef jvm fill:#ef4444,color:#fff,stroke:#dc2626
 
     class ChatView,ModeSelect,Store,RenderResult frontend
     class DirectEP,ChatEP,JWT,RBAC api
     class SaveUser,FileCtx,CallLLM,SaveAssist chatsvc
-    class GeminiFC,HeuristicFB,FCDecision gemini
+    class GroqFC,HeuristicFB,FCDecision groq
     class EnsureTool,JVMStart,RunCheck,CorrectText,BuildResult grammar
     class LTServer,Rules,SpellDict jvm
 ```
@@ -2220,27 +2223,34 @@ Phần này mô tả chi tiết tất cả các tích hợp với dịch vụ/AP
 ```mermaid
 graph TB
     subgraph AIRA["🏗️ AIRA Backend"]
-        LLM["LLM Service<br/>(GeminiService)"]
+        LLM["LLM Service<br/>(GroqLLMService)"]
         CC["Citation Checker"]
         JF["Journal Finder"]
         RS["Retraction Scanner"]
         AW["AI Writing Detector"]
+        GC["Grammar Checker"]
         FS["File Service"]
         SS["Storage Service"]
         AUTH["Auth Service"]
     end
 
     subgraph External_APIs["🌐 External APIs"]
-        GEMINI["Google Gemini API<br/>gemini-flash-latest<br/>+ Function Calling"]
+        GROQ["Groq API<br/>LLaMA 3.1-8b-instant<br/>+ Function Calling (OpenAI-compatible)"]
         OA["OpenAlex API<br/>api.openalex.org"]
         CR["Crossref API<br/>api.crossref.org"]
         PP["PubPeer API v3<br/>pubpeer.com/v3"]
     end
 
     subgraph ML_Models["🧠 ML Models (HuggingFace)"]
-        SP["SPECTER2<br/>allenai/specter2_base"]
+        MINILM["all-MiniLM-L6-v2<br/>(ChromaDB embeddings +<br/>Intent Routing)"]
         RB["RoBERTa<br/>roberta-base-openai-detector"]
         HF["HuggingFace Hub<br/>Model Downloads"]
+    end
+
+    subgraph Data_Pipeline["📦 Data Pipeline"]
+        CHROMA["ChromaDB (PersistentClient)<br/>journal_cfps collection"]
+        CRAWLER["UniversalScraper<br/>(cloudscraper + sources.json)"]
+        DBBUILDER["DbBuilder<br/>(SentenceTransformer → ChromaDB)"]
     end
 
     subgraph Infrastructure["⚙️ Infrastructure"]
@@ -2255,14 +2265,17 @@ graph TB
         PDF["PyMuPDF (fitz)<br/>PDF Text Extraction"]
     end
 
-    LLM -->|google-genai SDK| GEMINI
+    LLM -->|groq SDK| GROQ
     CC -->|pyalex SDK| OA
     CC -->|habanero SDK| CR
     RS -->|habanero SDK| CR
     RS -->|httpx| OA
     RS -->|httpx POST| PP
-    JF -->|sentence-transformers| SP
-    JF -->|huggingface-hub| HF
+    JF -->|query| CHROMA
+    CRAWLER -->|cloudscraper| Publishers2["Publisher Sites<br/>(Elsevier, MDPI, IEEE)"]
+    CRAWLER --> DBBUILDER
+    DBBUILDER -->|sentence-transformers| MINILM
+    DBBUILDER -->|upsert| CHROMA
     AW -->|transformers| RB
     FS --> PDF
     SS --> S3
@@ -2275,36 +2288,38 @@ graph TB
     classDef ml fill:#9b59b6,stroke:#8e44ad,color:#fff
 
     class PP ok
-    class GEMINI,OA,CR ok
-    class SP,RB,HF ml
+    class GROQ,OA,CR ok
+    class MINILM,RB,HF ml
+    class CHROMA,CRAWLER,DBBUILDER ml
     class DB,S3,CRYPTO,JWT_LIB,BCRYPT,PDF ok
 ```
 
-### 7.2 Google Gemini API — Function Calling Architecture
+### 7.2 Groq API (LLaMA 3.1) — Function Calling Architecture
 
 | Thuộc tính | Chi tiết |
 |-----------|---------|
 | **Vai trò** | LLM chính — tạo phản hồi chat, **gọi tool tự động qua Function Calling**, tóm tắt PDF |
-| **SDK** | `google-genai` ≥ 1.0.0 (thay thế deprecated `google-generativeai`) |
-| **Model** | `gemini-flash-latest` (cấu hình qua `settings.gemini_model`) |
-| **Auth** | API Key qua biến môi trường `GOOGLE_API_KEY` |
+| **SDK** | `groq` ≥ 0.12.0 (OpenAI-compatible chat completions API) |
+| **Model** | `llama-3.1-8b-instant` (cấu hình qua `settings.groq_model`) |
+| **Auth** | API Key qua biến môi trường `GROQ_API_KEY` |
 | **File** | `backend/app/services/llm_service.py` |
-| **Function Calling** | ✅ 4 tool functions registered, manual FC loop (AFC disabled) |
-| **System Prompt** | Vietnamese anti-hallucination prompt (SYSTEM_PROMPT constant, 955 chars) |
+| **Function Calling** | ✅ 5 tool functions registered, manual FC loop (tool_choice=auto, max 5 iterations) |
+| **System Prompt** | Vietnamese anti-hallucination prompt (SYSTEM_PROMPT constant) |
 | **Trạng thái** | ✅ Hoạt động — tool calls verified end-to-end |
 
 #### 7.2.1 Function Calling — Tổng quan
 
-Gemini **không bao giờ tự bịa dữ liệu học thuật**. Thay vào đó, khi user hỏi về retraction, citation, journal, hoặc AI detection, Gemini sẽ tự động gọi tool functions thực thi ở backend, nhận kết quả thực, rồi tổng hợp câu trả lời dựa trên dữ liệu đó.
+Groq (LLaMA 3.1) **không bao giờ tự bịa dữ liệu học thuật**. Thay vào đó, khi user hỏi về retraction, citation, journal, AI detection, hoặc grammar, Groq sẽ tự động gọi tool functions thực thi ở backend, nhận kết quả thực, rồi tổng hợp câu trả lời dựa trên dữ liệu đó.
 
-**4 Tool Functions đã đăng ký:**
+**5 Tool Functions đã đăng ký:**
 
 | Tên Function | Mô tả | Backend Tool |
 |-------------|-------|-------------|
 | `scan_retraction_and_pubpeer(text)` | Quét DOI → retraction status, PubPeer comments, risk level | `retraction_scanner.scan()` |
 | `verify_citation(text)` | Xác minh citation qua OpenAlex + Crossref | `citation_checker.verify()` |
-| `match_journal(abstract, title)` | Tìm journal phù hợp bằng SPECTER2 embedding | `journal_finder.recommend()` |
+| `match_journal(abstract, title)` | Tìm journal phù hợp bằng ChromaDB semantic search | `journal_finder.recommend()` |
 | `detect_ai_writing(text)` | Phát hiện AI viết bằng RoBERTa ensemble | `ai_writing_detector.analyze()` |
+| `check_grammar(text)` | Kiểm tra ngữ pháp/chính tả bằng LanguageTool | `grammar_checker.check_grammar()` |
 
 #### 7.2.2 Function Calling Flow
 
@@ -2321,12 +2336,12 @@ graph TB
         SaveMsg["_save_message()<br/>role=ASSISTANT"]
     end
 
-    subgraph GEMINI_SVC["🤖 GeminiService — _generate_with_fc()"]
-        BuildContent["_build_contents()<br/>History → Content objects"]
-        GenContent["generate_content()<br/>tools=[4 functions]<br/>AFC=disabled"]
-        CheckResp{"Response has<br/>function_call?"}
-        ExecTool["_execute_function_call()<br/>Run Python tool locally"]
-        AppendFR["Append function_response<br/>to contents"]
+    subgraph GROQ_SVC["🤖 GroqLLMService — _generate_with_fc()"]
+        BuildContent["_build_messages()<br/>History → messages array"]
+        GenContent["chat.completions.create()<br/>tools=_GROQ_TOOLS<br/>tool_choice=auto"]
+        CheckResp{"Response has<br/>tool_calls?"}
+        ExecTool["_execute_tool_call()<br/>Run Python tool locally"]
+        AppendFR["Append tool message<br/>(role=tool, tool_call_id)"]
         IterCheck{"Iteration < 5?"}
         ExtractText["Extract final text<br/>+ determine MessageType"]
         BudgetExc["⚠️ Budget exceeded<br/>(max 5 iterations)"]
@@ -2337,10 +2352,11 @@ graph TB
         T2["verify_citation()"]
         T3["match_journal()"]
         T4["detect_ai_writing()"]
+        T5["check_grammar()"]
     end
 
-    subgraph GEMINI_API["☁️ Google Gemini API"]
-        GModel["gemini-flash-latest<br/>System Prompt: Vietnamese<br/>anti-hallucination"]
+    subgraph GROQ_CLOUD["☁️ Groq API (LPU Inference)"]
+        GModel["llama-3.1-8b-instant<br/>System Prompt: Vietnamese<br/>anti-hallucination"]
     end
 
     subgraph RESPONSE["📤 Response"]
@@ -2377,7 +2393,7 @@ graph TB
     %% Styles
     classDef input fill:#3b82f6,color:#fff,stroke:#1e40af
     classDef chatsvc fill:#14b8a6,color:#fff,stroke:#0d9488
-    classDef gemini fill:#a855f7,color:#fff,stroke:#7e22ce
+    classDef groq fill:#a855f7,color:#fff,stroke:#7e22ce
     classDef tools fill:#10b981,color:#fff,stroke:#047857
     classDef cloud fill:#f59e0b,color:#fff,stroke:#b45309
     classDef response fill:#06b6d4,color:#fff,stroke:#0e7490
@@ -2385,7 +2401,7 @@ graph TB
 
     class Prompt,FileCtx input
     class BuildCtx,LoadHist,SaveMsg chatsvc
-    class BuildContent,GenContent,CheckResp,ExecTool,AppendFR,IterCheck,ExtractText gemini
+    class BuildContent,GenContent,CheckResp,ExecTool,AppendFR,IterCheck,ExtractText groq
     class T1,T2,T3,T4 tools
     class GModel cloud
     class FCResp response
@@ -2395,51 +2411,51 @@ graph TB
 #### 7.2.3 Phương thức tích hợp
 
 ```python
-from google import genai
-from google.genai import types as genai_types
+from groq import Groq
 
 # Khởi tạo client
-client = genai.Client(api_key=settings.google_api_key)
+client = Groq(api_key=settings.groq_api_key)
 
-# Tool functions — Python callables with docstrings
-def scan_retraction_and_pubpeer(text: str) -> dict:
-    """Scan DOIs for retraction status and PubPeer comments."""
-    results = retraction_scanner.scan(text)
-    return {"results": [...], "summary": {...}}
+# Tool definitions — JSON schemas (OpenAI-compatible)
+_GROQ_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_retraction_and_pubpeer",
+            "description": "Scan DOIs for retraction status and PubPeer comments.",
+            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        },
+    },
+    # ... verify_citation, match_journal, detect_ai_writing, check_grammar
+]
 
-# FC loop (AFC disabled — manual control)
-config = genai_types.GenerateContentConfig(
-    system_instruction=SYSTEM_PROMPT,
-    tools=[scan_retraction_and_pubpeer, verify_citation,
-           match_journal, detect_ai_writing],
-    automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
-        disable=True,  # Manual loop for tracking & error handling
-    ),
+# FC loop (manual control, max 5 iterations)
+messages = [{"role": "system", "content": SYSTEM_PROMPT}, ...]
+
+response = client.chat.completions.create(
+    model="llama-3.1-8b-instant",
+    messages=messages,
+    tools=_GROQ_TOOLS,
+    tool_choice="auto",
 )
 
-response = client.models.generate_content(
-    model="gemini-flash-latest",
-    contents=contents,  # Multi-turn Content objects
-    config=config,
-)
-
-# Check for function_call in response
-for part in response.candidates[0].content.parts:
-    if part.function_call:
-        result = _execute_function_call(part.function_call)
-        # Send function_response back → Gemini synthesises final answer
+# Check for tool_calls in response
+for tool_call in response.choices[0].message.tool_calls or []:
+    result = _execute_tool_call(tool_call.function.name, tool_call.function.arguments)
+    # Append tool message back → Groq synthesises final answer
+    messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result)})
 ```
 
 #### 7.2.4 FC Loop Architecture
 
 ```mermaid
 flowchart TD
-    A[User Prompt + History] --> B[Build Contents<br/>Multi-turn Content objects]
-    B --> C[generate_content<br/>with tools + AFC disabled]
-    C --> D{Response has<br/>function_call?}
+    A[User Prompt + History] --> B[Build messages array<br/>system + history + user]
+    B --> C[chat.completions.create<br/>with tools + tool_choice=auto]
+    C --> D{Response has<br/>tool_calls?}
 
-    D -->|Yes| E[Execute function locally]
-    E --> F[Append model response<br/>+ function_response to contents]
+    D -->|Yes| E[Execute tool locally]
+    E --> F[Append assistant message<br/>+ tool message to messages]
     F --> G{Iteration < 5?}
     G -->|Yes| C
     G -->|No| H[Return budget-exceeded message]
@@ -2486,7 +2502,7 @@ graph TB
 
     subgraph TIER1["Tầng 1: Tenacity Retry"]
         B --> C["_call_generate_content()"]
-        C --> D{Gemini trả 503/429?}
+        C --> D{Groq trả 503/429?}
         D -->|"Có"| E["Retry (exp backoff)<br/>4s → 10s, tối đa 3 lần"]
         E --> C
         D -->|"Không"| F["Response OK"]
@@ -2502,7 +2518,7 @@ graph TB
         I1 --> J["Intent detected?"]
         I2 --> J
         I3 --> J
-        J -->|"Có"| K["Direct Tool Execution<br/>(bypass Gemini entirely)"]
+        J -->|"Có"| K["Direct Tool Execution<br/>(bypass Groq entirely)"]
         K --> L["Template Response Generator<br/>+ FunctionCallingResponse"]
     end
 
@@ -2526,8 +2542,8 @@ graph TB
 
 | Tầng | Component | File | Hành vi |
 |------|-----------|------|---------|
-| **Tầng 1** — Retry | `tenacity` decorator trên `_call_generate_content()` | `llm_service.py` | 3 lần retry, exponential backoff (4s→10s), chỉ retry `ServerError`/`APIError` |
-| **Tầng 2** — Heuristic | `_try_heuristic_fallback()` → `fallback_process_request()` | `heuristic_router.py` | Trích user_text + file_context từ Gemini contents → SemanticIntentRouter xác định intent → gọi trực tiếp tool Python → template response |
+| **Tầng 1** — Retry | `tenacity` decorator trên `_call_chat_completions()` | `llm_service.py` | 3 lần retry, exponential backoff (4s→10s), chỉ retry `APIStatusError`/`APIConnectionError` |
+| **Tầng 2** — Heuristic | `_try_heuristic_fallback()` → `fallback_process_request()` | `heuristic_router.py` | Trích user_text + file_context từ messages → SemanticIntentRouter xác định intent → gọi trực tiếp tool Python → template response |
 | **Tầng 3** — Static | Hard-coded error message | `llm_service.py` | Luôn trả `FunctionCallingResponse` hợp lệ, KHÔNG raise exception |
 
 **SemanticIntentRouter — Intent Detection (5 intents):**
@@ -2541,9 +2557,9 @@ graph TB
 | `GRAMMAR` | Kiểm tra ngữ pháp/chính tả | ≥ 0.35 (hoặc grammar hints) |
 
 **Cơ chế bổ sung:**
-- Nếu `GOOGLE_API_KEY` không set → log warning, disable Gemini, trả message mặc định
-- Nếu SDK `google-genai` không cài → disable Gemini
-- Nếu tool execution fail → trả `{"error": "..."}` → Gemini nhận lỗi, thông báo cho user
+- Nếu `GROQ_API_KEY` không set → log warning, disable Groq, trả message mặc định
+- Nếu SDK `groq` không cài → disable Groq
+- Nếu tool execution fail → trả `{"error": "..."}` → Groq nhận lỗi, thông báo cho user
 - Nếu FC loop vượt 5 iterations → trả budget-exceeded message
 - `summarize_text()` sử dụng `generate_simple()` (không có tools) với fallback cắt text
 
@@ -2756,7 +2772,7 @@ flowchart LR
 | **Vai trò** | Tải và cache ML models từ HuggingFace Model Hub |
 | **SDK** | `huggingface-hub` ≥ 0.20 |
 | **Auth** | `HF_TOKEN` (optional, cho private/gated models) |
-| **Sử dụng bởi** | `journal_finder.py` (SPECTER2, SciBERT), `ai_writing_detector.py` (RoBERTa) |
+| **Sử dụng bởi** | `journal_finder.py` (MiniLM-L6-v2 for ChromaDB), `ai_writing_detector.py` (RoBERTa) |
 | **Cache** | `~/.cache/huggingface/hub/` (auto-cached sau lần tải đầu) |
 | **Trạng thái** | ✅ Hoạt động |
 
@@ -2790,56 +2806,149 @@ for model_name in MODEL_CANDIDATES:
 # Nếu tất cả fail → TF-IDF fallback (không cần ML model)
 ```
 
-### 7.7 SPECTER2 — Scientific Paper Embeddings
+### 7.7 ChromaDB — Journal Vector Database
 
 | Thuộc tính | Chi tiết |
 |-----------|---------|
-| **Vai trò** | Tạo sentence embeddings cho abstract → so sánh cosine similarity với journal scope |
-| **Model** | `allenai/specter2_base` (768 dimensions) |
-| **SDK** | `sentence-transformers` ≥ 2.2 |
+| **Vai trò** | Persistent vector store cho journal CFP data → semantic search |
+| **Database** | ChromaDB PersistentClient (`backend/data/chroma_db/`) |
+| **Collection** | `journal_cfps`, cosine HNSW space, MD5 hash IDs |
+| **Embedding Model** | `all-MiniLM-L6-v2` (384 dimensions) via SentenceTransformer |
+| **Data Source** | `backend/crawler/` pipeline (UniversalScraper → DbBuilder) |
 | **File** | `backend/app/services/tools/journal_finder.py` |
-| **Latency** | ~0.2s (cached) / ~3.9s (first load) |
-| **Trạng thái** | ✅ Hoạt động (cached locally) |
+| **Latency** | ~0.05s (query) / ~30s (full DB rebuild) |
+| **Trạng thái** | ✅ Hoạt động |
 
 **Phương thức tích hợp:**
 
 ```python
+import chromadb
 from sentence_transformers import SentenceTransformer
 
-# Model candidate chain (fallback tự động)
-MODEL_CANDIDATES = [
-    "allenai/specter2_base",                     # Tốt nhất cho scientific text
-    "allenai/scibert_scivocab_uncased",          # Backup 1
-    "sentence-transformers/all-MiniLM-L6-v2",   # Backup 2 (general-purpose)
-]
+# ChromaDB persistent client
+client = chromadb.PersistentClient(path="backend/data/chroma_db")
+collection = client.get_collection("journal_cfps")
 
-model = SentenceTransformer("allenai/specter2_base")
+# Embedding model (shared with db_builder)
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Tạo embeddings
-query_embedding = model.encode(["abstract text"], convert_to_numpy=True)
-journal_embedding = model.encode(["journal scope text"], convert_to_numpy=True)
-
-# Cosine similarity
-similarity = np.dot(query_embedding, journal_embedding) / (
-    np.linalg.norm(query_embedding) * np.linalg.norm(journal_embedding)
+# Query: encode abstract → search collection
+query_emb = model.encode([abstract_text]).tolist()
+results = collection.query(
+    query_embeddings=query_emb,
+    n_results=top_k,
 )
+# Parse results: metadatas contain journal, issn, domains, h_index, etc.
 ```
 
-**Cơ chế Fallback (3 tầng):**
+**Data Pipeline (ETL):**
 
 ```mermaid
 flowchart TD
-    A[Load SPECTER2<br/>allenai/specter2_base] -->|Success| B[✅ 768-dim embeddings]
-    A -->|Fail| C[Load SciBERT<br/>scibert_scivocab_uncased]
-    C -->|Success| B
-    C -->|Fail| D[Load MiniLM<br/>all-MiniLM-L6-v2]
-    D -->|Success| E[✅ 384-dim embeddings]
-    D -->|Fail| F[TF-IDF Fallback<br/>scikit-learn CountVectorizer]
-    F --> G[✅ Keyword matching<br/>không cần ML]
+    A[sources.json<br/>Publisher configs] --> B[UniversalScraper<br/>cloudscraper + CSS selectors]
+    B --> C{Scrape OK?}
+    C -->|Yes| D[DbBuilder<br/>SentenceTransformer encode]
+    C -->|No / Blocked| E[Skip publisher<br/>zero hallucination]
+    D --> F[ChromaDB upsert<br/>collection: journal_cfps]
+    F --> G[✅ Persistent DB<br/>backend/data/chroma_db/]
 
     style B fill:#2ecc71,stroke:#27ae60
     style E fill:#f39c12,stroke:#e67e22
     style G fill:#e74c3c,stroke:#c0392b,color:#fff
+```
+
+### 7.7.1 Data Engineering Pipeline — Crawler → ChromaDB
+
+AIRA sử dụng pipeline ETL tự động để thu thập dữ liệu Call-for-Papers (CFP) từ các nhà xuất bản học thuật và đưa vào ChromaDB vector store.
+
+| Thuộc tính | Chi tiết |
+|-----------|---------|
+| **Mục đích** | Thu thập CFP data → embed → lưu ChromaDB cho `JournalFinder` |
+| **Thư mục** | `backend/crawler/` |
+| **Scraper** | `UniversalScraper` — configuration-driven, dùng `cloudscraper` (bypass Cloudflare) |
+| **Config** | `sources.json` — CSS selectors cho Elsevier, MDPI, IEEE |
+| **DB Builder** | `db_builder.py` — SentenceTransformer `all-MiniLM-L6-v2` → ChromaDB upsert |
+| **Runner** | `run.py` — orchestrator: scrape → seed → log statistics |
+| **Chính sách** | **Zero Hallucination** — nếu publisher block request → skip, KHÔNG inject fake data |
+
+**Pipeline Architecture:**
+
+```mermaid
+graph TB
+    subgraph CONFIG["📋 Configuration"]
+        Sources["sources.json<br/>3 publisher configs:<br/>• Elsevier (ScienceDirect)<br/>• MDPI<br/>• IEEE Computer Society"]
+        Selectors["CSS Selectors per publisher:<br/>item_container, title,<br/>deadline, scope, link"]
+    end
+
+    subgraph SCRAPER["🕷️ UniversalScraper"]
+        direction TB
+        LoadConfig["Load sources.json"]
+        CloudScraper["cloudscraper.create_scraper()<br/>browser: Chrome/Windows"]
+        FetchPage["GET publisher URL<br/>+ random delay 1-3s"]
+        ParseHTML["BeautifulSoup(html, 'html.parser')<br/>→ CSS selector extraction"]
+        NormalizeURL["urljoin(base_url, relative_link)"]
+        ZeroHallucination{"HTTP 200<br/>+ items found?"}
+        SkipPublisher["Skip publisher<br/>log warning, continue"]
+        CollectRecords["Collect CFP records:<br/>{title, scope, url,<br/>publisher, deadline}"]
+
+        LoadConfig --> CloudScraper
+        CloudScraper --> FetchPage
+        FetchPage --> ParseHTML
+        ParseHTML --> NormalizeURL
+        NormalizeURL --> ZeroHallucination
+        ZeroHallucination -->|"No"| SkipPublisher
+        ZeroHallucination -->|"Yes"| CollectRecords
+    end
+
+    subgraph BUILDER["🏗️ DbBuilder"]
+        direction TB
+        LoadModel["SentenceTransformer<br/>all-MiniLM-L6-v2"]
+        MakeID["MD5 hash(url or title)<br/>→ deterministic ID"]
+        BuildDoc["doc = title + scope<br/>(concatenated text)"]
+        Encode["model.encode(documents)<br/>→ 384-dim embeddings"]
+        Upsert["ChromaDB collection.upsert()<br/>ids, documents, embeddings,<br/>metadatas"]
+    end
+
+    subgraph CHROMADB["💾 ChromaDB"]
+        Collection["Collection: journal_cfps<br/>Space: cosine (HNSW)<br/>Path: backend/data/chroma_db/"]
+    end
+
+    subgraph RUNNER["🚀 run.py"]
+        Orchestrate["1. scraper.scrape_all()<br/>2. seed_database(records)<br/>3. Log: X records from Y publishers"]
+    end
+
+    Sources --> LoadConfig
+    Selectors --> ParseHTML
+    CollectRecords --> Orchestrate
+    Orchestrate --> BUILDER
+    LoadModel --> Encode
+    MakeID --> Upsert
+    BuildDoc --> Encode
+    Encode --> Upsert
+    Upsert --> Collection
+
+    %% Styles
+    classDef config fill:#f59e0b,color:#fff,stroke:#b45309
+    classDef scraper fill:#3b82f6,color:#fff,stroke:#1e40af
+    classDef builder fill:#10b981,color:#fff,stroke:#047857
+    classDef db fill:#8b5cf6,color:#fff,stroke:#6d28d9
+    classDef runner fill:#06b6d4,color:#fff,stroke:#0e7490
+    classDef error fill:#ef4444,color:#fff,stroke:#b91c1c
+
+    class Sources,Selectors config
+    class LoadConfig,CloudScraper,FetchPage,ParseHTML,NormalizeURL,ZeroHallucination,CollectRecords scraper
+    class SkipPublisher error
+    class LoadModel,MakeID,BuildDoc,Encode,Upsert builder
+    class Collection db
+    class Orchestrate runner
+```
+
+**Cách chạy pipeline:**
+
+```bash
+cd backend && python -m crawler.run
+# Output: Scraped X records from [Elsevier, MDPI, IEEE]
+# Output: Seeded ChromaDB with X documents
 ```
 
 ### 7.8 RoBERTa — AI Writing Detection
@@ -3063,12 +3172,12 @@ decoded = jwt.decode(token, settings.jwt_secret_key, algorithms=["HS256"])
 
 | # | Service | Type | SDK/Client | Fallback | Status | Latency |
 |---|---------|------|-----------|----------|--------|---------|
-| 1 | Google Gemini | LLM API | `google-genai` | Default messages | ✅ OK | ~1.2s |
+| 1 | Groq (LLaMA 3.1) | LLM API | `groq` | Heuristic Fallback → Static message | ✅ OK | ~0.8s |
 | 2 | OpenAlex | REST API | `pyalex` + `httpx` | SDK → HTTP → UNVERIFIED | ✅ OK | ~2.0s |
 | 3 | Crossref | REST API | `habanero` + `httpx` | SDK → HTTP → UNVERIFIED | ✅ OK | ~1.0s |
 | 4 | PubPeer | REST API | `httpx` (POST) | Graceful degrade → 0 comments | ✅ OK | ~0.4s |
 | 5 | HuggingFace Hub | Model Repo | `huggingface-hub` | Online → Local cache | ✅ OK | — |
-| 6 | SPECTER2 | ML Model | `sentence-transformers` | specter2 → scibert → MiniLM → TF-IDF | ✅ OK | ~0.2s |
+| 6 | ChromaDB | Vector DB | `chromadb` + `sentence-transformers` | Empty DB → return [] | ✅ OK | ~0.05s |
 | 7 | RoBERTa | ML Model | `transformers` + `torch` | ML → Rule-based only | ✅ OK | ~0.1s |
 | 8 | PyMuPDF | Library | `fitz` | — (required) | ✅ OK | <0.1s |
 | 9 | SQLAlchemy | ORM | `sqlalchemy` | — (required) | ✅ OK | <0.01s |

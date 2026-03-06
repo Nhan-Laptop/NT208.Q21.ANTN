@@ -1,0 +1,38 @@
+[
+  {
+    "publisher": "Elsevier",
+    "url": "https://www.sciencedirect.com/browse/calls-for-papers",
+    "base_url": "https://www.sciencedirect.com",
+    "selectors": {
+      "item_container": "div.call-for-papers-item, li.call-for-papers-result",
+      "title": "h3 a, h2 a, .result-title a",
+      "deadline": "span.deadline, .date-info, dd.deadline",
+      "scope": "p.description, div.scope-text, .result-description",
+      "link": "h3 a, h2 a, .result-title a"
+    }
+  },
+  {
+    "publisher": "MDPI",
+    "url": "https://www.mdpi.com/about/announcements/call_for_papers",
+    "base_url": "https://www.mdpi.com",
+    "selectors": {
+      "item_container": "div.announcement-item, div.card, .generic-item",
+      "title": "h2 a, h3 a, .title a",
+      "deadline": "span.date, .deadline-text, time",
+      "scope": "p, .description, .abstract-text",
+      "link": "h2 a, h3 a, .title a"
+    }
+  },
+  {
+    "publisher": "IEEE",
+    "url": "https://www.computer.org/publications/author-resources/calls-for-papers",
+    "base_url": "https://www.computer.org",
+    "selectors": {
+      "item_container": "div.cfp-item, article.cfp-entry, tr.cfp-row, li.cfp-listing",
+      "title": "h3 a, h4 a, td.title a, .cfp-title",
+      "deadline": "span.deadline, td.deadline, .cfp-deadline",
+      "scope": "p.description, td.description, .cfp-description",
+      "link": "h3 a, h4 a, td.title a, .cfp-title a"
+    }
+  }
+]

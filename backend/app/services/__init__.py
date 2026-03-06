@@ -5,14 +5,14 @@ This module contains:
 - ChatService: Chat session and message management
 - FileService: File upload, storage (S3/local), and PDF extraction
 - StorageService: Unified storage abstraction (S3/local) with encryption
-- GeminiService: LLM integration with Google Gemini
+- GroqLLMService: LLM integration with Groq (LLaMA 3.1)
 - Bootstrap: System initialization and admin user setup
 """
 
 from app.services.bootstrap import ensure_admin_user
 from app.services.chat_service import ChatService, chat_service
 from app.services.file_service import FileService, file_service
-from app.services.llm_service import GeminiService, gemini_service
+from app.services.llm_service import GroqLLMService, groq_llm_service, GeminiService, gemini_service
 from app.services.storage_service import (
     StorageService,
     storage_service,
@@ -33,6 +33,8 @@ __all__ = [
     "StorageStats",
     "StorageObject",
     "UploadResult",
+    "GroqLLMService",
+    "groq_llm_service",
     "GeminiService",
     "gemini_service",
     "ensure_admin_user",

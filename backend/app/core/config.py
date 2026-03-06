@@ -58,14 +58,18 @@ class Settings(BaseSettings):
     master_key_file: str = ".aira_master_key"
 
     google_api_key: str | None = None
-    # Model names are provider-managed and may change. Use ListModels if 404 occurs.
+    groq_api_key: str | None = None
+    # Model names are provider-managed and may change.
     gemini_model: str = "gemini-flash-latest"
+    groq_model: str = "llama-3.1-8b-instant"
 
     @model_validator(mode="after")
     def _normalize_optional_keys(self) -> "Settings":
         """Treat empty strings as None for optional API keys."""
         if isinstance(self.google_api_key, str) and not self.google_api_key.strip():
             object.__setattr__(self, "google_api_key", None)
+        if isinstance(self.groq_api_key, str) and not self.groq_api_key.strip():
+            object.__setattr__(self, "groq_api_key", None)
         if isinstance(self.hf_token, str) and not self.hf_token.strip():
             object.__setattr__(self, "hf_token", None)
         return self

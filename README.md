@@ -13,7 +13,8 @@
   <img src="https://img.shields.io/badge/Next.js_15-000000?style=flat-square&logo=next.js&logoColor=white" alt="Next.js"/>
   <img src="https://img.shields.io/badge/React_18-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React"/>
   <img src="https://img.shields.io/badge/Tailwind_CSS_v4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind"/>
-  <img src="https://img.shields.io/badge/Google_Gemini-8E75B2?style=flat-square&logo=google&logoColor=white" alt="Gemini"/>
+  <img src="https://img.shields.io/badge/Groq_LLaMA_3.1-F55036?style=flat-square&logo=meta&logoColor=white" alt="Groq"/>
+  <img src="https://img.shields.io/badge/ChromaDB-4A154B?style=flat-square&logo=databricks&logoColor=white" alt="ChromaDB"/>
   <img src="https://img.shields.io/badge/HuggingFace-FFD21E?style=flat-square&logo=huggingface&logoColor=black" alt="HuggingFace"/>
   <img src="https://img.shields.io/badge/Python_3.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -61,13 +62,13 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 
 | Feature | Description | Powered By |
 |---------|-------------|------------|
-| 💬 **General Q&A** | Conversational AI for research questions, with context memory (8 messages) and file-aware responses | Google Gemini |
+| 💬 **General Q&A** | Conversational AI for research questions, with context memory (8 messages) and file-aware responses | Groq (LLaMA 3.1) |
 | 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI) from text → verify against authoritative databases → detect hallucinated references | OpenAlex + Crossref |
-| 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by semantic similarity, impact factor, and domain match | SPECTER2 / SciBERT |
+| 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by ChromaDB semantic search + domain match | ChromaDB + SentenceTransformer |
 | 🔍 **Retraction Scanning** | Check DOIs against retraction databases → multi-source risk assessment (NONE → CRITICAL) | Crossref + OpenAlex + PubPeer |
 | 🤖 **AI Writing Detection** | Ensemble analysis: 70% RoBERTa ML classifier + 30% rule-based heuristics (7 linguistic features) → 5-level verdict scale | RoBERTa + Custom Rules |
 | ✍️ **Grammar & Spell Check** | Offline grammar/spelling analysis powered by LanguageTool JVM server — detects errors, suggests fixes, returns corrected text | LanguageTool |
-| 📄 **PDF Summarization** | Upload PDF → automatic text extraction → AI-powered summary generation | PyMuPDF + Gemini |
+| 📄 **PDF Summarization** | Upload PDF → automatic text extraction → AI-powered summary generation | PyMuPDF + Groq |
 | 🔐 **End-to-End Encryption** | 5-layer security: HTTPS → JWT (HS256) → DB encryption (AES-256-GCM) → File encryption → Optional client-side payload encryption | PyCryptodome |
 | 🌙 **Dark Mode** | System preference detection + manual toggle, powered by Tailwind CSS v4 design tokens | Tailwind v4 |
 | 👤 **Admin Dashboard** | Real-time overview (users, sessions, files, storage), user management, audit logging | React Query |
@@ -97,7 +98,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 │  │  API Router (v1): auth │ sessions │ chat │ tools │      │     │
 │  │                        upload │ admin                    │     │
 │  ├─────────────────────────────────────────────────────────┤     │
-│  │  Services: ChatService │ FileService │ GeminiService     │     │
+│  │  Services: ChatService │ FileService │ GroqLLMService     │     │
 │  ├─────────────────────────────────────────────────────────┤     │
 │  │  ML Tools: JournalFinder │ CitationChecker │             │     │
 │  │            RetractionScanner │ AIWritingDetector │        │     │
@@ -115,7 +116,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
                                ▼
               ┌───────────────────────────────┐
               │  SQLite (dev) / PostgreSQL    │
-              │  External: Gemini, OpenAlex,  │
+              │  External: Groq, OpenAlex,   │
               │  Crossref, PubPeer, AWS S3    │
               └───────────────────────────────┘
 ```
@@ -134,9 +135,11 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 | **FastAPI** | ≥0.115 | Web framework, auto-generated OpenAPI docs |
 | **SQLAlchemy** | ≥2.0.30 | ORM with transparent encryption (custom TypeDecorators) |
 | **Pydantic** | v2 | Request/response validation, settings management |
-| **Google GenAI SDK** | ≥1.0.0 | Gemini LLM integration (chat + summarization + function calling) |
-| **Tenacity** | ≥8.2.0 | Retry with exponential backoff for Gemini 503/429 errors |
-| **Sentence-Transformers** | ≥2.2.0 | SPECTER2 / SciBERT embedding models + intent routing (all-MiniLM-L6-v2) |
+| **Groq SDK** | ≥0.12.0 | Groq LLM integration (LLaMA 3.1 chat + summarization + function calling) |
+| **Tenacity** | ≥8.2.0 | Retry with exponential backoff for Groq 503/429 errors |
+| **ChromaDB** | ≥0.5.0 | Persistent vector database for journal CFP semantic search |
+| **Sentence-Transformers** | ≥2.2.0 | all-MiniLM-L6-v2 embeddings (ChromaDB + intent routing) |
+| **cloudscraper** | ≥1.2.71 | Anti-bot bypass for academic publisher scraping |
 | **Transformers + PyTorch** | ≥4.35 / ≥2.0 | RoBERTa AI writing detection pipeline |
 | **PyAlex** | ≥0.13 | OpenAlex API wrapper (citation verification) |
 | **Habanero** | ≥1.2.0 | Crossref API wrapper (DOI verification, retraction scan) |
@@ -165,7 +168,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 
 | Service | Purpose | Notes |
 |---------|---------|-------|
-| **Google Gemini** | LLM (chat, summarization, function calling) | Free tier: 60 req/min |
+| **Groq** | LLM (LLaMA 3.1: chat, summarization, function calling) | Free tier: 30 req/min |
 | **OpenAlex** | Scholarly metadata (250M+ works) | Free, no API key required |
 | **Crossref** | DOI verification, retraction metadata | Free, `update-to` field for retraction detection |
 | **PubPeer** | Post-publication peer review comments | Free, community-driven early warnings |
@@ -180,7 +183,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 - **npm** 9+ or **pnpm**
 - **Git**
 - *(Optional)* **Java 17+** for Grammar Checker (LanguageTool JVM) — `sudo apt install openjdk-17-jre-headless`
-- *(Optional)* A [Google AI Studio API Key](https://aistudio.google.com/apikey) for Gemini LLM features
+- *(Optional)* A [Groq API Key](https://console.groq.com/keys) for LLM features (LLaMA 3.1)
 - *(Optional)* A [Hugging Face Token](https://huggingface.co/settings/tokens) for authenticated model downloads
 
 ---
@@ -256,8 +259,9 @@ ACCESS_TOKEN_EXPIRE_MINUTES=60
 ADMIN_EMAIL=admin@aira.local
 ADMIN_PASSWORD=ChangeMe!123
 
-# === Google Gemini LLM ===
-GOOGLE_API_KEY=your-google-ai-studio-api-key
+# === Groq LLM ===
+GROQ_API_KEY=your-groq-api-key
+GROQ_MODEL=llama-3.1-8b-instant
 
 # === Hugging Face (Optional - for ML model downloads) ===
 HF_TOKEN=hf_your_token_here
@@ -361,15 +365,23 @@ NT208.Q21.ANTN/
 │   │   │       └── admin.py   # dashboard, users, files, storage (7 endpoints)
 │   │   └── services/
 │   │       ├── chat_service.py     # Mode-based routing, context building
-│   │       ├── llm_service.py      # Gemini LLM (google-genai SDK)
+│   │       ├── llm_service.py      # Groq LLM (groq SDK, LLaMA 3.1)
 │   │       ├── file_service.py     # Upload, PDF extraction, stats
 │   │       ├── storage_service.py  # S3/Local dual-backend + encryption
 │   │       ├── bootstrap.py        # Auto-create admin on startup
 │   │       └── tools/
-│   │           ├── journal_finder.py       # SPECTER2/SciBERT + TF-IDF fallback
+│   │           ├── journal_finder.py       # ChromaDB semantic search + TF-IDF fallback
 │   │           ├── citation_checker.py     # PyAlex + Habanero multi-source
 │   │           ├── retraction_scan.py      # Crossref + OpenAlex + PubPeer
-│   │           └── ai_writing_detector.py  # RoBERTa ensemble + 7 heuristics
+│   │           ├── ai_writing_detector.py  # RoBERTa ensemble + 7 heuristics
+│   │           └── grammar_checker.py      # LanguageTool JVM wrapper
+│   ├── crawler/
+│   │   ├── sources.json     # Publisher scraping configs (Elsevier, MDPI, IEEE)
+│   │   ├── universal_scraper.py  # cloudscraper + BeautifulSoup CSS extraction
+│   │   ├── db_builder.py    # SentenceTransformer → ChromaDB upsert
+│   │   └── run.py           # Pipeline orchestrator
+│   ├── data/
+│   │   └── chroma_db/       # Persistent vector store (auto-generated)
 │   ├── scripts/
 │   │   └── generate_keys.py  # AES master key generator
 │   └── security/
@@ -437,25 +449,24 @@ NT208.Q21.ANTN/
 
 | Model | Parameters | Purpose | Latency |
 |-------|-----------|---------|---------|
-| **SPECTER2** (`allenai/specter2_base`) | 110M | Scientific paper embeddings (768-dim) for journal matching | ~3.9s (first load) |
-| **SciBERT** (`allenai/scibert_scivocab_uncased`) | 110M | Fallback embeddings with science-optimized vocabulary | ~3s |
+| **ChromaDB** + **all-MiniLM-L6-v2** | 22M | Journal matching via vector similarity search (384-dim) | ~0.05s (query) |
 | **RoBERTa** (`roberta-base-openai-detector`) | 125M | Binary classifier: Human vs AI-generated text | ~4.8s (first load) |
 | **all-MiniLM-L6-v2** | 22M | Semantic intent routing (384-dim embeddings for heuristic fallback engine) | ~1s |
 
 ### Fallback Chain (Graceful Degradation)
 
 ```
-Journal Matching:  SPECTER2 → SciBERT → MiniLM-L6-v2 → TF-IDF (no ML)
+Journal Matching:  ChromaDB search → TF-IDF keyword fallback (no ML)
 AI Detection:      RoBERTa ensemble (70/30) → Rule-based only (no ML)
 Grammar Check:     LanguageTool JVM → Error response (Java <17)
 ```
 
-**3-Tier Resiliency** (when Gemini is unavailable):
+**3-Tier Resiliency** (when Groq is unavailable):
 ```
 Tier 1: Tenacity retry (3× exponential backoff: 4s → 10s)
 Tier 2: Heuristic Fallback Engine
         → SemanticIntentRouter (all-MiniLM-L6-v2, cosine ≥ 0.35)
-        → Direct tool execution (bypass Gemini entirely)
+        → Direct tool execution (bypass Groq entirely)
         → Template response generation
 Tier 3: Static error message (never crashes)
 ```
@@ -510,7 +521,7 @@ python security/pentest/quick_audit.py --base-url http://localhost:8000
 
 | Document | Description |
 |----------|-------------|
-| [**architecture.md**](./architecture.md) | Complete backend architecture — data models, service layer, tool pipelines, Gemini Function Calling, security design (3000+ lines, 10+ Mermaid diagrams) |
+| [**architecture.md**](./architecture.md) | Complete backend architecture — data models, service layer, tool pipelines, Groq Function Calling, security design (3000+ lines, 10+ Mermaid diagrams) |
 | [**frontend.md**](./frontend.md) | Complete frontend architecture — provider tree, routing, state management, components, hooks, theming (1000+ lines, 10 Mermaid diagrams) |
 | [**CLAUDE.md**](./CLAUDE.md) | Session audit log — all changes, fixes, and decisions across development sessions |
 
@@ -521,20 +532,21 @@ python security/pentest/quick_audit.py --base-url http://localhost:8000
 ### ✅ Completed (MVP)
 
 - [x] JWT Authentication + RBAC/ABAC authorization
-- [x] Chat AI with Google Gemini (context memory, file-aware responses)
+- [x] Chat AI with Groq LLaMA 3.1 (context memory, file-aware responses)
 - [x] Citation Verification (6 regex patterns, OpenAlex + Crossref)
-- [x] Journal Matching (SPECTER2/SciBERT embeddings, 35 journals)
+- [x] Journal Matching (ChromaDB vector search, dynamic crawler pipeline)
 - [x] Retraction Scanning (Crossref + OpenAlex + PubPeer, risk levels)
 - [x] AI Writing Detection (RoBERTa ensemble, 7 heuristics)
-- [x] PDF Summarization (PyMuPDF + Gemini)
+- [x] PDF Summarization (PyMuPDF + Groq)
 - [x] File Upload/Download with AES-256-GCM encryption
 - [x] Admin Dashboard (overview, users, files, storage)
 - [x] Dark/Light mode with system preference
 - [x] Security hardening (38 audit issues → 28+ fixed)
-- [x] Gemini Function Calling integration
+- [x] Groq Function Calling integration (5 tools)
 - [x] Grammar & Spell Checker (LanguageTool JVM, offline)
 - [x] Semantic intent routing (all-MiniLM-L6-v2 heuristic fallback engine)
 - [x] 3-tier resiliency architecture (tenacity retry → heuristic fallback → static error)
+- [x] ChromaDB vector database + crawler pipeline (Elsevier, MDPI, IEEE)
 
 ### 🔴 High Priority
 
@@ -553,7 +565,6 @@ python security/pentest/quick_audit.py --base-url http://localhost:8000
 ### 🟢 Low Priority
 
 - [ ] E2E tests (Playwright)
-- [ ] Vector database (Qdrant) for semantic paper search
 - [ ] i18n (full Vietnamese + English)
 - [ ] Email notifications (confirmation, password reset)
 

@@ -1,18 +1,19 @@
 """
-Gemini LLM Service — with **Function Calling** for academic tool
+Groq LLM Service — with **Function Calling** (Tool Use) for academic tool
 integration.
 
-Uses the ``google.genai`` SDK exclusively.  The deprecated
-``google.generativeai`` package has been removed.
+Uses the ``groq`` SDK with LLaMA 3.1 models that natively support
+tool / function-calling via the OpenAI-compatible chat completions API.
 
 Function Calling Architecture
 -----------------------------
-User Prompt → Gemini → [Function Call] → Python Tool Execution
-→ [Function Response] → Gemini → Final Answer (grounded in real data)
+User Prompt → Groq (LLaMA 3.1) → [tool_calls] → Python Tool Execution
+→ [tool message] → Groq → Final Answer (grounded in real data)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -32,15 +33,13 @@ from app.models.chat_message import ChatMessage, MessageType
 
 logger = logging.getLogger(__name__)
 
-# ---------- google-genai import ------------------------------------------
+# ---------- groq SDK import ----------------------------------------------
 try:
-    from google import genai
-    from google.genai import errors as genai_errors
-    from google.genai import types as genai_types
+    from groq import Groq
+    import groq as groq_module  # for exception classes
 except ImportError:
-    genai = None  # type: ignore[assignment]
-    genai_errors = None  # type: ignore[assignment]
-    genai_types = None  # type: ignore[assignment]
+    Groq = None  # type: ignore[assignment,misc]
+    groq_module = None  # type: ignore[assignment]
 
 # ---------- tool singletons (lazy — already init'd at module level) ------
 from app.services.tools.retraction_scan import retraction_scanner
@@ -327,6 +326,114 @@ _TOOL_DATA_KEY: dict[str, str] = {
     "check_grammar": "",  # entire dict *is* the data
 }
 
+# ---- Groq / OpenAI-compatible tool schemas ------------------------------
+
+_GROQ_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_retraction_and_pubpeer",
+            "description": (
+                "Scan DOIs in the given text for retraction status, corrections, "
+                "expressions of concern, and PubPeer community discussions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Text containing one or more DOIs to scan.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_citation",
+            "description": (
+                "Verify academic citations found in the given text against "
+                "OpenAlex and Crossref databases."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Text containing citations to verify (DOI, APA, author-year).",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "match_journal",
+            "description": (
+                "Find suitable academic journals for a manuscript based on its "
+                "abstract and optional title using SPECTER2 semantic matching."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "abstract": {
+                        "type": "string",
+                        "description": "The abstract or main text describing the research topic.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional paper title for improved matching accuracy.",
+                    },
+                },
+                "required": ["abstract"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_ai_writing",
+            "description": (
+                "Analyse text to detect whether it was written by AI or a human, "
+                "using a RoBERTa ensemble model and rule-based heuristics."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The text to analyse for AI writing indicators (min 50 chars).",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_grammar",
+            "description": (
+                "Check text for grammar and spelling errors using LanguageTool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The text to check for grammar and spelling errors.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+]
+
 _MAX_FC_ITERATIONS = 5
 
 # =========================================================================
@@ -345,28 +452,28 @@ class FunctionCallingResponse:
 
 
 # =========================================================================
-# GeminiService
+# GroqLLMService
 # =========================================================================
 
-class GeminiService:
-    """Wrapper around Google Gemini with Function Calling support."""
+class GroqLLMService:
+    """Wrapper around Groq (LLaMA 3.1) with Function Calling (Tool Use)."""
 
     def __init__(self) -> None:
         self._client = None
-        if not settings.google_api_key:
-            logger.warning("GOOGLE_API_KEY not set — Gemini disabled.")
+        if not settings.groq_api_key:
+            logger.warning("GROQ_API_KEY not set — Groq LLM disabled.")
             return
-        if genai is None:
-            logger.warning("google-genai package not installed — Gemini disabled.")
+        if Groq is None:
+            logger.warning("groq package not installed — Groq LLM disabled.")
             return
         try:
-            self._client = genai.Client(api_key=settings.google_api_key)
+            self._client = Groq(api_key=settings.groq_api_key)
             logger.info(
-                "Gemini client initialised (model=%s) with Function Calling.",
-                settings.gemini_model,
+                "Groq client initialised (model=%s) with Function Calling.",
+                settings.groq_model,
             )
         except Exception:
-            logger.exception("Failed to create Gemini client.")
+            logger.exception("Failed to create Groq client.")
             self._client = None
 
     @property
@@ -374,21 +481,21 @@ class GeminiService:
         return self._client is not None
 
     # ------------------------------------------------------------------
-    # Retryable Gemini API call
+    # Retryable Groq API call
     # ------------------------------------------------------------------
 
-    def _call_generate_content(self, **kwargs: Any) -> Any:
-        """Call ``generate_content`` with tenacity retry on transient
-        Gemini errors (503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, etc.).
+    def _call_chat_completions(self, **kwargs: Any) -> Any:
+        """Call ``chat.completions.create`` with tenacity retry on
+        transient Groq errors (503, 429 rate-limit, etc.).
 
         Retries up to 3 times with exponential back-off (4 s → 10 s).
         """
-        # Build the retry-decorated closure at call-time so *self* is
-        # captured properly and the decorator's exception filter uses
-        # the (possibly-None) genai_errors reference.
         retry_types: tuple = (Exception,)  # fallback if SDK missing
-        if genai_errors is not None:
-            retry_types = (genai_errors.ServerError, genai_errors.APIError)
+        if groq_module is not None:
+            retry_types = (
+                groq_module.APIStatusError,
+                groq_module.APIConnectionError,
+            )
 
         @retry(
             stop=stop_after_attempt(3),
@@ -397,7 +504,7 @@ class GeminiService:
             before_sleep=before_sleep_log(logger, logging.WARNING),
         )
         def _inner():
-            return self._client.models.generate_content(**kwargs)  # type: ignore[union-attr]
+            return self._client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
 
         return _inner()
 
@@ -406,8 +513,8 @@ class GeminiService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _try_heuristic_fallback(contents: list) -> FunctionCallingResponse | None:
-        """Extract user text + file context from the Gemini ``contents``
+    def _try_heuristic_fallback(messages: list[dict[str, Any]]) -> FunctionCallingResponse | None:
+        """Extract user text + file context from the Groq ``messages``
         list and attempt a heuristic tool execution.
 
         Returns a ``FunctionCallingResponse`` if a tool was successfully
@@ -418,7 +525,7 @@ class GeminiService:
         ``None``, which lets the caller show the static error message.
         """
         try:
-            # 1. Safely import the router (handle both possible locations)
+            # 1. Safely import the router
             try:
                 from app.services.heuristic_router import fallback_process_request
             except ModuleNotFoundError:
@@ -427,24 +534,21 @@ class GeminiService:
             # 2. Extract the last user message and any <Attached_Document>
             user_text = ""
             file_context: str | None = None
-            for content_obj in reversed(contents):
-                role = getattr(content_obj, "role", None)
-                if role != "user":
+            for msg in reversed(messages):
+                if msg.get("role") != "user":
                     continue
-                parts = getattr(content_obj, "parts", [])
-                for part in parts:
-                    text = getattr(part, "text", "") or ""
-                    if not text:
-                        continue
-                    if "<Attached_Document>" in text:
-                        file_context = text
-                    elif not user_text:
-                        user_text = text
+                content = msg.get("content", "")
+                if not content:
+                    continue
+                if "<Attached_Document>" in content:
+                    file_context = content
+                elif not user_text:
+                    user_text = content
                 if user_text or file_context:
-                    break  # found the latest user turn
+                    break
 
             if not user_text and not file_context:
-                logger.warning("Heuristic fallback: no user_text or file_context found in contents.")
+                logger.warning("Heuristic fallback: no user_text or file_context found in messages.")
                 return None
 
             logger.info(
@@ -466,45 +570,41 @@ class GeminiService:
                 message_type=result["message_type"],
                 tool_results=result.get("tool_results"),
             )
-        except Exception as exc:    
+        except Exception as exc:
             logger.exception("CRITICAL: _try_heuristic_fallback crashed: %s", exc)
             return None
 
     # ------------------------------------------------------------------
-    # Build multi-turn contents
+    # Build multi-turn messages
     # ------------------------------------------------------------------
 
-    def _build_contents(
-        self, history: Sequence[ChatMessage], user_text: str,
-    ) -> list:
-        """Convert DB message history + new user text into Gemini Content
-        objects for multi-turn conversation."""
-        if genai_types is None:
-            return []
-        contents: list = []
+    @staticmethod
+    def _build_messages(
+        history: Sequence[ChatMessage], user_text: str,
+    ) -> list[dict[str, str]]:
+        """Convert DB message history + new user text into Groq/OpenAI
+        messages array for multi-turn conversation."""
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+        ]
         for msg in history:
-            role = "user" if msg.role.value == "user" else "model"
+            role = "user" if msg.role.value == "user" else "assistant"
             text = (msg.content or "").strip()
             if text:
-                contents.append(
-                    genai_types.Content(role=role, parts=[genai_types.Part(text=text)])
-                )
-        contents.append(
-            genai_types.Content(role="user", parts=[genai_types.Part(text=user_text)])
-        )
-        return contents
+                messages.append({"role": role, "content": text})
+        messages.append({"role": "user", "content": user_text})
+        return messages
 
     # ------------------------------------------------------------------
-    # Function Calling loop
+    # Execute a single tool call
     # ------------------------------------------------------------------
 
-    def _execute_function_call(self, fc: Any) -> dict[str, Any]:
-        """Execute a single function call requested by Gemini."""
-        name: str = fc.name
-        args: dict = dict(fc.args) if fc.args else {}
+    @staticmethod
+    def _execute_tool_call(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Execute a single function call requested by the LLM."""
         fn = _TOOL_FUNCTIONS.get(name)
         if fn is None:
-            logger.warning("Gemini requested unknown function: %s", name)
+            logger.warning("LLM requested unknown function: %s", name)
             return {"error": f"Unknown function: {name}"}
         logger.info("Executing tool: %s(%s)", name, list(args.keys()))
         try:
@@ -513,65 +613,60 @@ class GeminiService:
             logger.error("Tool %s execution failed: %s", name, exc, exc_info=True)
             return {"error": f"Tool execution failed: {exc}"}
 
+    # ------------------------------------------------------------------
+    # Function Calling loop
+    # ------------------------------------------------------------------
+
     def _generate_with_fc(
         self,
-        contents: list,
-        system_instruction: str,
+        messages: list[dict[str, Any]],
     ) -> FunctionCallingResponse:
-        """Run the function-calling loop until Gemini returns a final text
-        response (or the iteration budget is exhausted)."""
-
-        config = genai_types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            tools=_TOOL_CALLABLES,
-            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
-                disable=True,
-            ),
-        )
+        """Run the function-calling loop until the LLM returns a final
+        text response (or the iteration budget is exhausted)."""
 
         all_tool_calls: list[dict[str, Any]] = []
 
         # Build the set of SDK exception types for explicit catching
         _sdk_errors: tuple = ()
-        if genai_errors is not None:
-            _sdk_errors = (genai_errors.ServerError, genai_errors.APIError)
+        if groq_module is not None:
+            _sdk_errors = (
+                groq_module.APIStatusError,
+                groq_module.APIConnectionError,
+            )
 
         for iteration in range(_MAX_FC_ITERATIONS):
             try:
-                response = self._call_generate_content(
-                    model=settings.gemini_model,
-                    contents=contents,
-                    config=config,
+                response = self._call_chat_completions(
+                    model=settings.groq_model,
+                    messages=messages,
+                    tools=_GROQ_TOOLS,
+                    tool_choice="auto",
                 )
             except (*_sdk_errors, RetryError) as exc:
-                # Tenacity RetryError (all retries exhausted) or SDK
-                # error that bypassed the retry filter.
                 logger.error(
-                    "Gemini API error after retries (iter %d): %s",
+                    "Groq API error after retries (iter %d): %s",
                     iteration, exc, exc_info=True,
                 )
                 # ── Heuristic Fallback ──────────────────────────────
-                fallback = self._try_heuristic_fallback(contents)
+                fallback = self._try_heuristic_fallback(messages)
                 if fallback is not None:
                     return fallback
                 # ── Static error (no intent detected) ──────────────
                 return FunctionCallingResponse(
                     text=(
-                        "⚠️ Hệ thống AI hiện đang quá tải "
-                        "(Lỗi 503/429 từ Google). "
+                        "⚠️ Hệ thống AI hiện đang quá tải. "
                         "Vui lòng đợi vài phút và thử lại."
                     ),
                     message_type="TEXT",
                     tool_results=None,
                 )
             except Exception as exc:
-                # Any other unexpected error — NEVER propagate.
                 logger.exception(
-                    "Unexpected error calling Gemini (iter %d): %s",
+                    "Unexpected error calling Groq (iter %d): %s",
                     iteration, exc,
                 )
                 # ── Heuristic Fallback ──────────────────────────────
-                fallback = self._try_heuristic_fallback(contents)
+                fallback = self._try_heuristic_fallback(messages)
                 if fallback is not None:
                     return fallback
                 # ── Static error ───────────────────────────────────
@@ -584,25 +679,23 @@ class GeminiService:
                     tool_results=None,
                 )
 
-            if not response.candidates:
-                return FunctionCallingResponse(text="Gemini không trả về kết quả.")
+            if not response.choices:
+                return FunctionCallingResponse(text="LLM không trả về kết quả.")
 
-            candidate = response.candidates[0]
-            parts = candidate.content.parts if candidate.content else []
+            choice = response.choices[0]
+            assistant_message = choice.message
 
-            # Separate function-call parts from text parts
-            fc_parts = [p for p in parts if getattr(p, "function_call", None)]
-            text_parts = [p.text for p in parts if getattr(p, "text", None)]
+            # Check if the model wants to call tools
+            tool_calls_in_response = assistant_message.tool_calls
 
-            if not fc_parts:
+            if not tool_calls_in_response:
                 # ---- Final text response ----
-                final_text = "\n".join(text_parts).strip()
+                final_text = (assistant_message.content or "").strip()
 
                 msg_type = "text"
                 tool_results_payload: dict[str, Any] | None = None
 
                 if all_tool_calls:
-                    # Use the first tool call to determine MessageType
                     primary = all_tool_calls[0]
                     mt = _TOOL_MESSAGE_TYPE.get(primary["name"])
                     if mt is not None:
@@ -615,40 +708,56 @@ class GeminiService:
                         }
 
                 return FunctionCallingResponse(
-                    text=final_text or "Không có phản hồi từ Gemini.",
+                    text=final_text or "Không có phản hồi từ LLM.",
                     tool_calls=all_tool_calls,
                     message_type=msg_type,
                     tool_results=tool_results_payload,
                 )
 
-            # ---- Execute function calls ----
-            # Append model's response (containing function_call parts)
-            contents.append(candidate.content)
+            # ---- Execute tool calls ----
+            # Append the assistant message (with tool_calls) to conversation
+            messages.append({
+                "role": "assistant",
+                "content": assistant_message.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in tool_calls_in_response
+                ],
+            })
 
-            fn_response_parts: list = []
-            for fc_part in fc_parts:
-                fc = fc_part.function_call
-                result = self._execute_function_call(fc)
+            for tc in tool_calls_in_response:
+                fn_name = tc.function.name
+                try:
+                    fn_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except json.JSONDecodeError:
+                    fn_args = {}
+
+                result = self._execute_tool_call(fn_name, fn_args)
                 all_tool_calls.append({
-                    "name": fc.name,
-                    "args": dict(fc.args) if fc.args else {},
+                    "name": fn_name,
+                    "args": fn_args,
                     "result": result,
                 })
-                fn_response_parts.append(
-                    genai_types.Part.from_function_response(
-                        name=fc.name,
-                        response=result,
-                    )
-                )
 
-            # Send function responses back to Gemini
-            contents.append(genai_types.Content(parts=fn_response_parts))
+                # Send function result back to the model
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                })
 
             logger.info(
                 "FC iteration %d: executed %d tool(s) [%s]",
                 iteration + 1,
-                len(fc_parts),
-                ", ".join(p.function_call.name for p in fc_parts),
+                len(tool_calls_in_response),
+                ", ".join(tc.function.name for tc in tool_calls_in_response),
             )
 
         # Budget exhausted
@@ -678,17 +787,15 @@ class GeminiService:
         if not self.enabled:
             return FunctionCallingResponse(
                 text=(
-                    "Gemini chưa được cấu hình. Hãy đặt GOOGLE_API_KEY "
+                    "Groq LLM chưa được cấu hình. Hãy đặt GROQ_API_KEY "
                     "để kích hoạt AI. Tin nhắn của bạn đã được lưu."
                 ),
             )
 
-        contents = self._build_contents(history, user_text)
+        messages = self._build_messages(history, user_text)
         try:
-            return self._generate_with_fc(contents, SYSTEM_PROMPT)
+            return self._generate_with_fc(messages)
         except Exception as exc:
-            # Ultimate safety net — should never be reached, but
-            # guarantees the backend NEVER crashes on a Gemini failure.
             logger.exception("Unhandled error in generate_response: %s", exc)
             return FunctionCallingResponse(
                 text=(
@@ -710,18 +817,18 @@ class GeminiService:
         if not self.enabled:
             return None
         try:
-            config: dict = {}
+            messages: list[dict[str, str]] = []
             if system_instruction:
-                config["system_instruction"] = system_instruction
-            result = self._call_generate_content(
-                model=settings.gemini_model,
-                contents=prompt,
-                config=config,
+                messages.append({"role": "system", "content": system_instruction})
+            messages.append({"role": "user", "content": prompt})
+            result = self._call_chat_completions(
+                model=settings.groq_model,
+                messages=messages,
             )
-            text = getattr(result, "text", "") or ""
-            return text.strip() or None
+            text = (result.choices[0].message.content or "").strip() if result.choices else ""
+            return text or None
         except (RetryError, Exception):
-            logger.exception("Gemini generate_content (simple) failed after retries.")
+            logger.exception("Groq generate (simple) failed after retries.")
             return None
 
     def summarize_text(self, text: str, max_words: int = 180) -> str:
@@ -733,14 +840,19 @@ class GeminiService:
         )
         if not self.enabled:
             clipped = " ".join(text.split()[:max_words])
-            return f"Tóm tắt (fallback khi Gemini chưa cấu hình): {clipped}"
+            return f"Tóm tắt (fallback khi LLM chưa cấu hình): {clipped}"
 
         result = self.generate_simple(prompt, SYSTEM_PROMPT)
         if result:
             return result
 
         clipped = " ".join(text.split()[:max_words])
-        return f"Tóm tắt (fallback do Gemini lỗi): {clipped}"
+        return f"Tóm tắt (fallback do LLM lỗi): {clipped}"
 
 
-gemini_service = GeminiService()
+# ---- Module-level singleton + backward-compatible aliases ---------------
+groq_llm_service = GroqLLMService()
+
+# Backward compatibility — existing code imports these names
+GeminiService = GroqLLMService
+gemini_service = groq_llm_service
