@@ -6,9 +6,9 @@ import { ChevronDown } from "lucide-react";
 
 const MODE_LABELS: Record<Session["mode"], string> = {
   general_qa: "General Chat",
-  verification: "Citation Check",
+  verification: "Citation Verification",
   journal_match: "Journal Match",
-  retraction: "Retraction Scan",
+  retraction: "Retraction & PubPeer Scan",
   ai_detection: "AI Detection",
 };
 

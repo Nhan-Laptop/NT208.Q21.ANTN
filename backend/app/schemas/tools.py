@@ -60,6 +60,7 @@ class RetractionItem(BaseModel):
     doi: str
     status: str
     title: str | None = None
+    authors: list[str] = []
     pubpeer_comments: int = 0
     pubpeer_url: str | None = None
     risk_level: str = "UNKNOWN"

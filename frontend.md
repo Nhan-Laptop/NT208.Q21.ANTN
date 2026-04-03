@@ -2,7 +2,7 @@
 
 > **Project**: AIRA — Academic Integrity & Research Assistant  
 > **Version**: 1.0.0  
-> **Last Updated**: 2026-06-06  
+> **Last Updated**: 2026-04-03  
 > **Stack**: Next.js 15 (App Router) · React 18 · TypeScript · Tailwind CSS v4 · TanStack React Query
 
 ---
@@ -13,8 +13,12 @@ Các hành vi dưới đây đã được đối chiếu với mã nguồn hiệ
 
 - Session title mặc định là `Trò chuyện mới`; sau message user đầu tiên, backend tự sinh title ngắn và trả lại `response.session` đã cập nhật.
 - Frontend sync title sidebar ngay trong `chat-store` bằng `dispatch({ type: "UPSERT_SESSION", session: response.session })`, không cần chờ reload toàn bộ sessions.
+- Frontend không tự cắt title từ client text (ví dụ `text.slice(...)`); sidebar luôn đồng bộ theo `response.session.title` do backend trả về.
 - Khi user gửi text rất dài hoặc có `<Attached_Document>`, frontend vẫn gửi input bình thường; backend mới là nơi chuyển sang cơ chế pass-by-reference (`document_id`) trước khi gọi Groq.
 - UI không hiển thị raw tài liệu trong tool arguments; việc resolve `document_id` -> full text diễn ra hoàn toàn ở backend execution layer.
+- Frontend render tool cards theo `message_type` + `tool_results`; không parse pseudo tool syntax từ plain assistant text.
+- Với AI detection/grammar, backend có thể trả terminal summary text nhưng vẫn kèm full structured payload để card hiển thị đầy đủ.
+- Nội dung AI detection trong plain text được xem là ước lượng (probabilistic), còn dữ liệu card (`score`, `verdict`, `confidence`) là nguồn hiển thị chính để tránh over-claim.
 
 ---
 
@@ -446,12 +450,12 @@ graph TB
         direction TB
         SetSending["dispatch(SET_SENDING: true)"]
         CheckSession{{"activeSessionId<br/>exists?"}}
-        CreateSession["api.createSession(token, title, mode)<br/>title = text.slice(0, 60)"]
+        CreateSession["api.createSession(token, title, mode)<br/>title = 'Trò chuyện mới'"]
         AddSession["dispatch(ADD_SESSION)<br/>→ sets activeSessionId"]
         OptimisticMsg["dispatch(ADD_MESSAGES)<br/>→ optimistic user message<br/>id: 'temp-{Date.now()}'"]
         SendAPI["api.sendChat(token, sessionId, text, mode)"]
         ReloadMsgs["api.listMessages(token, sessionId)<br/>→ dispatch(SET_MESSAGES)<br/>(replaces optimistic)"]
-        ReloadSessions["api.listSessions(token)<br/>→ dispatch(SET_SESSIONS)<br/>(title may have changed)"]
+        SyncSession["dispatch(UPSERT_SESSION)<br/>with response.session<br/>(title may have changed)"]
         DoneSending["dispatch(SET_SENDING: false)"]
 
         SetSending --> CheckSession
@@ -461,8 +465,8 @@ graph TB
         CheckSession -->|"Yes"| OptimisticMsg
         OptimisticMsg --> SendAPI
         SendAPI --> ReloadMsgs
-        ReloadMsgs --> ReloadSessions
-        ReloadSessions --> DoneSending
+        ReloadMsgs --> SyncSession
+        SyncSession --> DoneSending
     end
 
     subgraph ERROR_PATH["❌ Error Recovery"]
@@ -480,7 +484,7 @@ graph TB
     classDef check fill:#f59e0b,color:#fff,stroke:#d97706
     classDef error fill:#ef4444,color:#fff,stroke:#dc2626
 
-    class SetSending,CreateSession,AddSession,OptimisticMsg,SendAPI,ReloadMsgs,ReloadSessions,DoneSending flow
+    class SetSending,CreateSession,AddSession,OptimisticMsg,SendAPI,ReloadMsgs,SyncSession,DoneSending flow
     class CheckSession check
     class ShowToast,ReloadClean error
 ```
@@ -488,7 +492,7 @@ graph TB
 **Key design decisions:**
 - **Optimistic updates**: User message appears instantly with a `temp-` prefixed ID
 - **Stale closure fix**: Uses local `sessionId` variable (not `state.activeSessionId`) for error recovery
-- **Session title**: Derived from first 60 characters of the first message
+- **Session title**: Session starts as `Trò chuyện mới`; backend may replace it after the first message with a concise generated title returned in `response.session`
 
 ---
 
@@ -535,6 +539,7 @@ graph TB
         CheckJL{{"journal_list?"}}
         CheckCR{{"citation_report?"}}
         CheckRR{{"retraction_report?"}}
+        CheckMT{{"multi_tool_report?"}}
         CheckAI{{"ai_writing_detection?"}}
         CheckPDF{{"pdf_summary?"}}
         CheckGR{{"grammar_report?"}}
@@ -545,7 +550,8 @@ graph TB
         CheckFU -->|"No"| CheckJL
         CheckJL -->|"No"| CheckCR
         CheckCR -->|"No"| CheckRR
-        CheckRR -->|"No"| CheckAI
+        CheckRR -->|"No"| CheckMT
+        CheckMT -->|"No"| CheckAI
         CheckAI -->|"No"| CheckPDF
         CheckPDF -->|"No"| CheckGR
         CheckGR -->|"No"| Fallback
@@ -556,7 +562,8 @@ graph TB
         FC["📎 FileAttachmentCard<br/>Icon + name + size + 🔒Encrypted badge"]
         JC["📚 JournalListCard<br/>Ranked list, IF, h-index,<br/>review time, acceptance rate,<br/>Open Access badge"]
         CC["✅ CitationReportCard<br/>Verified/Hallucinated badges,<br/>DOI, confidence, source"]
-        RC["⚠️ RetractionReportCard<br/>Risk level colors:<br/>CRITICAL/HIGH → red<br/>MEDIUM → amber<br/>LOW/NONE → green"]
+        RC["⚠️ RetractionReportCard<br/>Status-first badge:<br/>ACTIVE/RETRACTED/CORRECTED/CONCERN/UNKNOWN<br/>+ Risk as secondary context<br/>+ DOI metadata, factors, PubPeer, sources"]
+        MC["🧩 Grouped Multi-Tool Blocks<br/>Separate card per tool family"]
         AC["🧠 AIDetectionCard<br/>Score bar (0–100%),<br/>verdict badge, ML/Rule breakdown,<br/>flag chips"]
         PC["📄 PdfSummaryCard<br/>Summary text block"]
         GC["✍️ GrammarReportCard<br/>Error count, issue list,<br/>corrected text, rule categories"]
@@ -566,6 +573,7 @@ graph TB
     CheckJL -->|"Yes"| JC
     CheckCR -->|"Yes"| CC
     CheckRR -->|"Yes"| RC
+    CheckMT -->|"Yes"| MC
     CheckAI -->|"Yes"| AC
     CheckPDF -->|"Yes"| PC
     CheckGR -->|"Yes"| GC
@@ -576,18 +584,21 @@ graph TB
     classDef fallback fill:#6b7280,color:#fff,stroke:#4b5563
 
     class Input,ExtractType,CheckFU,CheckJL,CheckCR,CheckRR,CheckAI,CheckPDF,CheckGR dispatch
-    class FC,JC,CC,RC,AC,PC,GC card
+    class FC,JC,CC,RC,MC,AC,PC,GC card
     class Fallback fallback
 ```
 
 **Data extraction logic:**
 ```typescript
-// From toolResults: { type: "citation_report", data: [...] }
-const type = toolResults?.type;   // "citation_report"
-const rows = toolResults?.data;    // array of items
+// Single tool payload: { type: "citation_report", data: [...] }
+const type = toolResults?.type;
+const rows = toolResults?.data;
+
+// Multi-tool payload: { type: "multi_tool_report", groups: [...] }
+const groups = toolResults?.groups;
 ```
 
-The dispatch matches on **both** `messageType` prop and `toolResults.type` field for robustness.
+The dispatch matches on **both** `messageType` prop and `toolResults.type` field for robustness; when grouped payload is present, each group is rendered as its own tool-family card block.
 
 ### 7.3 Sidebar — Session Management
 
@@ -610,10 +621,14 @@ A native `<select>` dropdown with 5 options. Changes `state.mode` in ChatStore, 
 | Mode Value | Display Label | Backend Routing |
 |---|---|---|
 | `general_qa` | General Chat | Groq FC (auto-routes to tools) |
-| `verification` | Citation Check | `CitationChecker.verify()` direct |
+| `verification` | Citation Verification | `CitationChecker.verify()` direct |
 | `journal_match` | Journal Match | `JournalFinder.recommend()` direct |
-| `retraction` | Retraction Scan | `RetractionScanner.scan()` direct |
+| `retraction` | Retraction & PubPeer Scan | `RetractionScanner.scan()` direct |
 | `ai_detection` | AI Detection | `AIWritingDetector.analyze()` direct |
+
+Notes:
+- `verification` và `retraction` là hai intent sản phẩm tách biệt: verification dùng để xác minh tính hợp lệ citation/reference; retraction dùng để quét trạng thái thu hồi/cảnh báo DOI.
+- `ToolResultsRenderer` hỗ trợ grouped payload (`tool_results.type = "multi_tool_report"`) để hiển thị nhiều card tách biệt trong cùng một assistant message khi backend thực thi nhiều tool family có chủ đích.
 
 ### 7.5 MessageBubble — Smart Rendering
 
@@ -627,6 +642,9 @@ Wrapped in `React.memo()` for performance (prevents re-render when other message
 | `role=user` | Right-aligned, accent-colored bubble, User icon |
 | `role=assistant && type=text` | Left-aligned, gray bubble, Bot icon, plain text |
 | `role=assistant && type≠text && tool_results` | Left-aligned bubble with embedded `ToolResultsRenderer` card |
+
+Additional rendering rule:
+- Nếu `tool_results` tồn tại (kể cả khi `message_type=text`), `ToolResultsRenderer` vẫn render card/group-card để không bỏ sót structured payload kiểu multi-tool.
 
 **Meta footer**: Timestamp (`toLocaleTimeString()`) + message type badge (if not `text` or `file_upload`).
 

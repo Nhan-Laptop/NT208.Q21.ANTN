@@ -275,15 +275,25 @@ export function CitationReportCard({ citations }: { citations: CitationItem[] })
 
 interface RetractionItem {
   doi?: string;
+  status?: string;
   title?: string;
   is_retracted?: boolean;
   retracted?: boolean;
   risk_level?: string;
+  risk_factors?: string[];
   reason?: string;
+  journal?: string;
+  publication_year?: number;
+  authors?: string[];
+  sources_checked?: string[];
   source?: string;
   details?: string;
   update_to?: string;
   pubpeer_comments?: number;
+  pubpeer_url?: string;
+  has_retraction?: boolean;
+  has_correction?: boolean;
+  has_concern?: boolean;
 }
 
 export function RetractionReportCard({ items }: { items: RetractionItem[] }) {
@@ -296,14 +306,32 @@ export function RetractionReportCard({ items }: { items: RetractionItem[] }) {
         </span>
       </div>
       {items.map((item, i) => {
-        const isRetracted = item.is_retracted || item.retracted;
+        const status = (item.status ?? "UNKNOWN").toUpperCase();
+        const isRetracted =
+          status === "RETRACTED" || item.has_retraction || item.is_retracted || item.retracted;
         const risk = (item.risk_level ?? "NONE").toUpperCase();
+        const statusCls =
+          status === "RETRACTED"
+            ? "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
+            : status === "CONCERN"
+              ? "bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400"
+              : status === "CORRECTED"
+                ? "bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400"
+                : status === "ACTIVE"
+                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400"
+                  : "bg-slate-100 text-slate-700 dark:bg-slate-800/40 dark:text-slate-300";
         const riskCls =
           risk === "CRITICAL" || risk === "HIGH"
             ? "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
             : risk === "MEDIUM"
               ? "bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400"
               : "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400";
+
+        const hasPubPeer = (item.pubpeer_comments ?? 0) > 0;
+        const factors = item.risk_factors ?? [];
+        const authors = item.authors ?? [];
+        const sources = item.sources_checked ?? [];
+
         return (
           <div
             key={i}
@@ -311,28 +339,72 @@ export function RetractionReportCard({ items }: { items: RetractionItem[] }) {
           >
             <div className="flex items-start justify-between gap-2 mb-1">
               <p className="text-xs font-medium text-text-primary dark:text-dark-text-primary truncate">
-                {item.doi || item.title || `DOI #${i + 1}`}
+                {item.title || item.doi || `DOI #${i + 1}`}
               </p>
-              <span className={clsx("text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0", riskCls)}>
-                {isRetracted ? "RETRACTED" : risk}
-              </span>
+              <div className="flex items-center gap-1 shrink-0">
+                <span className={clsx("text-[10px] font-semibold px-1.5 py-0.5 rounded", statusCls)}>
+                  {status}
+                </span>
+                <span className={clsx("text-[10px] font-medium px-1.5 py-0.5 rounded", riskCls)}>
+                  Risk: {risk}
+                </span>
+              </div>
             </div>
+            {item.doi && (
+              <p className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary mt-0.5">
+                DOI: {item.doi}
+              </p>
+            )}
             {item.reason && (
               <p className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary mt-0.5">
                 {item.reason}
               </p>
             )}
+            {!isRetracted && hasPubPeer && status !== "CONCERN" && (
+              <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-1">
+                Có thảo luận trên PubPeer nhưng chưa có bằng chứng bài đã bị rút.
+              </p>
+            )}
+
             <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-text-tertiary dark:text-dark-text-tertiary mt-1">
+              {item.journal && <span>Journal: {item.journal}</span>}
+              {item.publication_year != null && <span>Year: {item.publication_year}</span>}
+              {authors.length > 0 && <span>Authors: {authors.slice(0, 3).join(", ")}</span>}
               {item.source && <span>Source: {item.source}</span>}
+              {sources.length > 0 && <span>Sources checked: {sources.join(", ")}</span>}
               {item.pubpeer_comments != null && item.pubpeer_comments > 0 && (
                 <span>PubPeer: {item.pubpeer_comments} comment(s)</span>
               )}
             </div>
+            {item.pubpeer_url && (
+              <a
+                href={item.pubpeer_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 mt-1 text-[11px] text-accent dark:text-dark-accent hover:underline"
+              >
+                View PubPeer
+                <ExternalLink size={11} />
+              </a>
+            )}
+            {factors.length > 0 && (
+              <p className="text-[11px] text-text-secondary dark:text-dark-text-secondary mt-1">
+                Risk factors: {factors.join("; ")}
+              </p>
+            )}
           </div>
         );
       })}
     </div>
   );
+}
+
+interface MultiToolGroup {
+  tool_name?: string;
+  label?: string;
+  type?: string;
+  data?: unknown;
+  summary?: string;
 }
 
 /* ====================================================================
@@ -623,6 +695,41 @@ export function ToolResultsRenderer({
   content: string | null;
   toolResults: Record<string, unknown> | unknown[] | null;
 }) {
+  if (toolResults && !Array.isArray(toolResults)) {
+    const payloadType = (toolResults as Record<string, unknown>).type as string | undefined;
+    const groups = (toolResults as Record<string, unknown>).groups;
+    if (payloadType === "multi_tool_report" && Array.isArray(groups) && groups.length > 0) {
+      return (
+        <div className="mt-3 space-y-3">
+          {(groups as MultiToolGroup[]).map((group, idx) => {
+            const groupType = group.type ?? "text";
+            const groupLabel = group.label ?? group.tool_name ?? `Tool ${idx + 1}`;
+            return (
+              <div
+                key={`${group.tool_name ?? "tool"}-${idx}`}
+                className="rounded-xl border border-border dark:border-dark-border bg-surface dark:bg-dark-surface p-3"
+              >
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-text-tertiary dark:text-dark-text-tertiary mb-1">
+                  {groupLabel}
+                </div>
+                {group.summary && (
+                  <p className="text-xs text-text-secondary dark:text-dark-text-secondary mb-2">
+                    {group.summary}
+                  </p>
+                )}
+                <ToolResultsRenderer
+                  messageType={groupType}
+                  content={group.summary ?? content}
+                  toolResults={{ type: groupType, data: group.data }}
+                />
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+  }
+
   // --- File upload ---
   if (messageType === "file_upload" && toolResults && !Array.isArray(toolResults)) {
     const d = (toolResults as Record<string, unknown>).data as FileUploadData | undefined;

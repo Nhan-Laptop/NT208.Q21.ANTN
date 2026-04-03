@@ -169,9 +169,37 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
+_CITATION_EXPLICIT_RE = re.compile(
+    r"\b(citation|verify\s+citation|reference\s+check|bibliography"
+    r"|trích\s*dẫn|xác\s*minh\s*trích\s*dẫn|kiểm\s*tra\s*tài\s*liệu\s*tham\s*khảo"
+    r"|kiểm\s*tra\s*doi)\b",
+    re.IGNORECASE,
+)
+_RETRACTION_EXPLICIT_RE = re.compile(
+    r"\b(retract(?:ion|ed)?|pubpeer|withdrawn|expression\s+of\s+concern"
+    r"|rút\s*bài|thu\s*hồi|bị\s*rút|quét\s*retraction)\b",
+    re.IGNORECASE,
+)
+
 # Similarity threshold — below this the semantic match is not confident
 # enough, and we fall through to keyword matching.
 _SEMANTIC_THRESHOLD: float = 0.35
+
+_TOOL_MESSAGE_TYPE_VALUE: dict[str, str] = {
+    "scan_retraction_and_pubpeer": "retraction_report",
+    "verify_citation": "citation_report",
+    "match_journal": "journal_list",
+    "detect_ai_writing": "ai_writing_detection",
+    "check_grammar": "grammar_report",
+}
+
+_TOOL_DATA_KEY: dict[str, str] = {
+    "scan_retraction_and_pubpeer": "results",
+    "verify_citation": "results",
+    "match_journal": "journals",
+    "detect_ai_writing": "",
+    "check_grammar": "",
+}
 
 
 # ── Lazy-loaded Semantic Intent Router (Singleton) ───────────────────────
@@ -310,6 +338,12 @@ def _detect_intent(user_text: str, has_doi: bool) -> str | None:
     """
     low = user_text.lower()
 
+    # Explicit user request should override DOI/default heuristics.
+    if _CITATION_EXPLICIT_RE.search(low) and not _RETRACTION_EXPLICIT_RE.search(low):
+        return _Intent.CITATION
+    if _RETRACTION_EXPLICIT_RE.search(low) and not _CITATION_EXPLICIT_RE.search(low):
+        return _Intent.RETRACTION
+
     # ── Layer 1: Smart defaults ──────────────────────────────────────
     if has_doi:
         # DOI present — check if another intent is stronger first
@@ -326,6 +360,10 @@ def _detect_intent(user_text: str, has_doi: bool) -> str | None:
     # Long text without DOI → likely AI detection or grammar checking
     text_len = len(user_text.strip())
     if text_len > 350:
+        if _CITATION_EXPLICIT_RE.search(low):
+            return _Intent.CITATION
+        if _RETRACTION_EXPLICIT_RE.search(low):
+            return _Intent.RETRACTION
         # Check for grammar-related surface hints
         _grammar_hints = {"fix", "sửa", "correct", "proofread", "grammar", "lỗi"}
         if any(h in low for h in _grammar_hints):
@@ -359,15 +397,20 @@ def _template_retraction(results: dict) -> str:
     """Generate fallback text for retraction scan results."""
     items = results.get("results", [])
     summary = results.get("summary", {})
-    count = len(items)
+    count = int(summary.get("total_checked", summary.get("total", len(items))) or 0)
+    no_doi = bool(summary.get("no_doi_found", False))
     retracted = summary.get("retracted", 0)
-    concerns = summary.get("has_concern", 0)
+    concerns = summary.get("concerns", 0)
     pubpeer = sum(1 for r in items if r.get("pubpeer_comments", 0) > 0)
 
     lines = [
-        "🔍 **(Chế độ dự phòng — Gemini offline)**",
-        f"Đã quét **{count}** DOI.",
+        "🔍 **(Chế độ dự phòng — Groq offline)**",
     ]
+    if no_doi or count == 0:
+        lines.append("Không phát hiện DOI hợp lệ, nên chưa có mục nào để quét retraction.")
+        return "\n".join(lines)
+
+    lines.append(f"Đã quét **{count}** DOI.")
     if retracted:
         lines.append(f"⚠️ Phát hiện **{retracted}** bài bị rút bỏ (RETRACTED).")
     if concerns:
@@ -382,19 +425,30 @@ def _template_retraction(results: dict) -> str:
 
 def _template_citation(results: dict) -> str:
     """Generate fallback text for citation verification results."""
-    items = results.get("results", [])
     stats = results.get("statistics", {})
-    total = len(items)
-    verified = stats.get("verified", 0)
-    not_found = stats.get("not_found", 0)
+    total = int(stats.get("total", 0) or 0)
+    no_citation = bool(results.get("no_citation_found", False) or stats.get("no_citation_found", False))
+    valid = int(stats.get("valid", 0) or 0) + int(stats.get("doi_verified", 0) or 0)
+    partial = int(stats.get("partial_match", 0) or 0)
+    hallucinated = int(stats.get("hallucinated", 0) or 0)
+    unverified = int(stats.get("unverified", 0) or 0)
 
     lines = [
-        "📚 **(Chế độ dự phòng — Gemini offline)**",
-        f"Đã kiểm tra **{total}** trích dẫn.",
-        f"✅ Xác minh thành công: **{verified}**",
+        "📚 **(Chế độ dự phòng — Groq offline)**",
     ]
-    if not_found:
-        lines.append(f"❌ Không xác minh được: **{not_found}** (có thể do AI ảo giác tạo ra)")
+
+    if no_citation or total == 0:
+        lines.append("Không phát hiện mẫu citation/DOI hợp lệ trong nội dung đã cung cấp.")
+        return "\n".join(lines)
+
+    lines.append(f"Đã kiểm tra **{total}** trích dẫn.")
+    lines.append(f"✅ Hợp lệ/đã xác minh DOI: **{valid}**")
+    if partial:
+        lines.append(f"🟡 Khớp một phần: **{partial}**")
+    if hallucinated:
+        lines.append(f"❌ Có dấu hiệu sai/hallucinated: **{hallucinated}**")
+    if unverified:
+        lines.append(f"⚠️ Chưa xác minh được (có thể do lỗi lookup tạm thời): **{unverified}**")
     lines.append("\nXem chi tiết ở bảng kết quả bên dưới.")
     return "\n".join(lines)
 
@@ -404,11 +458,11 @@ def _template_journal(results: dict) -> str:
     journals = results.get("journals", [])
     count = len(journals)
     lines = [
-        "📖 **(Chế độ dự phòng — Gemini offline)**",
+        "📖 **(Chế độ dự phòng — Groq offline)**",
         f"Tìm thấy **{count}** tạp chí phù hợp.",
     ]
     for i, j in enumerate(journals[:3], 1):
-        name = j.get("name", j.get("journal_name", "N/A"))
+        name = j.get("journal", j.get("name", j.get("journal_name", "N/A")))
         score = j.get("similarity_score", j.get("score", j.get("match_score", 0)))
         try:
             score_str = f"{float(score):.1%}"
@@ -431,7 +485,7 @@ def _template_ai_detect(results: dict) -> str:
         score = 0.0
     verdict = results.get("verdict", "UNKNOWN")
     lines = [
-        "🤖 **(Chế độ dự phòng — Gemini offline)**",
+        "🤖 **(Chế độ dự phòng — Groq offline)**",
         f"Điểm phát hiện AI: **{score:.1%}**",
         f"Kết luận: **{verdict}**",
     ]
@@ -450,11 +504,11 @@ def _template_grammar(results: dict) -> str:
     error_msg = results.get("error")
     if error_msg:
         return (
-            "✍️ **(Chế độ dự phòng — Gemini offline)**\n"
+            "✍️ **(Chế độ dự phòng — Groq offline)**\n"
             f"⚠️ Không thể khởi động LanguageTool: {error_msg}"
         )
     lines = [
-        "✍️ **(Chế độ dự phòng — Gemini offline)**",
+        "✍️ **(Chế độ dự phòng — Groq offline)**",
         f"Đã kiểm tra đoạn văn. Phát hiện **{total}** lỗi.",
     ]
     if total == 0:
@@ -480,6 +534,8 @@ def _template_grammar(results: dict) -> str:
 def fallback_process_request(
     user_text: str,
     file_context: str | None,
+    *,
+    allowed_tool_names: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Attempt to process the user's request using heuristics + direct
     tool execution, bypassing Gemini entirely.
@@ -501,23 +557,32 @@ def fallback_process_request(
         intent, len(dois), bool(file_context),
     )
 
+    def _is_allowed(tool_name: str) -> bool:
+        return allowed_tool_names is None or tool_name in allowed_tool_names
+
     # ── lazy imports to avoid circular deps at module level ──────────
     from app.services.llm_service import (
-        _TOOL_MESSAGE_TYPE,
-        _TOOL_DATA_KEY,
         scan_retraction_and_pubpeer,
         verify_citation,
         match_journal,
         detect_ai_writing,
         check_grammar,
-        _make_serializable,
     )
+    from app.services.document_cache import (
+        extract_document_id as _extract_doc_id,
+        get_document as _get_doc,
+    )
+
+    resolved_document_id: str | None = None
 
     try:
         if intent == _Intent.RETRACTION:
             # Feed DOIs (or full text if no DOIs extracted cleanly)
             input_text = " ".join(dois) if dois else combined_text[:3000]
             tool_name = "scan_retraction_and_pubpeer"
+            if not _is_allowed(tool_name):
+                logger.info("Heuristic fallback skipped hidden tool: %s", tool_name)
+                return None
             raw = scan_retraction_and_pubpeer(text=input_text)
             text = _template_retraction(raw)
 
@@ -526,6 +591,9 @@ def fallback_process_request(
             refs = _extract_references_section(file_context or "")
             input_text = refs or combined_text[:5000]
             tool_name = "verify_citation"
+            if not _is_allowed(tool_name):
+                logger.info("Heuristic fallback skipped hidden tool: %s", tool_name)
+                return None
             raw = verify_citation(text=input_text)
             text = _template_citation(raw)
 
@@ -533,29 +601,56 @@ def fallback_process_request(
             abstract = _extract_abstract(file_context or "")
             input_text = abstract or user_text[:2000]
             tool_name = "match_journal"
+            if not _is_allowed(tool_name):
+                logger.info("Heuristic fallback skipped hidden tool: %s", tool_name)
+                return None
             raw = match_journal(abstract=input_text)
             text = _template_journal(raw)
 
         elif intent == _Intent.AI_DETECT:
-            # Use file content if available, otherwise user text
-            input_text = (file_context or user_text or "")[:5000]
+            # Resolve document reference if user_text has metadata
+            doc_id = _extract_doc_id(user_text or "")
+            if doc_id:
+                resolved = _get_doc(doc_id)
+                if resolved:
+                    resolved_document_id = doc_id
+                    input_text = resolved[:5000]
+                else:
+                    input_text = (file_context or user_text or "")[:5000]
+            else:
+                input_text = (file_context or user_text or "")[:5000]
             if len(input_text.strip()) < 50:
                 logger.warning("Fallback AI Detect: text too short (%d chars < 50).", len(input_text.strip()))
                 return None
             logger.info("Fallback executing AI Writing Detector (%d chars)...", len(input_text))
             tool_name = "detect_ai_writing"
+            if not _is_allowed(tool_name):
+                logger.info("Heuristic fallback skipped hidden tool: %s", tool_name)
+                return None
             raw = detect_ai_writing(text=input_text)
             text = _template_ai_detect(raw)
 
         elif intent == _Intent.GRAMMAR:
-            input_text = (file_context or user_text or "")[:10000]
+            # Resolve document reference if user_text has metadata
+            doc_id = _extract_doc_id(user_text or "")
+            if doc_id:
+                resolved = _get_doc(doc_id)
+                if resolved:
+                    resolved_document_id = doc_id
+                    input_text = resolved[:10000]
+                else:
+                    input_text = (file_context or user_text or "")[:10000]
+            else:
+                input_text = (file_context or user_text or "")[:10000]
             if len(input_text.strip()) < 10:
                 logger.warning("Fallback Grammar: text too short (%d chars).", len(input_text.strip()))
                 return None
             logger.info("Fallback executing Grammar Checker (%d chars)...", len(input_text))
             tool_name = "check_grammar"
+            if not _is_allowed(tool_name):
+                logger.info("Heuristic fallback skipped hidden tool: %s", tool_name)
+                return None
             raw = check_grammar(text=input_text)
-            raw = _make_serializable(raw)
             text = _template_grammar(raw)
 
         else:
@@ -566,13 +661,20 @@ def fallback_process_request(
         return None
 
     # Build response matching FunctionCallingResponse structure
-    mt = _TOOL_MESSAGE_TYPE.get(tool_name)
-    msg_type = mt.value if mt else "text"
+    msg_type = _TOOL_MESSAGE_TYPE_VALUE.get(tool_name, "text")
     data_key = _TOOL_DATA_KEY.get(tool_name, "")
     tool_results = {
         "type": msg_type,
         "data": raw.get(data_key, raw) if data_key else raw,
     }
+
+    args_preview = input_text[:200] + "..." if len(input_text) > 200 else input_text
+    if resolved_document_id and tool_name in {"detect_ai_writing", "check_grammar"}:
+        tool_args: dict[str, Any] = {"document_id": resolved_document_id}
+    elif tool_name == "match_journal":
+        tool_args = {"abstract": args_preview}
+    else:
+        tool_args = {"text": args_preview}
 
     return {
         "text": text,
@@ -580,7 +682,7 @@ def fallback_process_request(
         "tool_results": tool_results,
         "tool_calls": [{
             "name": tool_name,
-            "args": {"text": input_text[:200] + "..." if len(input_text) > 200 else input_text},
+            "args": tool_args,
             "result": raw,
         }],
     }

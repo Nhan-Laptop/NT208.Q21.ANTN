@@ -3,12 +3,14 @@ Scientific tools for academic research assistance.
 
 Modules:
 - Citation verification   (OpenAlex + Crossref, with PyAlex/Habanero when installed)
-- Journal recommendation  (SPECTER2/SciBERT when installed, TF-IDF fallback)
+- Journal recommendation  (SPECTER2 embeddings + ChromaDB semantic search)
 - Retraction scanning     (Crossref update-to + OpenAlex + PubPeer)
 - AI writing detection    (RoBERTa ensemble when installed, rule-based fallback)
 
 All heavy ML dependencies (numpy, torch, transformers, sentence-transformers,
 pyalex, habanero) are optional and guarded with try/except inside each module.
+When dependencies or vector data are unavailable, tools degrade to safe
+empty/error outputs rather than fabricated fallback data.
 """
 
 from app.services.tools.ai_writing_detector import AIWritingDetector, ai_writing_detector

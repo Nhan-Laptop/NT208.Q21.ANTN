@@ -33,6 +33,19 @@ export interface Message {
   created_at: string;
 }
 
+export interface ToolResultGroup {
+  tool_name?: string;
+  label?: string;
+  type: string;
+  data: unknown;
+  summary?: string;
+}
+
+export interface MultiToolReportPayload {
+  type: "multi_tool_report";
+  groups: ToolResultGroup[];
+}
+
 export interface ChatCompletionResponse {
   session_id: string;
   session: Session;

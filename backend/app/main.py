@@ -13,6 +13,7 @@ from app.core.database import Base
 from app.services.bootstrap import ensure_admin_user
 from app.services.storage_service import storage_service
 from app.services.tools.citation_checker import citation_checker
+from app.services.tools.grammar_checker import grammar_checker
 from app.services.tools.retraction_scan import retraction_scanner
 
 
@@ -28,6 +29,7 @@ async def lifespan(_: FastAPI):
     # Shutdown: close persistent HTTP clients
     citation_checker.close()
     retraction_scanner.close()
+    grammar_checker.close()
 
 
 app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)

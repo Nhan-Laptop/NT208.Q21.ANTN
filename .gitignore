@@ -1,44 +1,39 @@
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Local keys
+.aira_master_key
+
 # Python
+.venv/
+backend/.venv/
 __pycache__/
 *.pyc
-*.pyo
-*.egg-info/
-.venv/
-venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local databases and logs
 *.db
-
-# Node
-node_modules/
-.next/
-out/
-
-# Secrets
-.env
-.env.local
-.env.production
-
-# Storage
-local_storage/
-backend/local_storage/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-
-# Logs
 *.log
-backend/audit.log
 
-# Cache
-.cache/
+# Temporary and backup artifacts
+*.bak
+*.corrupted
 
-# Sensitive files & build artifacts
-.aira_master_key
-backend/.aira_master_key
-backend/vd.py
-backend/**/*.bak
-frontend/tsconfig.tsbuildinfo
+# Frontend build/cache
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+dist/
+build/
+*.tsbuildinfo
+
+# Data/cache outputs
+backend/data/chroma_db/
+
+# OS/editor junk
+.DS_Store

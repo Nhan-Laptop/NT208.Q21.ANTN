@@ -46,9 +46,25 @@ def verify_citation(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
 ) -> CitationReportResponse:
-    data = [CitationItem(**asdict(item)) for item in citation_checker.verify(payload.text)]
-    hallucinated = [item for item in data if item.status == "HALLUCINATED"]
-    summary = f"Tôi đã kiểm tra trích dẫn và phát hiện {len(hallucinated)} trích dẫn có nguy cơ hallucinated."
+    raw_results = citation_checker.verify(payload.text)
+    data = [CitationItem(**asdict(item)) for item in raw_results]
+    stats = citation_checker.get_statistics(raw_results)
+    total = int(stats.get("total", 0) or 0)
+    if bool(stats.get("no_citation_found", False)) or total == 0:
+        summary = (
+            "Không phát hiện mẫu citation/DOI hợp lệ trong nội dung đã cung cấp, "
+            "nên chưa có mục nào để xác minh."
+        )
+    else:
+        valid = int(stats.get("valid", 0) or 0) + int(stats.get("doi_verified", 0) or 0)
+        partial = int(stats.get("partial_match", 0) or 0)
+        hallucinated = int(stats.get("hallucinated", 0) or 0)
+        unverified = int(stats.get("unverified", 0) or 0)
+        summary = (
+            f"Đã xác minh {total} citation: {valid} hợp lệ, "
+            f"{partial} khớp một phần, {hallucinated} có dấu hiệu sai/hallucinated, "
+            f"{unverified} chưa xác minh được."
+        )
 
     chat_service.persist_tool_interaction(
         db=db,
@@ -91,22 +107,34 @@ def retraction_scan(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
 ) -> RetractionScanResponse:
-    reports = [RetractionItem(**asdict(row)) for row in retraction_scanner.scan(payload.text)]
-    
-    # Count issues
-    retracted_count = sum(1 for r in reports if r.status == "RETRACTED")
-    high_risk_count = sum(1 for r in reports if r.risk_level == "HIGH")
-    pubpeer_count = sum(1 for r in reports if r.pubpeer_comments > 0)
-    
-    summary_parts = ["Tôi đã quét DOI và kiểm tra trạng thái retract bằng OpenAlex và PubPeer."]
-    if retracted_count > 0:
-        summary_parts.append(f"⚠️ Phát hiện {retracted_count} bài đã bị rút bỏ (RETRACTED).")
-    if high_risk_count > 0:
-        summary_parts.append(f"⚠️ {high_risk_count} bài có nguy cơ cao (nhiều bình luận trên PubPeer).")
-    if pubpeer_count > 0:
-        summary_parts.append(f"📝 {pubpeer_count} bài có bình luận trên PubPeer.")
-    
-    summary = " ".join(summary_parts)
+    raw_reports = retraction_scanner.scan(payload.text)
+    reports = [RetractionItem(**asdict(row)) for row in raw_reports]
+    stats = retraction_scanner.get_summary(raw_reports)
+
+    total_checked = int(stats.get("total_checked", stats.get("total", 0)) or 0)
+    if bool(stats.get("no_doi_found", False)) or total_checked == 0:
+        summary = (
+            "Không phát hiện DOI hợp lệ trong nội dung đã cung cấp, "
+            "nên chưa có mục nào để quét trạng thái retraction."
+        )
+    else:
+        retracted_count = int(stats.get("retracted", 0) or 0)
+        concern_count = int(stats.get("concerns", 0) or 0)
+        corrected_count = int(stats.get("corrected", 0) or 0)
+        active_count = int(stats.get("active", 0) or 0)
+        pubpeer_count = int(stats.get("pubpeer_discussions", 0) or 0)
+        summary = (
+            f"Đã quét {total_checked} DOI: "
+            f"{retracted_count} RETRACTED, "
+            f"{concern_count} CONCERN, "
+            f"{corrected_count} CORRECTED, "
+            f"{active_count} ACTIVE."
+        )
+        if pubpeer_count > 0:
+            summary += (
+                f" Có {pubpeer_count} DOI có thảo luận PubPeer "
+                "(không đồng nghĩa tự động với RETRACTED)."
+            )
 
     chat_service.persist_tool_interaction(
         db=db,

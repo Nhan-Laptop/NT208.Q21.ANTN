@@ -334,7 +334,7 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
   }
 
   // Determine if this is a tool-result message (assistant with structured data)
-  const hasToolResults = !!message.tool_results && message.message_type !== "text";
+  const hasToolResults = !!message.tool_results;
 
   return (
     <div className={clsx("flex items-start gap-3 py-4", isUser && "flex-row-reverse")}>

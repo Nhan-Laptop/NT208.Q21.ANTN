@@ -91,8 +91,23 @@ class ChatService:
         if mode == SessionMode.VERIFICATION:
             citation_results = citation_checker.verify(text)
             data = [asdict(item) for item in citation_results]
-            hallucinated = [x for x in data if x["status"] == "HALLUCINATED"]
-            summary = f"Citation check finished. Found {len(hallucinated)} potential hallucinated citation(s)."
+            stats = citation_checker.get_statistics(citation_results)
+            total = int(stats.get("total", 0) or 0)
+            if bool(stats.get("no_citation_found", False)) or total == 0:
+                summary = (
+                    "Không phát hiện mẫu citation/DOI hợp lệ trong nội dung đã cung cấp, "
+                    "nên chưa có mục nào để xác minh."
+                )
+            else:
+                valid = int(stats.get("valid", 0) or 0) + int(stats.get("doi_verified", 0) or 0)
+                partial = int(stats.get("partial_match", 0) or 0)
+                hallucinated = int(stats.get("hallucinated", 0) or 0)
+                unverified = int(stats.get("unverified", 0) or 0)
+                summary = (
+                    f"Đã xác minh {total} citation: {valid} hợp lệ, "
+                    f"{partial} khớp một phần, {hallucinated} có dấu hiệu sai/hallucinated, "
+                    f"{unverified} chưa xác minh được."
+                )
             return MessageType.CITATION_REPORT, summary, {"type": "citation_report", "data": data}
 
         if mode == SessionMode.JOURNAL_MATCH:
@@ -101,8 +116,31 @@ class ChatService:
             return MessageType.JOURNAL_LIST, summary, {"type": "journal_list", "data": journals}
 
         if mode == SessionMode.RETRACTION:
-            retraction = [asdict(item) for item in retraction_scanner.scan(text)]
-            summary = "Retraction scan completed on detected DOI(s)."
+            raw_results = retraction_scanner.scan(text)
+            retraction = [asdict(item) for item in raw_results]
+            stats = retraction_scanner.get_summary(raw_results)
+            total_checked = int(stats.get("total_checked", stats.get("total", 0)) or 0)
+            if bool(stats.get("no_doi_found", False)) or total_checked == 0:
+                summary = (
+                    "Không phát hiện DOI hợp lệ trong nội dung đã cung cấp, "
+                    "nên chưa có mục nào để quét trạng thái retraction."
+                )
+            else:
+                retracted = int(stats.get("retracted", 0) or 0)
+                concerns = int(stats.get("concerns", 0) or 0)
+                corrected = int(stats.get("corrected", 0) or 0)
+                active = int(stats.get("active", 0) or 0)
+                pubpeer = int(stats.get("pubpeer_discussions", 0) or 0)
+                summary = (
+                    f"Đã quét {total_checked} DOI: "
+                    f"{retracted} RETRACTED, {concerns} CONCERN, "
+                    f"{corrected} CORRECTED, {active} ACTIVE."
+                )
+                if pubpeer > 0:
+                    summary += (
+                        f" Có {pubpeer} DOI có thảo luận PubPeer "
+                        "(không đồng nghĩa tự động với RETRACTED)."
+                    )
             return MessageType.RETRACTION_REPORT, summary, {"type": "retraction_report", "data": retraction}
 
         if mode == SessionMode.AI_DETECTION:
@@ -172,6 +210,17 @@ class ChatService:
 
         db.add(session_obj)
 
+        # ── Query history BEFORE saving (prevents current-msg duplication) ──
+        pre_save_history = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(settings.chat_context_window)
+            .all()
+        )
+        pre_save_history = list(reversed(pre_save_history))
+
+        # ── Save user message ───────────────────────────────────────────────
         user_msg = self._save_message(
             db=db,
             session_id=session_id,
@@ -207,18 +256,10 @@ class ChatService:
             db.refresh(session_obj)
             return user_msg, assistant_msg, session_obj
 
-        # General Q&A mode with contextual memory + Function Calling
-        history = (
-            db.query(ChatMessage)
-            .filter(ChatMessage.session_id == session_id)
-            .order_by(ChatMessage.created_at.desc())
-            .limit(settings.chat_context_window)
-            .all()
-        )
-        history = list(reversed(history))
+        # General Q&A mode — use pre_save_history (no current-msg duplication)
         user_message_with_context = self._build_file_context(db, session_id, user_message)
         fc_response = gemini_service.generate_response(
-            history=history, user_text=user_message_with_context,
+            history=pre_save_history, user_text=user_message_with_context,
         )
 
         # Determine MessageType from function calling result

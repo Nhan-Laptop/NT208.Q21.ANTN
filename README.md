@@ -66,8 +66,8 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 | 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI) from text → verify against authoritative databases → detect hallucinated references | OpenAlex + Crossref |
 | 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by ChromaDB semantic search + domain match | ChromaDB + SPECTER2 (`allenai/specter2_base`) |
 | 🔍 **Retraction Scanning** | Check DOIs against retraction databases → multi-source risk assessment (NONE → CRITICAL) | Crossref + OpenAlex + PubPeer |
-| 🤖 **AI Writing Detection** | Ensemble analysis: 70% RoBERTa ML classifier + 30% rule-based heuristics (7 linguistic features) → 5-level verdict scale | RoBERTa + Custom Rules |
-| ✍️ **Grammar & Spell Check** | Offline grammar/spelling analysis powered by LanguageTool JVM server — detects errors, suggests fixes, returns corrected text | LanguageTool |
+| 🤖 **AI Writing Detection** | Ensemble estimate: 70% RoBERTa ML classifier + 30% rule-based heuristics (7 linguistic features) → 5-level probabilistic verdict scale (not definitive proof) | RoBERTa + Custom Rules |
+| ✍️ **Grammar & Spell Check** | Offline grammar/spelling analysis powered by LanguageTool JVM server — returns full issues + conservative corrected text (risky edits are not auto-applied) | LanguageTool |
 | 📄 **PDF Summarization** | Upload PDF → automatic text extraction → AI-powered summary generation | PyMuPDF + Groq |
 | 🔐 **End-to-End Encryption** | 5-layer security: HTTPS → JWT (HS256) → DB encryption (AES-256-GCM) → File encryption → Optional client-side payload encryption | PyCryptodome |
 | 🌙 **Dark Mode** | System preference detection + manual toggle, powered by Tailwind CSS v4 design tokens | Tailwind v4 |
@@ -129,7 +129,20 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 - Backend applies a sliding window (last 4 history messages) and truncates each retained history item to 2000 chars.
 - Active user payload is truncated to 10000 chars before router call.
 - For oversized or attached-document text, backend stores full text in an in-memory cache and sends only metadata (`document_id`, `length`) to the LLM.
+- When a long message has no clear standalone query, backend infers a safe router query from intent hints instead of forwarding raw document excerpts.
+- Document references are current-turn scoped (safe-first); historical document metadata is stripped from router history.
 - Tool execution resolves `document_id` back to full text server-side immediately before calling local tools.
+- Groq-facing AI/grammar tools are `document_id`-only: `detect_ai_writing(document_id)` and `check_grammar(document_id)`.
+- Hybrid Groq-facing tools remain flexible: `verify_citation`, `scan_retraction_and_pubpeer`, and `match_journal` prefer `document_id` when available, with short inline payload fallbacks.
+- Explicit citation/retraction requests (for example “verify citation”, “kiểm tra tài liệu tham khảo”, “check retraction”) are executed deterministically server-side to avoid ambiguous LLM tool selection.
+- When explicit phrasing asks to run both citation verification and retraction scanning, backend executes both deterministically and keeps the result groups separated in the response contract.
+- If one response executes both citation and retraction tools intentionally, backend now returns additive grouped payloads (`tool_results.type = "multi_tool_report"`, `groups[]`) so frontend renders separate cards per tool family instead of collapsing into one ambiguous card.
+- Only non-terminal tools feed compact summaries back to Groq; terminal tools (`detect_ai_writing`, `check_grammar`) exit the FC loop early with backend-generated summary text + full structured payload.
+- If Groq returns pseudo-tool syntax without native `tool_calls`, backend treats it as invalid action path and routes through fallback/static-safe response.
+- Heuristic fallback is constrained by request-scoped exposed tools (`allowed_tool_names`) and cannot run hidden tools indirectly.
+- Retraction scan with no DOI is represented explicitly as `total_checked=0` + `no_doi_found=true` (never as fake `N/A` DOI checked).
+- AI-writing output is an estimated likelihood signal, not definitive proof.
+- Cache lifecycle is bounded by TTL + max-entry eviction to prevent unbounded memory growth.
 
 ---
 
@@ -157,7 +170,6 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 | **bcrypt** | ≥4.1.0 | Password hashing |
 | **boto3** | ≥1.34 | AWS S3 storage backend (optional) |
 | **httpx** | ≥0.27 | Async HTTP client with retry transport |
-| **scikit-learn** | ≥1.3 | TF-IDF fallback for journal matching |
 | **language_tool_python** | ≥2.8 | LanguageTool JVM wrapper for offline grammar/spell checking |
 
 ### Frontend
@@ -464,7 +476,7 @@ NT208.Q21.ANTN/
 ### Fallback Chain (Graceful Degradation)
 
 ```
-Journal Matching:  ChromaDB search → TF-IDF keyword fallback (no ML)
+Journal Matching:  ChromaDB + SPECTER2 retrieval → safe empty-result fallback if model/DB unavailable
 AI Detection:      RoBERTa ensemble (70/30) → Rule-based only (no ML)
 Grammar Check:     LanguageTool JVM → Error response (Java <17)
 ```

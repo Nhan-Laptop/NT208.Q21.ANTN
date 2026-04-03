@@ -1,7 +1,7 @@
 # 📐 AIRA — Kiến trúc Hệ thống & Thiết kế Chi tiết
 
 > **AIRA** (Academic Integrity & Research Assistant) — Nền tảng hỗ trợ nghiên cứu khoa học tích hợp AI  
-> Phiên bản: 2.0 | Cập nhật: 06/06/2026
+> Phiên bản: 2.0 | Cập nhật: 2026-04-03
 
 ---
 
@@ -13,9 +13,22 @@ Nếu bất kỳ phần/diagram cũ bên dưới mâu thuẫn, ưu tiên snapsho
 - LLM runtime: `GroqLLMService` (`backend/app/services/llm_service.py`) với Groq chat-completions + function calling.
 - Context protection: sliding window 4 messages, truncate history 2000 chars/message, truncate active input 10000 chars.
 - Pass-by-reference routing: văn bản dài hoặc `<Attached_Document>` được cache in-memory và gửi sang LLM bằng metadata (`document_id`, `length`) thay vì raw text.
+- Với input dài không tách được query rõ ràng, router nhận query suy diễn an toàn (intent-based), không nhận đoạn trích raw body.
+- Document cache policy: cache in-memory có TTL và giới hạn số entry để tránh tăng trưởng vô hạn.
 - Tool execution: `_execute_tool_call()` resolve `document_id` -> full text ngay trước khi chạy tool local.
+- Với request explicit citation/retraction, backend có đường thực thi xác định (deterministic direct execution), không phụ thuộc Groq chọn tool.
+- Khi request cố ý yêu cầu cả citation + retraction, backend trả grouped payload (`tool_results.type = "multi_tool_report"`, `groups[]`) để frontend render nhiều card riêng theo từng tool family.
+- Với `detect_ai_writing` và `check_grammar`, Groq chỉ được phép gọi tool bằng `document_id`; không còn contract text-based ở Groq-facing schema.
+- Nếu request không có `document_id` hợp lệ trong scope hiện tại, Groq sẽ không được cấp schema của các tool document-only (`detect_ai_writing`, `check_grammar`).
+- FC loop hygiene: chỉ tool non-terminal mới gửi compact tool feedback về model; tool terminal (AI detection/grammar) trả kết quả sớm từ backend.
+- Khi có nhiều tool_calls trong một response, assistant text được đồng bộ theo grouped tool-state để tránh lệch nghĩa với card dữ liệu.
+- Pseudo tool syntax không có native `tool_calls` được coi là đường đi không hợp lệ và sẽ chuyển fallback hoặc trả warning hợp lệ.
+- Grammar corrected_text dùng cơ chế auto-apply bảo thủ: chỉ áp dụng low-risk fixes; các sửa đổi rủi ro (thuật ngữ khoa học, acronym, DOI-like identifiers...) chỉ được report trong `issues`, không tự sửa.
+- AI-writing verdict là ước lượng xác suất từ mô hình/heuristics, không được diễn đạt như bằng chứng kết luận tuyệt đối.
+- Retraction scan khi không có DOI được biểu diễn rõ là `total_checked=0` và `no_doi_found=true`.
 - Journal vector pipeline: ChromaDB `journal_cfps` + `allenai/specter2_base` (768-dim) cho ingest và retrieval.
 - Heuristic fallback: `all-MiniLM-L6-v2` chỉ còn dùng cho fallback intent classification (`heuristic_router.py`), không dùng cho JournalFinder vector retrieval.
+- Heuristic fallback chỉ được gọi các tool thuộc tập đã expose ở request hiện tại (`allowed_tool_names`).
 - Crawler stack: `UniversalScraper` dùng DrissionPage (CDP Chromium automation), không dùng `cloudscraper`.
 - Session title UX: backend tự sinh title ngắn cho message đầu tiên và trả session đã cập nhật để frontend sync sidebar ngay.
 
@@ -257,7 +270,7 @@ graph LR
 | **JournalFinder** | `tools/journal_finder.py` | ChromaDB + SentenceTransformer (`allenai/specter2_base`) | Recommend journals: query ChromaDB `journal_cfps` collection with Specter2 embeddings (768-dim) + bounded similarity scoring. Data seeded by `backend/crawler/` pipeline |
 | **RetractionScanner** | `tools/retraction_scan.py` | Crossref + OpenAlex + PubPeer | Scan DOIs: check retraction status, risk level, title-based detection, PubPeer comments |
 | **AIWritingDetector** | `tools/ai_writing_detector.py` | RoBERTa (`roberta-base-openai-detector`) | Detect AI text: ensemble 70% ML (RoBERTa) + 30% rule-based (7 features) |
-| **GrammarChecker** | `tools/grammar_checker.py` | LanguageTool (JVM server) | Offline grammar & spell checking: singleton JVM, lazy init, rule-based corrections |
+| **GrammarChecker** | `tools/grammar_checker.py` | LanguageTool (JVM server) | Offline grammar & spell checking: singleton JVM, lazy init, full issues + conservative auto-correct (risky edits are skipped) |
 
 ### 2.5 Security & Middleware
 
@@ -1259,7 +1272,7 @@ graph TB
         GroqSvc["GroqLLMService<br/>_generate_with_fc()"]
         GroqAPI["Groq API (LLaMA 3.1)<br/>llama-3.1-8b-instant"]
         FCLoop["FC Loop (max 5 iter)<br/>tool_choice=auto — manual control"]
-        FnCall["function_call:<br/>verify_citation(text)"]
+        FnCall["function_call:<br/>verify_citation(document_id | text)"]
 
         ChatSvc --> FileCtx
         FileCtx --> GroqSvc
@@ -1394,7 +1407,7 @@ graph TB
         GroqSvc["GroqLLMService<br/>_generate_with_fc()"]
         GroqAPI["Groq API (LLaMA 3.1)<br/>llama-3.1-8b-instant"]
         FCLoop["FC Loop (max 5 iter)<br/>tool_choice=auto — manual control"]
-        FnCall["function_call:<br/>match_journal(abstract, title)"]
+        FnCall["function_call:<br/>match_journal(document_id | abstract[, title])"]
 
         ChatSvc --> FileCtx
         FileCtx --> GroqSvc
@@ -1410,7 +1423,7 @@ graph TB
 
         subgraph CHROMA_PATH["ChromaDB Semantic Search"]
             direction TB
-            EmbedQuery["SentenceTransformer<br/>all-MiniLM-L6-v2<br/>encode(abstract) → 384-dim"]
+            EmbedQuery["SentenceTransformer<br/>allenai/specter2_base<br/>encode(abstract) → 768-dim"]
             QueryDB["ChromaDB.query()<br/>collection: journal_cfps<br/>n_results=top_k"]
             ParseResults["Parse metadata:<br/>journal, issn, domains,<br/>acceptance_rate, h_index"]
 
@@ -1418,11 +1431,8 @@ graph TB
             QueryDB --> ParseResults
         end
 
-        subgraph TFIDF_PATH["TF-IDF Fallback (use_ml=False)"]
-            TFIDF["_vectorize(text)<br/>→ Counter word frequencies"]
-            TFCosine["_cosine(v1, v2)<br/>dot product / magnitudes"]
-
-            TFIDF --> TFCosine
+        subgraph DEGRADE_PATH["Safe Degradation Path"]
+            EmptyResult["Return [] when collection/model unavailable<br/>(no fabricated fallback)"]
         end
 
         DomainBonus["_domain_bonus()<br/>+0.05 if domain matches"]
@@ -1454,12 +1464,12 @@ graph TB
     GroqAPI -->|"function_call"| DetectDomain
     FCLoop -->|"function_response"| GroqAPI
 
-    DetectDomain -->|"ChromaDB available"| CHROMA_PATH
-    DetectDomain -->|"ChromaDB empty/missing"| TFIDF_PATH
+    DetectDomain -->|"ChromaDB + model available"| CHROMA_PATH
+    DetectDomain -->|"collection/model unavailable"| DEGRADE_PATH
     EmbedQuery -->|"download / cache"| HFHub
 
     ParseResults --> DomainBonus
-    TFCosine --> DomainBonus
+    EmptyResult --> DomainBonus
     DomainBonus --> Sort
     Sort --> Convert
     Convert --> FnResp
@@ -1637,7 +1647,7 @@ graph TB
         GroqSvc["GroqLLMService<br/>_generate_with_fc()"]
         GroqAPI["Groq API (LLaMA 3.1)<br/>llama-3.1-8b-instant"]
         FCLoop["FC Loop (max 5 iter)<br/>tool_choice=auto — manual control"]
-        FnCall["function_call:<br/>scan_retraction_and_pubpeer(text)"]
+        FnCall["function_call:<br/>scan_retraction_and_pubpeer(document_id | text)"]
 
         ChatSvc --> FileCtx
         FileCtx --> GroqSvc
@@ -1822,7 +1832,7 @@ graph TB
         direction TB
         GroqSvc["GroqLLMService<br/>generate_response()"]
         GenContent["chat.completions.create()<br/>tools=[5 functions]<br/>tool_choice=auto"]
-        FCDetect["function_call:<br/>detect_ai_writing(text)"]
+        FCDetect["function_call:<br/>detect_ai_writing(document_id)"]
         FnResp["tool message<br/>→ Groq final answer"]
 
         GroqSvc --> GenContent
@@ -1966,8 +1976,8 @@ graph TB
         EnsureTool["_ensure_tool()<br/>Double-checked locking"]
         JVMStart["Start LanguageTool<br/>JVM Server (lazy)"]
         RunCheck["tool.check(text)"]
-        CorrectText["utils.correct(text, matches)"]
-        BuildResult["Build result dict:<br/>total_errors, issues[], corrected_text"]
+        CorrectText["Safe auto-correct filter<br/>(only low-risk rules)"]
+        BuildResult["Build result dict:<br/>total_errors, issues[], corrected_text,<br/>autocorrect_applied/skipped"]
     end
 
     subgraph LANG_TOOL["☕ LanguageTool JVM"]
@@ -1994,8 +2004,8 @@ graph TB
     CallLLM --> FCDecision
     FCDecision -->|"Online"| GroqFC
     FCDecision -->|"Offline/Error"| HeuristicFB
-    GroqFC -->|"check_grammar(text)"| GRAMMAR_TOOL
-    HeuristicFB -->|"check_grammar(text)"| GRAMMAR_TOOL
+    GroqFC -->|"check_grammar(document_id)"| GRAMMAR_TOOL
+    HeuristicFB -->|"check_grammar(resolved_text)<br/>(backend execution layer)"| GRAMMAR_TOOL
     CallLLM --> SaveAssist
 
     %% Grammar tool internals
@@ -2044,7 +2054,7 @@ erDiagram
     chat_sessions {
         VARCHAR_36 id PK "UUID primary key"
         VARCHAR_36 user_id FK "→ users.id (CASCADE)"
-        VARCHAR_255 title "Auto-derived from first message"
+        VARCHAR_255 title "Default placeholder, then backend-generated concise title on first message"
         ENUM mode "general_qa | verification | journal_match"
         DATETIME created_at "UTC timestamp"
         DATETIME updated_at "Auto-update on change"
@@ -2102,7 +2112,7 @@ erDiagram
 |--------|------|-------------|-------|
 | `id` | VARCHAR(36) | PK, DEFAULT uuid4() | UUID phiên chat |
 | `user_id` | VARCHAR(36) | FK → users.id, ON DELETE CASCADE, INDEX | Chủ sở hữu |
-| `title` | VARCHAR(255) | DEFAULT 'New Chat' | Tiêu đề (auto-derived) |
+| `title` | VARCHAR(255) | DEFAULT 'Trò chuyện mới' | Placeholder ban đầu; backend có thể thay bằng title ngắn sinh tự động sau user message đầu tiên |
 | `mode` | ENUM('general_qa','verification','journal_match') | NOT NULL, DEFAULT 'general_qa' | Chế độ hoạt động |
 | `created_at` | DATETIME(tz) | NOT NULL | Thời gian tạo |
 | `updated_at` | DATETIME(tz) | NOT NULL, ON UPDATE now(UTC) | Thời gian cập nhật |
@@ -2331,11 +2341,11 @@ Groq (LLaMA 3.1) **không bao giờ tự bịa dữ liệu học thuật**. Thay
 
 | Tên Function | Mô tả | Backend Tool |
 |-------------|-------|-------------|
-| `scan_retraction_and_pubpeer(text)` | Quét DOI → retraction status, PubPeer comments, risk level | `retraction_scanner.scan()` |
-| `verify_citation(text)` | Xác minh citation qua OpenAlex + Crossref | `citation_checker.verify()` |
-| `match_journal(abstract, title)` | Tìm journal phù hợp bằng ChromaDB semantic search | `journal_finder.recommend()` |
-| `detect_ai_writing(text)` | Phát hiện AI viết bằng RoBERTa ensemble | `ai_writing_detector.analyze()` |
-| `check_grammar(text)` | Kiểm tra ngữ pháp/chính tả bằng LanguageTool | `grammar_checker.check_grammar()` |
+| `scan_retraction_and_pubpeer(document_id\|text)` | Hybrid contract: ưu tiên `document_id`, fallback text ngắn chứa DOI | `retraction_scanner.scan()` |
+| `verify_citation(document_id\|text)` | Hybrid contract: ưu tiên `document_id`, fallback text ngắn chứa citation | `citation_checker.verify()` |
+| `match_journal(document_id\|abstract[, title])` | Hybrid contract: ưu tiên `document_id`, fallback abstract/title inline | `journal_finder.recommend()` |
+| `detect_ai_writing(document_id)` | Phát hiện AI viết bằng RoBERTa ensemble qua pass-by-reference routing | `ai_writing_detector.analyze(resolved_text)` |
+| `check_grammar(document_id)` | Kiểm tra ngữ pháp/chính tả bằng LanguageTool qua pass-by-reference routing | `grammar_checker.check_grammar(resolved_text)` |
 
 #### 7.2.2 Function Calling Flow
 
@@ -2347,8 +2357,8 @@ graph TB
     end
 
     subgraph CHAT_SVC["💬 ChatService"]
-        BuildCtx["_build_file_context()<br/>Append extracted PDF text"]
-        LoadHist["Load history<br/>(chat_context_window=8)"]
+        BuildCtx["_build_file_context()<br/>Attach file context; router gets metadata-only for oversized docs"]
+        LoadHist["Load history<br/>(DB window=chat_context_window, router keeps last 4)"]
         SaveMsg["_save_message()<br/>role=ASSISTANT"]
     end
 
@@ -2357,18 +2367,19 @@ graph TB
         GenContent["chat.completions.create()<br/>tools=_GROQ_TOOLS<br/>tool_choice=auto"]
         CheckResp{"Response has<br/>tool_calls?"}
         ExecTool["_execute_tool_call()<br/>Run Python tool locally"]
-        AppendFR["Append tool message<br/>(role=tool, tool_call_id)"]
+        AppendFR["Append compact tool feedback<br/>(non-terminal tools only)"]
+        TerminalExit["Terminal tool early-exit<br/>(AI detection / grammar)"]
         IterCheck{"Iteration < 5?"}
         ExtractText["Extract final text<br/>+ determine MessageType"]
         BudgetExc["⚠️ Budget exceeded<br/>(max 5 iterations)"]
     end
 
     subgraph TOOLS["🔧 Tool Functions (Local Execution)"]
-        T1["scan_retraction_and_pubpeer()"]
-        T2["verify_citation()"]
-        T3["match_journal()"]
-        T4["detect_ai_writing()"]
-        T5["check_grammar()"]
+        T1["scan_retraction_and_pubpeer(document_id|text)"]
+        T2["verify_citation(document_id|text)"]
+        T3["match_journal(document_id|abstract[, title])"]
+        T4["detect_ai_writing(document_id)"]
+        T5["check_grammar(document_id)"]
     end
 
     subgraph GROQ_CLOUD["☁️ Groq API (LPU Inference)"]
@@ -2393,16 +2404,19 @@ graph TB
     ExecTool --> T2
     ExecTool --> T3
     ExecTool --> T4
+    ExecTool --> T5
     T1 --> AppendFR
     T2 --> AppendFR
     T3 --> AppendFR
-    T4 --> AppendFR
+    T4 --> TerminalExit
+    T5 --> TerminalExit
     AppendFR --> IterCheck
     IterCheck -->|"Yes"| GenContent
     IterCheck -->|"No"| BudgetExc
 
     CheckResp -->|"No (final text)"| ExtractText
     ExtractText --> FCResp
+    TerminalExit --> FCResp
     BudgetExc --> FCResp
     FCResp --> SaveMsg
 
@@ -2417,7 +2431,7 @@ graph TB
 
     class Prompt,FileCtx input
     class BuildCtx,LoadHist,SaveMsg chatsvc
-    class BuildContent,GenContent,CheckResp,ExecTool,AppendFR,IterCheck,ExtractText groq
+    class BuildContent,GenContent,CheckResp,ExecTool,AppendFR,TerminalExit,IterCheck,ExtractText groq
     class T1,T2,T3,T4 tools
     class GModel cloud
     class FCResp response
@@ -2439,7 +2453,15 @@ _GROQ_TOOLS = [
         "function": {
             "name": "scan_retraction_and_pubpeer",
             "description": "Scan DOIs for retraction status and PubPeer comments.",
-            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "anyOf": [{"required": ["document_id"]}, {"required": ["text"]}],
+                "additionalProperties": False,
+            },
         },
     },
     # ... verify_citation, match_journal, detect_ai_writing, check_grammar
@@ -2558,7 +2580,7 @@ graph TB
 
 | Tầng | Component | File | Hành vi |
 |------|-----------|------|---------|
-| **Tầng 1** — Retry | `tenacity` decorator trên `_call_chat_completions()` | `llm_service.py` | 3 lần retry, exponential backoff (4s→10s), chỉ retry `APIStatusError`/`APIConnectionError` |
+| **Tầng 1** — Retry | `tenacity` decorator trên `_call_chat_completions()` | `llm_service.py` | 3 lần retry, exponential backoff (4s→10s), retry nhóm lỗi SDK status/rate/internal |
 | **Tầng 2** — Heuristic | `_try_heuristic_fallback()` → `fallback_process_request()` | `heuristic_router.py` | Trích user_text + file_context từ messages → SemanticIntentRouter xác định intent → gọi trực tiếp tool Python → template response |
 | **Tầng 3** — Static | Hard-coded error message | `llm_service.py` | Luôn trả `FunctionCallingResponse` hợp lệ, KHÔNG raise exception |
 
@@ -2585,12 +2607,12 @@ graph TB
 @dataclass
 class FunctionCallingResponse:
     text: str                            # Final synthesised answer
-    tool_calls: list[dict] = []          # [{name, args, result}, ...]
-    message_type: str = "text"           # "retraction_report" | "citation_report" | ...
-    tool_results: dict | None = None     # {type: "...", data: [...]} for frontend rendering
+    tool_calls: list[dict] = field(default_factory=list)  # [{name, args, result}, ...]
+    message_type: str = "text"           # single-tool: report type; multi-tool grouped: "text"
+    tool_results: dict | None = None     # single: {type,data,...} OR grouped: {type:"multi_tool_report",groups:[...]}
 ```
 
-`ChatService` sử dụng `message_type` và `tool_results` để lưu tin nhắn với đúng `MessageType` enum → frontend render rich tool-result components (JournalListCard, CitationReportCard, etc.).
+`ChatService` sử dụng `message_type` và `tool_results` để lưu tin nhắn với đúng `MessageType` enum; frontend ưu tiên structured `tool_results` để render rich cards/group-cards (JournalListCard, CitationReportCard, RetractionReportCard, ...).
 
 ### 7.3 OpenAlex API
 
@@ -2788,7 +2810,7 @@ flowchart LR
 | **Vai trò** | Tải và cache ML models từ HuggingFace Model Hub |
 | **SDK** | `huggingface-hub` ≥ 0.20 |
 | **Auth** | `HF_TOKEN` (optional, cho private/gated models) |
-| **Sử dụng bởi** | `journal_finder.py` (MiniLM-L6-v2 for ChromaDB), `ai_writing_detector.py` (RoBERTa) |
+| **Sử dụng bởi** | `journal_finder.py` (SPECTER2 for ChromaDB), `ai_writing_detector.py` (RoBERTa) |
 | **Cache** | `~/.cache/huggingface/hub/` (auto-cached sau lần tải đầu) |
 | **Trạng thái** | ✅ Hoạt động |
 
@@ -2806,20 +2828,14 @@ if token:
     # "HF_TOKEN is set and is the current active token"
 ```
 
-**Cơ chế Fallback — Offline Mode:**
+**Cơ chế Model Load — Online/Cache Mode:**
 ```python
-# Thử online → nếu fail → thử local cache
-for model_name in MODEL_CANDIDATES:
-    try:
-        model = SentenceTransformer(model_name, local_files_only=False)
-        return model
-    except Exception:
-        try:
-            model = SentenceTransformer(model_name, local_files_only=True)
-            return model
-        except Exception:
-            continue
-# Nếu tất cả fail → TF-IDF fallback (không cần ML model)
+try:
+    model = SentenceTransformer("allenai/specter2_base", trust_remote_code=False)
+except Exception:
+    # Nếu model không load được, journal_finder degrade an toàn:
+    # recommend() trả [] thay vì fabricate fallback data
+    model = None
 ```
 
 ### 7.7 ChromaDB — Journal Vector Database
@@ -2829,7 +2845,7 @@ for model_name in MODEL_CANDIDATES:
 | **Vai trò** | Persistent vector store cho journal CFP data → semantic search |
 | **Database** | ChromaDB PersistentClient (`backend/data/chroma_db/`) |
 | **Collection** | `journal_cfps`, cosine HNSW space, MD5 hash IDs |
-| **Embedding Model** | `all-MiniLM-L6-v2` (384 dimensions) via SentenceTransformer |
+| **Embedding Model** | `allenai/specter2_base` (768 dimensions) via SentenceTransformer |
 | **Data Source** | `backend/crawler/` pipeline (UniversalScraper → DbBuilder) |
 | **File** | `backend/app/services/tools/journal_finder.py` |
 | **Latency** | ~0.05s (query) / ~30s (full DB rebuild) |
@@ -3041,7 +3057,7 @@ def analyze_chunks(self, text: str, chunk_size: int = 500) -> list[DetectionResu
 | Endpoint | Method | Vai trò |
 |----------|--------|--------|
 | `/api/v1/tools/detect-ai-writing` | POST | Primary endpoint |
-| `/api/v1/tools/ai-detect` | POST | Alias → delegates to `detect_ai_writing()` |
+| `/api/v1/tools/ai-detect` | POST | Alias → delegates to primary `detect-ai-writing` handler |
 
 ### 7.9 PyMuPDF (fitz) — PDF Processing
 

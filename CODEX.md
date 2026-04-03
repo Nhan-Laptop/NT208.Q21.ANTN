@@ -2,7 +2,7 @@
 
 > Absolute Source of Truth for AI agents and engineers working on AIRA (Academic Integrity & Research Assistant).
 >
-> Last updated: 2026-03-30
+> Last updated: 2026-04-03
 
 ## Core Directives for Future Agents
 
@@ -155,10 +155,10 @@ Responsibilities:
 
 Tool set:
 - citation_checker: reference extraction + verification pipeline.
-- retraction_scan: DOI risk/retraction/concerning-paper checks.
+- retraction_scan: DOI risk/retraction/concerning-paper checks; no-DOI input is reported as `total_checked=0` + `no_doi_found=true` (never as fake checked DOI).
 - journal_finder: ChromaDB semantic match for journal CFP recommendations using Specter2 embeddings and bounded similarity scoring.
-- ai_writing_detector: ML + rule-based AI text likelihood.
-- grammar_checker: LanguageTool-based correction diagnostics.
+- ai_writing_detector: ML + rule-based AI text likelihood (probabilistic estimate, not definitive proof).
+- grammar_checker: LanguageTool diagnostics with conservative auto-correction (unsafe/domain-sensitive replacements are skipped).
 
 ### 3.5 Data Engineering Pipeline Module
 
@@ -186,7 +186,7 @@ Operational sequence:
 
 1. Build message array:
 - Add system prompt.
-- Append conversation history.
+- Append sanitized conversation history (history user turns never create new `document_id`, and historical document markers are stripped from router scope).
 - Replace attached/oversized raw document text with metadata-only references (`document_id`, text length) before sending the prompt to Groq.
 - Append current user message.
 
@@ -195,24 +195,35 @@ Operational sequence:
 - tools = _GROQ_TOOLS
 - tool_choice = auto
 
+2.5 Deterministic explicit-action shortcut:
+- Nếu user request thể hiện rõ intent `verify_citation` hoặc `scan_retraction_and_pubpeer`, backend thực thi tool trực tiếp (server-side) thay vì yêu cầu Groq chọn tool.
+- Nếu user explicit yêu cầu cả citation + retraction (ví dụ: "kiểm tra cả hai"), backend thực thi tuần tự cả hai tool theo deterministic path và trả grouped payload cho UI.
+- Shortcut này vẫn giữ pass-by-reference: khi có `document_id`, backend resolve nội dung cục bộ trước khi chạy tool.
+
 3. If tool_calls are present:
 - Parse each requested function name and JSON arguments.
 - If a tool call contains `document_id`, resolve it back to the cached full text inside the backend execution layer.
-- Dispatch to local Python callable via _TOOL_FUNCTIONS registry.
+- Dispatch to local Python callable via `_TOOL_FUNCTIONS` registry.
 - Capture tool output.
-- Append tool message back into conversation.
+- For non-terminal tools, append a compact model-facing summary back into conversation.
+- For terminal tools (`detect_ai_writing`, `check_grammar`), exit loop immediately with backend-generated assistant summary + full structured payload.
 - Continue iterative loop.
 
 4. If no tool_calls:
 - Final synthesized assistant text is returned.
-- If tool calls happened earlier, map first tool to message_type and build structured tool_results payload for frontend cards.
+- If pseudo tool syntax appears without native `tool_calls`, treat as invalid action path and attempt heuristic fallback.
+- Malformed pseudo fragments (orphan tags, broken tool stubs, raw `{"document_id": ...}` remnants) are sanitized and must not persist into chat history/UI text.
+- If tool calls happened earlier and only one tool is present, map tool to message_type and build single structured tool_results payload.
+- If multiple tool families are executed intentionally (for example citation + retraction), build grouped payload (`tool_results.type = "multi_tool_report"`, `groups[]`) so UI renders separate cards without semantic mixing.
+- If synthesized text is low-signal/generic, backend can replace it with deterministic tool-state messaging (for example: no DOI detected, lookup failure, clean vs problematic findings).
 
 5. Loop safety:
 - Max iterations capped by _MAX_FC_ITERATIONS = 5.
 
 6. Fallback path on provider failure:
 - _call_chat_completions is retried with tenacity.
-- After retry failure, _try_heuristic_fallback attempts semantic intent routing + direct local tool execution.
+- After retry failure, `_try_heuristic_fallback` attempts semantic intent routing + direct local tool execution.
+- Fallback path honors the request-scoped exposed-tool contract via `allowed_tool_names`.
 - If heuristic routing cannot classify intent, return static overload/failure message.
 
 ### 4.1.1 Context Management and Token-Limit Protections
@@ -243,10 +254,18 @@ New-session UX behavior:
 Enterprise routing mechanism:
 
 - Raw attached documents and oversized pasted text are cached in-memory on the backend and assigned a stable `document_id`.
+- Document cache lifecycle is bounded (TTL + max entries) to avoid unbounded memory growth.
 - Groq receives only metadata such as `document_id` and character length, never the full cached document body.
+- If user intent text is not clearly separable from the long body, router query is inferred from intent hints (safe generic text), not copied raw from the document body.
+- Long-text intent inference giữ riêng citation vs retraction (không collapse về generic query) để giảm sai lệch tool selection.
 - Tool schemas expose `document_id` so the model can route intent using a reference instead of embedding large raw text into JSON arguments.
+- For `detect_ai_writing` and `check_grammar`, the Groq-facing schema is `document_id`-only; those tools must not receive raw `text` arguments from the LLM layer.
+- Groq-facing hybrid tools remain dual-mode: `scan_retraction_and_pubpeer(document_id|text)`, `verify_citation(document_id|text)`, and `match_journal(document_id|abstract[, title])`; prefer `document_id` whenever it exists in request scope.
+- If a request does not expose any valid `document_id`, Groq is not shown the `detect_ai_writing` or `check_grammar` tool schemas at all.
 - `_execute_tool_call()` resolves `document_id` back to full text immediately before the local Python/ML tool runs, then strips the reference key from the callable arguments.
+- `document_id` scope is current-turn-only (safe-first); history references are intentionally not carried forward.
 - Heuristic fallback can also reconstruct the cached document from `document_id`, so provider outages do not require the LLM to carry raw file text.
+- Heuristic fallback is prevented from invoking hidden tools not exposed in the current request.
 
 Architecture intent:
 
@@ -259,9 +278,9 @@ Strict response contract:
 @dataclass
 class FunctionCallingResponse:
     text: str
-    tool_calls: list[dict[str, Any]]
-    message_type: str
-    tool_results: dict[str, Any] | None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    message_type: str = "text"
+    tool_results: dict[str, Any] | None = None
 ```
 
 ### 4.2 Data Pipeline and Degradation Behavior (backend/crawler)

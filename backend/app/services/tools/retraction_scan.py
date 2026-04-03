@@ -366,7 +366,8 @@ class RetractionScanner:
     def scan(self, text: str) -> list[RetractionResult]:
         dois = self.extract_doi(text)
         if not dois:
-            return [RetractionResult(doi="N/A", status="NO_DOI_FOUND")]
+            logger.info("Retraction scan: no DOI detected in input text.")
+            return []
 
         out: list[RetractionResult] = []
         for doi in dois:
@@ -378,18 +379,21 @@ class RetractionScanner:
         return out
 
     def get_summary(self, results: list[RetractionResult]) -> dict[str, Any]:
-        if not results:
-            return {"total": 0}
+        checked_results = [r for r in results if r.status != "NO_DOI_FOUND"]
+        total_checked = len(checked_results)
+        no_doi_found = total_checked == 0
         return {
-            "total": len(results),
-            "retracted": sum(1 for r in results if r.status == "RETRACTED"),
-            "concerns": sum(1 for r in results if r.status == "CONCERN"),
-            "corrected": sum(1 for r in results if r.status == "CORRECTED"),
-            "active": sum(1 for r in results if r.status == "ACTIVE"),
-            "unknown": sum(1 for r in results if r.status in ("UNKNOWN", "ERROR")),
-            "critical_risk": sum(1 for r in results if r.risk_level_enum == RiskLevel.CRITICAL),
-            "high_risk": sum(1 for r in results if r.risk_level_enum == RiskLevel.HIGH),
-            "pubpeer_discussions": sum(1 for r in results if r.pubpeer_info and r.pubpeer_info.has_comments),
+            "total": total_checked,  # backward-compatible alias
+            "total_checked": total_checked,
+            "no_doi_found": no_doi_found,
+            "retracted": sum(1 for r in checked_results if r.status == "RETRACTED"),
+            "concerns": sum(1 for r in checked_results if r.status == "CONCERN"),
+            "corrected": sum(1 for r in checked_results if r.status == "CORRECTED"),
+            "active": sum(1 for r in checked_results if r.status == "ACTIVE"),
+            "unknown": sum(1 for r in checked_results if r.status in ("UNKNOWN", "ERROR")),
+            "critical_risk": sum(1 for r in checked_results if r.risk_level_enum == RiskLevel.CRITICAL),
+            "high_risk": sum(1 for r in checked_results if r.risk_level_enum == RiskLevel.HIGH),
+            "pubpeer_discussions": sum(1 for r in checked_results if r.pubpeer_info and r.pubpeer_info.has_comments),
         }
 
     def close(self) -> None:

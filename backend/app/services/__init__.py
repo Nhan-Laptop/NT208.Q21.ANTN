@@ -12,7 +12,7 @@ This module contains:
 from app.services.bootstrap import ensure_admin_user
 from app.services.chat_service import ChatService, chat_service
 from app.services.file_service import FileService, file_service
-from app.services.llm_service import GroqLLMService, groq_llm_service, GeminiService, gemini_service
+from app.services.llm_service import GroqLLMService, gemini_service
 from app.services.storage_service import (
     StorageService,
     storage_service,
@@ -21,6 +21,10 @@ from app.services.storage_service import (
     StorageObject,
     UploadResult,
 )
+
+# Backward-compatible aliases after Groq migration.
+GeminiService = GroqLLMService
+groq_llm_service = gemini_service
 
 __all__ = [
     "ChatService",
