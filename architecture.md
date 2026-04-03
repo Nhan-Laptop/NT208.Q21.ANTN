@@ -5,6 +5,22 @@
 
 ---
 
+## 0. Verified Implementation Snapshot (Authoritative)
+
+Đây là snapshot đã đối chiếu trực tiếp với mã nguồn hiện tại trong `~/NT208` (ngày kiểm tra: 2026-04-03).  
+Nếu bất kỳ phần/diagram cũ bên dưới mâu thuẫn, ưu tiên snapshot này và `CODEX.md`.
+
+- LLM runtime: `GroqLLMService` (`backend/app/services/llm_service.py`) với Groq chat-completions + function calling.
+- Context protection: sliding window 4 messages, truncate history 2000 chars/message, truncate active input 10000 chars.
+- Pass-by-reference routing: văn bản dài hoặc `<Attached_Document>` được cache in-memory và gửi sang LLM bằng metadata (`document_id`, `length`) thay vì raw text.
+- Tool execution: `_execute_tool_call()` resolve `document_id` -> full text ngay trước khi chạy tool local.
+- Journal vector pipeline: ChromaDB `journal_cfps` + `allenai/specter2_base` (768-dim) cho ingest và retrieval.
+- Heuristic fallback: `all-MiniLM-L6-v2` chỉ còn dùng cho fallback intent classification (`heuristic_router.py`), không dùng cho JournalFinder vector retrieval.
+- Crawler stack: `UniversalScraper` dùng DrissionPage (CDP Chromium automation), không dùng `cloudscraper`.
+- Session title UX: backend tự sinh title ngắn cho message đầu tiên và trả session đã cập nhật để frontend sync sidebar ngay.
+
+---
+
 ## Mục lục
 
 1. [Sơ đồ Kiến trúc Hệ thống (System Architecture)](#1-sơ-đồ-kiến-trúc-hệ-thống)
@@ -75,7 +91,7 @@ graph TB
         end
 
         subgraph DATA_PIPELINE["Data Engineering Pipeline"]
-            Crawler["UniversalScraper<br/>(cloudscraper + sources.json)"]
+            Crawler["UniversalScraper<br/>(DrissionPage + sources.json)"]
             DbBuilder["DbBuilder<br/>(SentenceTransformer → ChromaDB)"]
             ChromaDB["ChromaDB<br/>(Persistent Vector Store)"]
         end
@@ -238,7 +254,7 @@ graph LR
 | Tool | File | ML Model / API | Chức năng |
 |------|------|----------------|-----------|
 | **CitationChecker** | `tools/citation_checker.py` | PyAlex + Habanero + httpx | Verify citations: extract DOI → query OpenAlex/Crossref → fuzzy match → confidence score |
-| **JournalFinder** | `tools/journal_finder.py` | ChromaDB + SentenceTransformer (all-MiniLM-L6-v2) | Recommend journals: query ChromaDB `journal_cfps` collection with embedded abstract → cosine similarity ranking. Data seeded by `backend/crawler/` pipeline |
+| **JournalFinder** | `tools/journal_finder.py` | ChromaDB + SentenceTransformer (`allenai/specter2_base`) | Recommend journals: query ChromaDB `journal_cfps` collection with Specter2 embeddings (768-dim) + bounded similarity scoring. Data seeded by `backend/crawler/` pipeline |
 | **RetractionScanner** | `tools/retraction_scan.py` | Crossref + OpenAlex + PubPeer | Scan DOIs: check retraction status, risk level, title-based detection, PubPeer comments |
 | **AIWritingDetector** | `tools/ai_writing_detector.py` | RoBERTa (`roberta-base-openai-detector`) | Detect AI text: ensemble 70% ML (RoBERTa) + 30% rule-based (7 features) |
 | **GrammarChecker** | `tools/grammar_checker.py` | LanguageTool (JVM server) | Offline grammar & spell checking: singleton JVM, lazy init, rule-based corrections |

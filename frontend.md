@@ -7,6 +7,17 @@
 
 ---
 
+## 0. Verified Sync Notes (2026-04-03)
+
+Các hành vi dưới đây đã được đối chiếu với mã nguồn hiện tại:
+
+- Session title mặc định là `Trò chuyện mới`; sau message user đầu tiên, backend tự sinh title ngắn và trả lại `response.session` đã cập nhật.
+- Frontend sync title sidebar ngay trong `chat-store` bằng `dispatch({ type: "UPSERT_SESSION", session: response.session })`, không cần chờ reload toàn bộ sessions.
+- Khi user gửi text rất dài hoặc có `<Attached_Document>`, frontend vẫn gửi input bình thường; backend mới là nơi chuyển sang cơ chế pass-by-reference (`document_id`) trước khi gọi Groq.
+- UI không hiển thị raw tài liệu trong tool arguments; việc resolve `document_id` -> full text diễn ra hoàn toàn ở backend execution layer.
+
+---
+
 ## 📑 Table of Contents
 
 1. [Frontend Architecture Overview](#1-frontend-architecture-overview)
@@ -598,7 +609,7 @@ A native `<select>` dropdown with 5 options. Changes `state.mode` in ChatStore, 
 
 | Mode Value | Display Label | Backend Routing |
 |---|---|---|
-| `general_qa` | General Chat | Gemini FC (auto-routes to tools) |
+| `general_qa` | General Chat | Groq FC (auto-routes to tools) |
 | `verification` | Citation Check | `CitationChecker.verify()` direct |
 | `journal_match` | Journal Match | `JournalFinder.recommend()` direct |
 | `retraction` | Retraction Scan | `RetractionScanner.scan()` direct |

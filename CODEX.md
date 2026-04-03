@@ -64,6 +64,10 @@ Notes:
 | Scraping transport | DrissionPage (CDP-based Chromium automation) | Renders dynamic publisher pages and survives modern WAF / anti-bot challenges |
 | HTML parsing | DrissionPage DOM queries | Extracts live CSS-selected CFP metadata such as deadlines, scopes, and deep links |
 
+Scope note:
+- `allenai/specter2_base` is the active embedding model for ChromaDB ingestion/retrieval (`journal_cfps`).
+- `all-MiniLM-L6-v2` is still used only by `heuristic_router.py` for fallback intent classification when Groq calls fail.
+
 ### 2.4 Academic APIs and Tool Dependencies
 
 | Domain | Libraries / APIs | Purpose |

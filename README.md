@@ -62,9 +62,9 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 
 | Feature | Description | Powered By |
 |---------|-------------|------------|
-| 💬 **General Q&A** | Conversational AI for research questions, with context memory (8 messages) and file-aware responses | Groq (LLaMA 3.1) |
+| 💬 **General Q&A** | Conversational AI for research questions with backend context protection (4-message router window, input truncation, pass-by-reference for long/file text) | Groq (LLaMA 3.1) |
 | 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI) from text → verify against authoritative databases → detect hallucinated references | OpenAlex + Crossref |
-| 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by ChromaDB semantic search + domain match | ChromaDB + SentenceTransformer |
+| 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by ChromaDB semantic search + domain match | ChromaDB + SPECTER2 (`allenai/specter2_base`) |
 | 🔍 **Retraction Scanning** | Check DOIs against retraction databases → multi-source risk assessment (NONE → CRITICAL) | Crossref + OpenAlex + PubPeer |
 | 🤖 **AI Writing Detection** | Ensemble analysis: 70% RoBERTa ML classifier + 30% rule-based heuristics (7 linguistic features) → 5-level verdict scale | RoBERTa + Custom Rules |
 | ✍️ **Grammar & Spell Check** | Offline grammar/spelling analysis powered by LanguageTool JVM server — detects errors, suggests fixes, returns corrected text | LanguageTool |
@@ -123,6 +123,14 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 
 > 📖 **Deep-dive documentation:** See [`architecture.md`](./architecture.md) for full backend architecture with 10+ Mermaid diagrams, and [`frontend.md`](./frontend.md) for the complete frontend architecture (1000+ lines, 10 Mermaid diagrams).
 
+### Router Context Management (Current Behavior)
+
+- The Groq layer is used primarily as an intent router/tool caller.
+- Backend applies a sliding window (last 4 history messages) and truncates each retained history item to 2000 chars.
+- Active user payload is truncated to 10000 chars before router call.
+- For oversized or attached-document text, backend stores full text in an in-memory cache and sends only metadata (`document_id`, `length`) to the LLM.
+- Tool execution resolves `document_id` back to full text server-side immediately before calling local tools.
+
 ---
 
 ## 🛠️ Tech Stack
@@ -138,8 +146,8 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 | **Groq SDK** | ≥0.12.0 | Groq LLM integration (LLaMA 3.1 chat + summarization + function calling) |
 | **Tenacity** | ≥8.2.0 | Retry with exponential backoff for Groq 503/429 errors |
 | **ChromaDB** | ≥0.5.0 | Persistent vector database for journal CFP semantic search |
-| **Sentence-Transformers** | ≥2.2.0 | all-MiniLM-L6-v2 embeddings (ChromaDB + intent routing) |
-| **cloudscraper** | ≥1.2.71 | Anti-bot bypass for academic publisher scraping |
+| **Sentence-Transformers** | ≥2.2.0 | SPECTER2 embeddings for journal vectors + MiniLM fallback intent routing |
+| **DrissionPage** | ≥4.0.0 | CDP-based browser automation for dynamic CFP scraping (Elsevier/MDPI/IEEE) |
 | **Transformers + PyTorch** | ≥4.35 / ≥2.0 | RoBERTa AI writing detection pipeline |
 | **PyAlex** | ≥0.13 | OpenAlex API wrapper (citation verification) |
 | **Habanero** | ≥1.2.0 | Crossref API wrapper (DOI verification, retraction scan) |
@@ -370,14 +378,14 @@ NT208.Q21.ANTN/
 │   │       ├── storage_service.py  # S3/Local dual-backend + encryption
 │   │       ├── bootstrap.py        # Auto-create admin on startup
 │   │       └── tools/
-│   │           ├── journal_finder.py       # ChromaDB semantic search + TF-IDF fallback
+│   │           ├── journal_finder.py       # ChromaDB semantic search (SPECTER2) + score bounding
 │   │           ├── citation_checker.py     # PyAlex + Habanero multi-source
 │   │           ├── retraction_scan.py      # Crossref + OpenAlex + PubPeer
 │   │           ├── ai_writing_detector.py  # RoBERTa ensemble + 7 heuristics
 │   │           └── grammar_checker.py      # LanguageTool JVM wrapper
 │   ├── crawler/
 │   │   ├── sources.json     # Publisher scraping configs (Elsevier, MDPI, IEEE)
-│   │   ├── universal_scraper.py  # cloudscraper + BeautifulSoup CSS extraction
+│   │   ├── universal_scraper.py  # DrissionPage CDP browser scraping + DOM CSS extraction
 │   │   ├── db_builder.py    # SentenceTransformer → ChromaDB upsert
 │   │   └── run.py           # Pipeline orchestrator
 │   ├── data/
@@ -449,7 +457,7 @@ NT208.Q21.ANTN/
 
 | Model | Parameters | Purpose | Latency |
 |-------|-----------|---------|---------|
-| **ChromaDB** + **all-MiniLM-L6-v2** | 22M | Journal matching via vector similarity search (384-dim) | ~0.05s (query) |
+| **ChromaDB** + **SPECTER2** (`allenai/specter2_base`) | ~110M | Journal matching via academic-domain vector similarity search (768-dim) | ~0.05s (query) |
 | **RoBERTa** (`roberta-base-openai-detector`) | 125M | Binary classifier: Human vs AI-generated text | ~4.8s (first load) |
 | **all-MiniLM-L6-v2** | 22M | Semantic intent routing (384-dim embeddings for heuristic fallback engine) | ~1s |
 
