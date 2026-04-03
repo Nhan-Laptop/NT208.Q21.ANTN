@@ -13,8 +13,10 @@ User Prompt → Groq (LLaMA 3.1) → [tool_calls] → Python Tool Execution
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Sequence
@@ -37,6 +39,7 @@ _MAX_HISTORY_MESSAGES = 4
 _MAX_HISTORY_MESSAGE_CHARS = 2000
 _MAX_ROUTER_INPUT_CHARS = 10000
 _MAX_TITLE_SOURCE_CHARS = 2000
+_DOCUMENT_CACHE_TRIGGER_CHARS = 4000
 _TRUNCATED_HISTORY_SUFFIX = " ...[truncated]"
 _TRUNCATED_INPUT_SUFFIX = (
     "\n\n...[Nội dung đã được hệ thống cắt ngắn để đảm bảo giới hạn API]..."
@@ -47,6 +50,28 @@ _TITLE_GENERATOR_SYSTEM_INSTRUCTION = (
     "for a chat session based on the user's first message. Respond ONLY with the "
     "title itself, no quotes, no explanations. Language: Vietnamese."
 )
+_DOCUMENT_CACHE: dict[str, str] = {}
+_ATTACHED_DOCUMENT_RE = re.compile(
+    r"<Attached_Document[^>]*>\s*(?P<text>.*?)\s*</Attached_Document>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DOCUMENT_METADATA_RE = re.compile(
+    r"\[Attached Document metadata:\s*document_id='(?P<document_id>[^']+)',\s*"
+    r"length=(?P<length>\d+)\s+chars\.\s*DO NOT copy text\.\s*Use this "
+    r"document_id in your tools\.\]",
+    re.IGNORECASE,
+)
+_ROUTER_DOCUMENT_QUERY_FALLBACK = (
+    "Người dùng đã cung cấp một tài liệu đã được cache. Hãy chọn tool phù hợp "
+    "và chỉ truyền document_id."
+)
+_TOOL_DOCUMENT_ARGUMENT: dict[str, str] = {
+    "scan_retraction_and_pubpeer": "text",
+    "verify_citation": "text",
+    "match_journal": "abstract",
+    "detect_ai_writing": "text",
+    "check_grammar": "text",
+}
 
 # ---------- groq SDK import ----------------------------------------------
 try:
@@ -115,16 +140,20 @@ SYSTEM_PROMPT = (
 
     "# 2. QUY TRÌNH XỬ LÝ FILE (DOCUMENT WORKFLOW)\n"
     "Khi có file đính kèm (nằm trong thẻ <Attached_Document>), bạn đóng vai trò là một Agent tự động. "
-    "TUYỆT ĐỐI KHÔNG hỏi lại người dùng những thông tin đã có sẵn trong file. Tuân thủ luồng sau:\n"
-    "  1. **Đọc & Quét:** Tự động đọc nội dung file để tìm mã DOI (thường ở header/footer trang 1) "
-    "và phần danh sách 'References' / 'Tài liệu tham khảo'.\n"
+    "TUYỆT ĐỐI KHÔNG hỏi lại người dùng những thông tin đã có sẵn trong file. "
+    "Backend có thể chỉ cung cấp metadata dạng `[Attached Document metadata: document_id='...', length=... chars ...]` thay vì raw text. "
+    "Khi thấy metadata này, bạn KHÔNG có quyền truy cập raw document và KHÔNG BAO GIỜ được sao chép hay tái tạo nội dung tài liệu trong prompt hoặc tool args. "
+    "Tuân thủ luồng sau:\n"
+    "  1. **Định tuyến bằng tham chiếu:** Nếu backend đã cấp `document_id`, chỉ dùng `document_id` khi gọi tool cho tài liệu đó. "
+    "Không truyền raw text, không copy phần Abstract/References vào arguments.\n"
+    "  2. **Đọc & Quét:** Suy luận tool cần dùng từ yêu cầu của user và metadata tài liệu.\n"
     "  2. **Hành động (Action):**\n"
-    "     - Rút bài/PubPeer → Truyền trực tiếp DOI tìm được vào `scan_retraction_and_pubpeer`.\n"
-    "     - Xác minh trích dẫn → Truyền toàn bộ text phần References vào `verify_citation`.\n"
-    "     - Tìm tạp chí → Truyền text phần Abstract vào `match_journal`.\n"
-    "     - Kiểm tra AI viết → Truyền text nội dung vào `detect_ai_writing`.\n"
-    "     - Kiểm tra ngữ pháp / chính tả / sửa lỗi văn bản → dùng `check_grammar`.\n"
-    "  3. **Truyền dữ liệu thô:** Truyền nguyên văn text trích xuất vào tool, KHÔNG tóm tắt trước.\n"
+    "     - Rút bài/PubPeer → nếu có `document_id`, gọi `scan_retraction_and_pubpeer(document_id=...)`; nếu không có tài liệu cache thì mới dùng text ngắn.\n"
+    "     - Xác minh trích dẫn → nếu có `document_id`, gọi `verify_citation(document_id=...)`.\n"
+    "     - Tìm tạp chí → nếu có `document_id`, gọi `match_journal(document_id=...)`.\n"
+    "     - Kiểm tra AI viết → nếu có `document_id`, gọi `detect_ai_writing(document_id=...)`.\n"
+    "     - Kiểm tra ngữ pháp / chính tả / sửa lỗi văn bản → nếu có `document_id`, gọi `check_grammar(document_id=...)`.\n"
+    "  3. **Không truyền raw document:** Tool arguments cho tài liệu cache chỉ được chứa `document_id` và metadata ngắn nếu cần.\n"
     "  4. **Ngoại lệ:** Chỉ yêu cầu người dùng cung cấp thêm thông tin BẰNG LỜI nếu file hỏng hoặc hoàn toàn không có DOI/References.\n\n"
 
     "# 3. GIỌNG ĐIỆU VÀ PHONG CÁCH (TONE & STYLE)\n"
@@ -145,7 +174,7 @@ SYSTEM_PROMPT = (
     "user: (Đính kèm file PDF) Tóm tắt và xem các trích dẫn ở cuối bài có chuẩn không?\n"
     "model: \n"
     "1. [Gọi tool: sinh ra câu tóm tắt nội dung file]\n"
-    "2. [Tự động gọi tool: verify_citation với args: {'text': '<Toàn bộ text phần References từ file PDF>'}]\n"
+    "2. [Tự động gọi tool: verify_citation với args: {'document_id': 'abc123'}]\n"
     "(Sau khi tool trả kết quả)\n"
     "model: Bài báo nghiên cứu về thuật toán X. Về trích dẫn, hệ thống đã quét 25 tài liệu tham khảo: 23 tài liệu hợp lệ, 2 tài liệu không xác minh được nguồn gốc (có khả năng do AI ảo giác tạo ra).\n"
     "</example>\n"
@@ -188,6 +217,101 @@ def _truncate_text(
             limit,
         )
     return text[:limit] + suffix
+
+
+def _store_document(text: str) -> str:
+    """Store full document text in the local cache and return its ID."""
+    normalized = text.strip()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    _DOCUMENT_CACHE[digest] = normalized
+    logger.info("Cached document %s (%d chars).", digest, len(normalized))
+    return digest
+
+
+def _get_document(document_id: str) -> str | None:
+    """Resolve a cached document ID to its full text."""
+    return _DOCUMENT_CACHE.get(document_id)
+
+
+def _build_document_reference_prompt(document_id: str, document_text: str, query_text: str) -> str:
+    """Build the metadata-only prompt that is safe to send to Groq."""
+    effective_query = query_text.strip() or _ROUTER_DOCUMENT_QUERY_FALLBACK
+    return (
+        f"[Attached Document metadata: document_id='{document_id}', "
+        f"length={len(document_text)} chars. DO NOT copy text. Use this "
+        f"document_id in your tools.]\n\nUser query: {effective_query}"
+    )
+
+
+def _split_long_user_input(user_text: str) -> tuple[str, str]:
+    """Heuristically separate a short leading instruction from pasted long text."""
+    normalized = user_text.strip()
+    parts = re.split(r"\n\s*\n", normalized, maxsplit=1)
+    if len(parts) == 2 and len(parts[0].strip()) <= 500:
+        return parts[0].strip(), parts[1].strip()
+    return "", normalized
+
+
+def _prepare_user_text_for_router(user_text: str) -> str:
+    """Replace attached/large raw documents with document metadata only."""
+    normalized = user_text.strip()
+    if not normalized:
+        return normalized
+
+    attached_docs = [
+        match.group("text").strip()
+        for match in _ATTACHED_DOCUMENT_RE.finditer(normalized)
+        if match.group("text").strip()
+    ]
+    if attached_docs:
+        document_text = "\n\n".join(attached_docs)
+        query_text = _ATTACHED_DOCUMENT_RE.sub("", normalized).strip()
+        document_id = _store_document(document_text)
+        return _build_document_reference_prompt(document_id, document_text, query_text)
+
+    if len(normalized) > _DOCUMENT_CACHE_TRIGGER_CHARS:
+        query_text, document_text = _split_long_user_input(normalized)
+        document_id = _store_document(document_text)
+        return _build_document_reference_prompt(document_id, document_text, query_text)
+
+    return normalized
+
+
+def _extract_document_id(text: str) -> str | None:
+    """Extract cached document metadata from a router-facing user message."""
+    match = _DOCUMENT_METADATA_RE.search(text)
+    if not match:
+        return None
+    return match.group("document_id")
+
+
+def _strip_document_metadata(text: str) -> str:
+    """Remove router metadata so fallback logic sees only the user query."""
+    without_metadata = _DOCUMENT_METADATA_RE.sub("", text).strip()
+    without_prefix = re.sub(
+        r"^\s*User query:\s*",
+        "",
+        without_metadata,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return without_prefix.strip()
+
+
+def _restore_file_context_from_metadata(text: str) -> str | None:
+    """Rebuild an Attached_Document block for local fallback paths."""
+    document_id = _extract_document_id(text)
+    if not document_id:
+        return None
+    full_text = _get_document(document_id)
+    if not full_text:
+        logger.warning("Cached document %s was not found during fallback.", document_id)
+        return None
+    return (
+        f'<Attached_Document cached_document_id="{document_id}">\n'
+        f"{full_text}\n"
+        f"</Attached_Document>"
+    )
 
 # =========================================================================
 # Tool wrapper functions (callable by Gemini via Function Calling)
@@ -294,13 +418,7 @@ def detect_ai_writing(text: str) -> dict:
         details.
     """
     try:
-        safe_text = _truncate_text(
-            text,
-            _MAX_ROUTER_INPUT_CHARS,
-            _TRUNCATED_INPUT_SUFFIX,
-            log_label="detect_ai_writing input",
-        )
-        result = ai_writing_detector.analyze(safe_text)
+        result = ai_writing_detector.analyze(text)
         return _make_serializable(asdict(result))
     except Exception as exc:
         logger.error("detect_ai_writing failed: %s", exc, exc_info=True)
@@ -381,12 +499,18 @@ _GROQ_TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": (
+                            "ID of a cached document to process. Prefer this for attached or long documents."
+                        ),
+                    },
                     "text": {
                         "type": "string",
-                        "description": "Text containing one or more DOIs to scan.",
+                        "description": "Short inline text containing one or more DOIs to scan. Do not use when document_id is available.",
                     },
                 },
-                "required": ["text"],
+                "required": [],
             },
         },
     },
@@ -401,12 +525,21 @@ _GROQ_TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": (
+                            "ID of a cached document to process. Prefer this for attached or long documents."
+                        ),
+                    },
                     "text": {
                         "type": "string",
-                        "description": "Text containing citations to verify (DOI, APA, author-year).",
+                        "description": (
+                            "Short inline text containing citations to verify (DOI, APA, author-year). "
+                            "Do not use when document_id is available."
+                        ),
                     },
                 },
-                "required": ["text"],
+                "required": [],
             },
         },
     },
@@ -421,16 +554,25 @@ _GROQ_TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": (
+                            "ID of a cached document to process. Prefer this for attached or long manuscripts."
+                        ),
+                    },
                     "abstract": {
                         "type": "string",
-                        "description": "The abstract or main text describing the research topic.",
+                        "description": (
+                            "Short inline abstract or main text describing the research topic. "
+                            "Do not use when document_id is available."
+                        ),
                     },
                     "title": {
                         "type": "string",
                         "description": "Optional paper title for improved matching accuracy.",
                     },
                 },
-                "required": ["abstract"],
+                "required": [],
             },
         },
     },
@@ -445,12 +587,21 @@ _GROQ_TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": (
+                            "ID of a cached document to process. Prefer this for attached or long documents."
+                        ),
+                    },
                     "text": {
                         "type": "string",
-                        "description": "The text to analyse for AI writing indicators (min 50 chars).",
+                        "description": (
+                            "Short inline text to analyse for AI writing indicators (min 50 chars). "
+                            "Do not use when document_id is available."
+                        ),
                     },
                 },
-                "required": ["text"],
+                "required": [],
             },
         },
     },
@@ -464,12 +615,21 @@ _GROQ_TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": (
+                            "ID of a cached document to process. Prefer this for attached or long documents."
+                        ),
+                    },
                     "text": {
                         "type": "string",
-                        "description": "The text to check for grammar and spelling errors.",
+                        "description": (
+                            "Short inline text to check for grammar and spelling errors. "
+                            "Do not use when document_id is available."
+                        ),
                     },
                 },
-                "required": ["text"],
+                "required": [],
             },
         },
     },
@@ -583,8 +743,10 @@ class GroqLLMService:
                     continue
                 if "<Attached_Document>" in content:
                     file_context = content
-                elif not user_text:
-                    user_text = content
+                else:
+                    file_context = file_context or _restore_file_context_from_metadata(content)
+                    if not user_text:
+                        user_text = _strip_document_metadata(content)
                 if user_text or file_context:
                     break
 
@@ -638,6 +800,8 @@ class GroqLLMService:
         for msg in recent_history:
             role = "user" if msg.role.value == "user" else "assistant"
             text = (msg.content or "").strip()
+            if role == "user":
+                text = _prepare_user_text_for_router(text)
             text = _truncate_text(
                 text,
                 _MAX_HISTORY_MESSAGE_CHARS,
@@ -647,8 +811,9 @@ class GroqLLMService:
             if text:
                 messages.append({"role": role, "content": text})
 
+        prepared_user_text = _prepare_user_text_for_router(user_text)
         safe_user_text = _truncate_text(
-            user_text,
+            prepared_user_text,
             _MAX_ROUTER_INPUT_CHARS,
             _TRUNCATED_INPUT_SUFFIX,
             log_label="user_text",
@@ -667,9 +832,27 @@ class GroqLLMService:
         if fn is None:
             logger.warning("LLM requested unknown function: %s", name)
             return {"error": f"Unknown function: {name}"}
-        logger.info("Executing tool: %s(%s)", name, list(args.keys()))
+
+        resolved_args = dict(args)
+        document_id = resolved_args.pop("document_id", None)
+        if document_id:
+            full_text = _get_document(document_id)
+            if not full_text:
+                logger.warning("Tool %s requested missing document_id: %s", name, document_id)
+                return {"error": f"Unknown document_id: {document_id}"}
+            target_arg = _TOOL_DOCUMENT_ARGUMENT.get(name)
+            if target_arg:
+                resolved_args[target_arg] = full_text
+
+        target_arg = _TOOL_DOCUMENT_ARGUMENT.get(name)
+        if target_arg and not resolved_args.get(target_arg):
+            return {
+                "error": f"Missing required argument: {target_arg} or document_id",
+            }
+
+        logger.info("Executing tool: %s(%s)", name, list(resolved_args.keys()))
         try:
-            return fn(**args)
+            return fn(**resolved_args)
         except Exception as exc:
             logger.error("Tool %s execution failed: %s", name, exc, exc_info=True)
             return {"error": f"Tool execution failed: {exc}"}

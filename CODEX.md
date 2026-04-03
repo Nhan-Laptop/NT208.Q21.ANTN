@@ -183,6 +183,7 @@ Operational sequence:
 1. Build message array:
 - Add system prompt.
 - Append conversation history.
+- Replace attached/oversized raw document text with metadata-only references (`document_id`, text length) before sending the prompt to Groq.
 - Append current user message.
 
 2. Invoke Groq chat completions:
@@ -192,6 +193,7 @@ Operational sequence:
 
 3. If tool_calls are present:
 - Parse each requested function name and JSON arguments.
+- If a tool call contains `document_id`, resolve it back to the cached full text inside the backend execution layer.
 - Dispatch to local Python callable via _TOOL_FUNCTIONS registry.
 - Capture tool output.
 - Append tool message back into conversation.
@@ -216,7 +218,6 @@ Router protections in `llm_service.py`:
 - Sliding window: only the last 4 user/assistant history messages are sent to Groq.
 - History truncation: each retained history message is capped at 2,000 characters and suffixed with `...[truncated]` when clipped.
 - Current-input truncation: the active user payload is capped at 10,000 characters and tagged with a visible truncation notice.
-- Defense in depth: `detect_ai_writing()` also truncates oversized text before calling the local detector.
 
 Architectural purpose:
 
@@ -232,6 +233,21 @@ New-session UX behavior:
 - The title-generator prompt is constrained to return only a 4-5 word session summary with no explanation text.
 - The generated title is committed back to the `chat_sessions.title` field before the chat response is returned.
 - Chat completion responses now include the updated serialized session object so the frontend sidebar can sync the renamed session immediately without relying on raw first-message text.
+
+### 4.1.3 Pass-by-Reference Document Routing
+
+Enterprise routing mechanism:
+
+- Raw attached documents and oversized pasted text are cached in-memory on the backend and assigned a stable `document_id`.
+- Groq receives only metadata such as `document_id` and character length, never the full cached document body.
+- Tool schemas expose `document_id` so the model can route intent using a reference instead of embedding large raw text into JSON arguments.
+- `_execute_tool_call()` resolves `document_id` back to full text immediately before the local Python/ML tool runs, then strips the reference key from the callable arguments.
+- Heuristic fallback can also reconstruct the cached document from `document_id`, so provider outages do not require the LLM to carry raw file text.
+
+Architecture intent:
+
+- This is a pass-by-reference design: Document Cache -> Groq receives only ID/metadata -> Groq returns tool call with ID -> Backend resolves ID to text -> ML tool executes.
+- The goal is to permanently reduce Groq 413 payload/rate-limit failures and 400 malformed tool-call JSON failures caused by sending large raw document payloads through the OpenAI-compatible function-calling interface.
 
 Strict response contract:
 
