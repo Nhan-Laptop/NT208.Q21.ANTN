@@ -35,3 +35,10 @@ backend/audit.log
 
 # Cache
 .cache/
+
+# Sensitive files & build artifacts
+.aira_master_key
+backend/.aira_master_key
+backend/vd.py
+backend/**/*.bak
+frontend/tsconfig.tsbuildinfo

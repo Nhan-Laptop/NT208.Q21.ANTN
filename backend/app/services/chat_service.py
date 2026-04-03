@@ -19,11 +19,14 @@ from app.services.tools.retraction_scan import retraction_scanner
 
 
 class ChatService:
+    DEFAULT_SESSION_TITLE = "Trò chuyện mới"
+    _LEGACY_DEFAULT_TITLES = {"new chat", "trò chuyện mới"}
     FILE_HINT_PATTERN = re.compile(r"\b(pdf|file|document|paper|manuscript|tom tat|summary|summarize)\b", re.IGNORECASE)
     _FILE_CONTEXT_MAX_CHARS = 15_000
 
     def create_session(self, db: Session, current_user: User, title: str, mode: SessionMode) -> ChatSession:
-        session_obj = ChatSession(user_id=current_user.id, title=title, mode=mode)
+        clean_title = (title or "").strip() or self.DEFAULT_SESSION_TITLE
+        session_obj = ChatSession(user_id=current_user.id, title=clean_title, mode=mode)
         db.add(session_obj)
         db.commit()
         db.refresh(session_obj)
@@ -80,11 +83,9 @@ class ChatService:
         db.refresh(message)
         return message
 
-    def _derive_title(self, text: str) -> str:
-        words = text.strip().split()
-        if not words:
-            return "New Chat"
-        return " ".join(words[:8])[:255]
+    def _is_default_title(self, title: str | None) -> bool:
+        normalized = (title or "").strip().lower()
+        return normalized in self._LEGACY_DEFAULT_TITLES
 
     def _run_mode_tool(self, mode: SessionMode, text: str) -> tuple[MessageType, str, dict[str, Any]]:
         if mode == SessionMode.VERIFICATION:
@@ -150,17 +151,26 @@ class ChatService:
         session_id: str,
         user_message: str,
         mode_override: SessionMode | None = None,
-    ) -> tuple[ChatMessage, ChatMessage]:
+    ) -> tuple[ChatMessage, ChatMessage, ChatSession]:
         session_obj = AccessGateway.assert_session_access(db, current_user, session_id)
 
         if mode_override and mode_override != session_obj.mode:
             session_obj.mode = mode_override
 
-        if session_obj.title == "New Chat":
-            session_obj.title = self._derive_title(user_message)
+        existing_user_message_count = (
+            db.query(ChatMessage)
+            .filter(
+                ChatMessage.session_id == session_id,
+                ChatMessage.role == MessageRole.USER,
+            )
+            .count()
+        )
+        should_generate_title = (
+            existing_user_message_count == 0
+            and self._is_default_title(session_obj.title)
+        )
 
         db.add(session_obj)
-        db.commit()
 
         user_msg = self._save_message(
             db=db,
@@ -169,6 +179,12 @@ class ChatService:
             content=user_message,
             message_type=MessageType.TEXT,
         )
+
+        if should_generate_title:
+            session_obj.title = gemini_service.generate_chat_title(user_message)
+            db.add(session_obj)
+            db.commit()
+            db.refresh(session_obj)
 
         mode = session_obj.mode
         if mode in {
@@ -188,7 +204,8 @@ class ChatService:
                 message_type=msg_type,
                 tool_results=structured,
             )
-            return user_msg, assistant_msg
+            db.refresh(session_obj)
+            return user_msg, assistant_msg, session_obj
 
         # General Q&A mode with contextual memory + Function Calling
         history = (
@@ -218,7 +235,8 @@ class ChatService:
             message_type=msg_type,
             tool_results=fc_response.tool_results,
         )
-        return user_msg, assistant_msg
+        db.refresh(session_obj)
+        return user_msg, assistant_msg, session_obj
 
     def log_file_upload(
         self,

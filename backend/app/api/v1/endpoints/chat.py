@@ -15,6 +15,7 @@ from app.schemas.chat import (
     EncryptedPayload,
     MessageOut,
     SessionChatRequest,
+    SessionOut,
 )
 from app.services.chat_service import chat_service
 
@@ -27,7 +28,7 @@ def create_completion(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.MESSAGE_WRITE))],
 ) -> ChatCompletionResponse:
-    user_msg, assistant_msg = chat_service.complete_chat(
+    user_msg, assistant_msg, session_obj = chat_service.complete_chat(
         db=db,
         current_user=current_user,
         session_id=payload.session_id,
@@ -36,6 +37,7 @@ def create_completion(
     )
     return ChatCompletionResponse(
         session_id=payload.session_id,
+        session=SessionOut.model_validate(session_obj),
         user_message=MessageOut.model_validate(user_msg),
         assistant_message=MessageOut.model_validate(assistant_msg),
     )
@@ -48,7 +50,7 @@ def create_completion_by_session(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.MESSAGE_WRITE))],
 ) -> ChatCompletionResponse:
-    user_msg, assistant_msg = chat_service.complete_chat(
+    user_msg, assistant_msg, session_obj = chat_service.complete_chat(
         db=db,
         current_user=current_user,
         session_id=session_id,
@@ -57,6 +59,7 @@ def create_completion_by_session(
     )
     return ChatCompletionResponse(
         session_id=session_id,
+        session=SessionOut.model_validate(session_obj),
         user_message=MessageOut.model_validate(user_msg),
         assistant_message=MessageOut.model_validate(assistant_msg),
     )
@@ -80,7 +83,7 @@ def create_completion_encrypted(
     if not session_id or not user_message:
         raise HTTPException(status_code=400, detail="session_id and user_message are required")
 
-    user_msg, assistant_msg = chat_service.complete_chat(
+    user_msg, assistant_msg, session_obj = chat_service.complete_chat(
         db=db,
         current_user=current_user,
         session_id=session_id,
@@ -90,6 +93,13 @@ def create_completion_encrypted(
 
     response_body = {
         "session_id": session_id,
+        "session": {
+            "id": session_obj.id,
+            "title": session_obj.title,
+            "mode": session_obj.mode.value,
+            "created_at": session_obj.created_at.isoformat(),
+            "updated_at": session_obj.updated_at.isoformat(),
+        },
         "user_message": MessageOut.model_validate(user_msg).model_dump(mode="json"),
         "assistant_message": MessageOut.model_validate(assistant_msg).model_dump(mode="json"),
     }

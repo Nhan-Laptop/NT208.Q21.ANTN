@@ -16,6 +16,19 @@ interface ChatState {
   mode: Session["mode"];
 }
 
+const DEFAULT_NEW_CHAT_TITLE = "Trò chuyện mới";
+
+function upsertSession(sessions: Session[], nextSession: Session): Session[] {
+  const existingIndex = sessions.findIndex((session) => session.id === nextSession.id);
+  if (existingIndex === -1) {
+    return [nextSession, ...sessions];
+  }
+
+  const updatedSessions = [...sessions];
+  updatedSessions[existingIndex] = nextSession;
+  return updatedSessions;
+}
+
 const initialState: ChatState = {
   sessions: [],
   activeSessionId: null,
@@ -38,6 +51,7 @@ type Action =
   | { type: "SET_MODE"; mode: Session["mode"] }
   | { type: "NEW_CHAT" }
   | { type: "ADD_SESSION"; session: Session }
+  | { type: "UPSERT_SESSION"; session: Session }
   | { type: "REMOVE_SESSION"; sessionId: string };
 
 function reducer(state: ChatState, action: Action): ChatState {
@@ -65,6 +79,11 @@ function reducer(state: ChatState, action: Action): ChatState {
         ...state,
         sessions: [action.session, ...state.sessions],
         activeSessionId: action.session.id,
+      };
+    case "UPSERT_SESSION":
+      return {
+        ...state,
+        sessions: upsertSession(state.sessions, action.session),
       };
     case "REMOVE_SESSION": {
       const sessions = state.sessions.filter((s) => s.id !== action.sessionId);
@@ -142,8 +161,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
         // Auto-create session on first message
         if (!sessionId) {
-          const title = text.slice(0, 60) || "New Chat";
-          const session = await api.createSession(token, title, state.mode);
+          const session = await api.createSession(token, DEFAULT_NEW_CHAT_TITLE, state.mode);
           dispatch({ type: "ADD_SESSION", session });
           sessionId = session.id;
         }
@@ -161,15 +179,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "ADD_MESSAGES", messages: [optimisticMsg] });
 
         // Send to backend (include mode so backend routes to correct tool)
-        await api.sendChat(token, sessionId, text, state.mode);
+        const response = await api.sendChat(token, sessionId, text, state.mode);
+        dispatch({ type: "UPSERT_SESSION", session: response.session });
 
         // Replace optimistic message with real messages
         const realMessages = await api.listMessages(token, sessionId);
         dispatch({ type: "SET_MESSAGES", messages: realMessages });
-
-        // Update session list (title might have changed)
-        const sessions = await api.listSessions(token);
-        dispatch({ type: "SET_SESSIONS", sessions });
       } catch (err) {
         showApiError(err);
         // Reload messages to remove optimistic message — use local sessionId

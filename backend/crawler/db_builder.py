@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Resolve path: backend/data/chroma_db/  (relative to this file)
 _CHROMA_DIR = Path(__file__).resolve().parent.parent / "data" / "chroma_db"
 _COLLECTION_NAME = "journal_cfps"
-_EMBED_MODEL = "all-MiniLM-L6-v2"
+_EMBED_MODEL = "allenai/specter2_base"
 
 
 def _make_id(record: dict[str, Any]) -> str:

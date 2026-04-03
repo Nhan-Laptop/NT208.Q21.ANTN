@@ -1,333 +1,351 @@
-# AIRA Backend (FastAPI)
+# AIRA Master Architecture Codex
 
-Backend cho đồ án `Academic Integrity & Research Assistant` - Nền tảng hỗ trợ viết và nộp bài báo khoa học đến các tạp chí và hội nghị uy tín.
+> Absolute Source of Truth for AI agents and engineers working on AIRA (Academic Integrity & Research Assistant).
+>
+> Last updated: 2026-03-30
 
-## Tính năng chính
+## Core Directives for Future Agents
 
-### 🗣️ Chat Management
-- Chat sessions/messages lưu lịch sử hội thoại (context-aware)
-- Full CRUD cho sessions (tạo/đọc/cập nhật/xóa)
-- API đúng theo luồng chat dạng ChatGPT:
-  - `POST /api/v1/chat/{session_id}` - Gửi tin nhắn
-  - `POST /api/v1/chat/completions` - OpenAI-compatible endpoint
-  - `GET/PATCH/DELETE /api/v1/sessions/{id}` - Quản lý session
-
-### 🤖 AI/LLM Integration
-- 3 mode chính:
-  - `general_qa`: Hỏi đáp với Gemini (configurable `GEMINI_MODEL`, default `gemini-flash-latest`)
-  - `verification`: Kiểm tra trích dẫn
-  - `journal_match`: Gợi ý tạp chí theo abstract
-
-### 🔬 Scientific Tools (V1 + V2 Enhanced)
-
-| Tool | V1 (Basic) | V2 (Enhanced) |
-|------|------------|---------------|
-| **Citation Checker** | OpenAlex API | PyAlex + Habanero, multi-format (APA/IEEE/Vancouver) |
-| **Journal Finder** | 5 journals, keyword matching | 35+ journals, SPECTER2/SciBERT embeddings |
-| **Retraction Scanner** | OpenAlex + PubPeer | Crossref `update-to` field, risk levels |
-| **AI Writing Detector** | Rule-based heuristics | RoBERTa GPT-2 detector + ensemble |
-
-API endpoints:
-- `POST /api/v1/tools/verify-citation` - Xác minh trích dẫn
-- `POST /api/v1/tools/journal-match` - Gợi ý tạp chí phù hợp
-- `POST /api/v1/tools/retraction-scan` - Quét bài bị rút
-- `POST /api/v1/tools/summarize-pdf` - Tóm tắt PDF
-- `POST /api/v1/tools/ai-detect` - Phát hiện văn bản AI
-
-### 📁 File Storage
-- Upload file PDF: `POST /api/v1/upload`
-- Download file: `GET /api/v1/upload/{file_id}`
-- S3 storage (hoặc local fallback)
-- PDF text extraction bằng PyMuPDF
-- Files mã hóa AES-256-GCM trước khi lưu
-
-### 🔐 Security & Auth
-- JWT Authentication + OAuth2
-- RBAC + ABAC authorization
-- AES-256-GCM encryption (at-rest và in-transit)
-- In-memory rate limiting theo nhóm endpoint (`auth/chat/tools/upload`)
-- Security headers middleware (CSP, nosniff, frame/referrer policy)
-- CORS allowlist theo cấu hình env
-- Audit logging cho auth/admin/file actions
-- Role: `admin` / `researcher`
-
-### 👔 Admin APIs
-- `GET /api/v1/admin/overview` - Thống kê tổng quan
-- `GET /api/v1/admin/users` - Danh sách users
-- `POST /api/v1/auth/admin/promote` - Nâng quyền user
-
-## Cấu trúc dự án
-
-```text
-backend/
-├── app/
-│   ├── main.py                 # FastAPI app entry point
-│   ├── core/
-│   │   ├── config.py           # Settings từ .env
-│   │   ├── security.py         # JWT, password hashing
-│   │   ├── authorization.py    # RBAC + ABAC
-│   │   ├── crypto.py           # AES-256-GCM encryption
-│   │   ├── encrypted_types.py  # SQLAlchemy encrypted types
-│   │   └── database.py         # Database connection
-│   ├── models/
-│   │   ├── user.py             # User model
-│   │   ├── chat_session.py     # Session model
-│   │   ├── chat_message.py     # Message model
-│   │   └── file_attachment.py  # File attachment model
-│   ├── schemas/
-│   │   ├── auth.py             # Auth request/response
-│   │   ├── chat.py             # Chat schemas
-│   │   ├── tools.py            # Tool schemas
-│   │   ├── upload.py           # Upload schemas
-│   │   └── admin.py            # Admin schemas
-│   ├── services/
-│   │   ├── llm_service.py      # Gemini integration
-│   │   ├── chat_service.py     # Chat logic
-│   │   ├── file_service.py     # File upload/download
-│   │   ├── bootstrap.py        # Admin auto-create
-│   │   └── tools/
-│   │       ├── citation_checker.py      # V1: Basic citation
-│   │       ├── citation_checker_v2.py   # V2: PyAlex/Habanero
-│   │       ├── journal_finder.py        # V1: Basic matching
-│   │       ├── journal_finder_v2.py     # V2: SPECTER2/SciBERT
-│   │       ├── retraction_scan.py       # V1: OpenAlex
-│   │       ├── retraction_scan_v2.py    # V2: Crossref
-│   │       ├── ai_writing_detector.py   # V1: Rule-based
-│   │       └── ai_writing_detector_v2.py # V2: RoBERTa ML
-│   └── api/v1/
-│       ├── router.py           # API router
-│       └── endpoints/
-│           ├── auth.py         # Login/register
-│           ├── sessions.py     # Session CRUD
-│           ├── chat.py         # Chat endpoints
-│           ├── tools.py        # Scientific tools
-│           ├── upload.py       # File upload/download
-│           └── admin.py        # Admin APIs
-├── scripts/
-│   └── generate_keys.py        # Security key generator
-├── ARCHITECTURE.md
-├── SECURITY_CRYPTOGRAPHY.md
-├── requirements.txt
-└── .env.example
-```
-
-### Frontend Structure
-
-```text
-frontend/
-├── app/
-│   ├── page.tsx                   # Landing page (Bohrium-like)
-│   ├── login/page.tsx             # Login + Register tabs
-│   ├── chat/layout.tsx            # Auth shell + sidebar sessions
-│   ├── chat/page.tsx              # Workspace empty state
-│   ├── chat/[sessionId]/page.tsx  # Chat UI + Tools/Files panel
-│   └── admin/page.tsx             # Admin dashboard
-├── components/
-│   ├── auth-guard.tsx
-│   ├── chat-shell.tsx
-│   └── topbar.tsx
-├── lib/
-│   ├── api.ts                     # Typed API client
-│   ├── auth.tsx                   # In-memory bearer auth context
-│   └── types.ts                   # Shared types
-└── .env.example
-```
-
-## Cài đặt và chạy
-
-### Yêu cầu
-- Python 3.10+
-- pip
-- Node.js 18+ (để chạy frontend)
-
-### Chạy nhanh (Backend + Frontend)
-
-Nếu repo đã có sẵn `backend/.env` (có API keys/credentials), **không ghi đè** file này.  
-Frontend dùng `frontend/.env.local` (không commit).
-
-1) Backend:
-```bash
-cd NT208
-cd backend
-source .venv/bin/activate  # nếu chưa có: python3 -m venv .venv
-# pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-
-```
-
-2) Frontend:
-```bash
-cd NT208
-cd frontend
-npm install
-cp .env.example .env.local
-npm run dev -- --hostname 127.0.0.1 --port 3000
-
-```
-
-3) Mở trình duyệt:
-- Landing: `http://127.0.0.1:3000/`
-- Login/Register: `http://127.0.0.1:3000/login` (tab register: `?tab=register`)
-- Workspace: `http://127.0.0.1:3000/chat`
-- Swagger: `http://127.0.0.1:8000/docs`
-
-### Lưu ý CORS/Port
-- Frontend gọi API theo same-origin (`/api/v1/...`) và Next.js sẽ **proxy** request sang backend (rewrites trong `frontend/next.config.mjs`).
-- Vì vậy khi chạy demo qua HTTPS (ngrok/custom domain) sẽ **không bị CORS/mixed-content** và không cần expose backend ra internet.
-- Backend CORS allowlist vẫn giữ để phòng trường hợp bạn gọi backend trực tiếp từ browser (vd: app khác, hoặc debug cross-origin).
-
-### Demo Public Qua ngrok (1 URL)
-Giả sử backend chạy local `127.0.0.1:8000` và frontend chạy local `127.0.0.1:3000`:
-```bash
-ngrok http 3000
-```
-Mở URL `https://<something>.ngrok-free.dev` và test:
-- Login/Register
-- Chat + Tools
-- Upload attachment (frontend sẽ proxy qua backend)
-
-### Smoke test/Pentest nhanh (không phá hoại)
-```bash
-cd backend
-source .venv/bin/activate
-python security/pentest/quick_audit.py --base-url http://127.0.0.1:8000
-```
-
-## Frontend Notes
-
-### Auth UX
-- Trang `/login` có 2 tab: `Đăng nhập` và `Đăng ký` (deep-link: `/login?tab=register`).
-- Backend đã có `POST /api/v1/auth/register`, frontend gọi `register -> login` để vào thẳng workspace.
-- Token giữ **in-memory** theo plan (không localStorage/cookie), nên reload sẽ mất session.
-
-### Bohrium-like Layout
-- `/chat/*` dùng layout 2 cột: sidebar (sessions + create) + main (chat/tools/files).
-- Panel của session có tabs: `Tools` và `Files`.
-- Kết quả tools render theo `message_type` và `tool_results` (table/JSON fallback).
-
-## Recent Changes (2026-02-14)
-
-- Frontend:
-  - Làm landing page kiểu Bohrium tại `/` và nâng cấp theme (fonts + UI shell).
-  - Thêm tab `Đăng ký` ngay trên `/login` (không còn “chỉ có đăng nhập”).
-  - Refactor `/chat` sang shell layout: sidebar sessions + main chat + panel tools/files.
-  - Thêm `api.getSession(...)` để lấy session detail (title/mode) và đổi mode trực tiếp trên UI.
-- Backend:
-  - Harden LLM integration: nếu Gemini model/key lỗi, chat/summarize trả fallback text thay vì crash `500` (`backend/app/services/llm_service.py`).
-
-### Cài đặt cơ bản
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# Chỉnh sửa .env với credentials của bạn
-```
-
-### Tạo security keys
-```bash
-python scripts/generate_keys.py
-# Copy output vào file .env
-```
-
-### Chạy server
-```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Health check
-```
-GET http://localhost:8000/health
-```
-
-### API Documentation
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-## Biến môi trường
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | SQLite/PostgreSQL connection | `sqlite:///./aira.db` |
-| `JWT_SECRET_KEY` | JWT signing key | (required) |
-| `ADMIN_EMAIL` | Admin bootstrap email | `admin@aira.local` |
-| `ADMIN_PASSWORD` | Admin bootstrap password | `ChangeMe!123` |
-| `ADMIN_MASTER_KEY_B64` | AES encryption key (base64) | Auto-generated |
-| `GOOGLE_API_KEY` | Google Gemini API key | (required for LLM) |
-| `AWS_ACCESS_KEY_ID` | S3 access key | (optional) |
-| `AWS_SECRET_ACCESS_KEY` | S3 secret key | (optional) |
-| `S3_BUCKET_NAME` | S3 bucket name | (optional) |
-
-## Lưu ý bảo mật
-
-⚠️ **Quan trọng cho production:**
-
-1. **HTTPS bắt buộc** - Deploy sau reverse proxy có TLS
-2. **Đổi JWT_SECRET_KEY** - Không dùng key mặc định
-3. **Key management** - Dùng AWS KMS hoặc HashiCorp Vault
-4. **Tách môi trường** - Dev/staging/prod riêng biệt
-5. **Rate limiting** - Bật brute-force protection
-
-## Dependencies chính
-
-### Core
-- FastAPI, Uvicorn, SQLAlchemy, Pydantic
-
-### Security
-- python-jose (JWT), bcrypt, PyCryptodome (AES)
-
-### AI/ML (V2 modules)
-- sentence-transformers (SPECTER2/SciBERT)
-- transformers (RoBERTa)
-- pyalex, habanero (API wrappers)
-
-### File handling
-- boto3 (S3), PyMuPDF (PDF)
+> Directive 1: Zero hallucination is mandatory. Never fabricate DOI, citation, retraction status, journal metadata, or crawler outputs.
+>
+> Directive 2: Preserve offline safety behavior in the crawler and toolchain. If scraping fails, do not synthesize fake records.
+>
+> Directive 3: Respect API contracts exactly, especially the LLM handoff schema represented by FunctionCallingResponse (text, tool_calls, message_type, tool_results).
+>
+> Directive 4: Document and preserve real behavior over requested behavior. If code and docs diverge, docs must reflect code and explicitly note the divergence.
 
 ---
 
-## 📋 TODO List
+## 1) System Overview
 
-### 🔴 High Priority
-- [ ] Migrate từ `google-generativeai` sang `google-genai` SDK mới
-- [ ] Thêm Alembic database migrations
-- [ ] Viết unit tests cho authorization flows
-- [ ] Frontend polish: tool result render theo component (citation/journal/retraction), không chỉ table/JSON
+AIRA is a full-stack academic integrity and research assistant platform.
 
-### 🟡 Medium Priority
-- [ ] Redis cache cho session context
-- [ ] WebSocket support cho real-time chat
-- [ ] Vector database (Qdrant/PGVector) cho journal recommendations
-- [ ] Batch citation verification endpoint
-- [ ] Export chat history (PDF/Markdown)
+- Backend: FastAPI service providing auth, chat, tool execution, file workflows, and admin endpoints.
+- Frontend: Next.js 15 application for chat, session management, file upload, and admin monitoring.
+- LLM orchestration: Groq chat-completions with OpenAI-compatible function calling.
+- Academic tools: Citation verification, retraction scanning, journal matching, AI-writing detection, grammar checking.
+- Data engineering pipeline: Config-driven crawler + embedding + ChromaDB persistent vector store.
 
-### 🟢 Nice to Have
-- [ ] Queue system (Celery/RQ) cho heavy jobs
-- [ ] Audit logging với SIEM integration
-- [ ] Key rotation automation
-- [ ] Multi-language support (i18n)
-- [ ] Dark mode API preferences
+Primary objective: deliver grounded, verifiable academic assistance with strict anti-hallucination constraints.
 
-### 🔵 Frontend Integration
-- [ ] Admin dashboard với charts
-- [ ] Real-time notification system
-- [ ] File preview component
-- [ ] Citation format selector UI
-- [ ] Journal recommendation wizard
+---
 
-### ✅ Completed
-- [x] Chat management với full CRUD
-- [x] Session management (GET/PATCH/DELETE)
-- [x] File download endpoint
-- [x] AI Writing Detector (v1 + v2)
-- [x] Enhanced Journal Finder (35+ journals, SPECTER2)
-- [x] Enhanced Citation Checker (PyAlex/Habanero)
-- [x] Enhanced Retraction Scanner (Crossref)
-- [x] Security key generation script
-- [x] Security headers + CORS allowlist
-- [x] In-memory rate limiting cho endpoints trọng yếu
-- [x] API alias `POST /api/v1/tools/ai-detect`
-- [x] Pentest quick-audit toolkit (`security/pentest`)
-- [x] Comprehensive documentation
-- [x] Frontend MVP: Landing + Login/Register + Chat shell + Tools/Files panel + Admin page
+## 2) Tech Stack and External Integrations
+
+### 2.1 Core Framework Stack
+
+| Layer | Technology | Role |
+|---|---|---|
+| Backend API | FastAPI, Uvicorn | HTTP API, routing, dependency injection, app lifecycle |
+| Data layer | SQLAlchemy | ORM for users, sessions, messages, file metadata |
+| Settings | pydantic-settings | Environment-driven runtime configuration |
+| Frontend | Next.js 15, React 18, TypeScript | Client UI and chat UX |
+
+### 2.2 LLM and Reasoning Plane
+
+| Component | Implementation | Role |
+|---|---|---|
+| LLM Provider | Groq SDK | Central reasoning and tool-routing engine |
+| Active model | llama-3.1-8b-instant | Low-latency generation with tool calling |
+| Call API | chat.completions.create | OpenAI-compatible function-calling loop |
+| Reliability | tenacity retries + heuristic fallback | Recovers from transient provider failures |
+
+Notes:
+- Groq replaced Gemini as active runtime LLM service.
+- Backward-compat aliases still exist in code (for example gemini_service variable names), but execution path is Groq.
+
+### 2.3 Retrieval and Data Pipeline Stack
+
+| Component | Implementation | Role |
+|---|---|---|
+| Vector DB | ChromaDB PersistentClient | Stores CFP vectors in local persistent collection |
+| Collection | journal_cfps | Semantic retrieval target for journal matching |
+| Embeddings | sentence-transformers allenai/specter2_base | Encodes crawler records and user query text with 768-dimensional academic-literature embeddings |
+| Scraping transport | DrissionPage (CDP-based Chromium automation) | Renders dynamic publisher pages and survives modern WAF / anti-bot challenges |
+| HTML parsing | DrissionPage DOM queries | Extracts live CSS-selected CFP metadata such as deadlines, scopes, and deep links |
+
+### 2.4 Academic APIs and Tool Dependencies
+
+| Domain | Libraries / APIs | Purpose |
+|---|---|---|
+| Citation integrity | PyAlex, Habanero, httpx | Verify references against OpenAlex/Crossref |
+| Retraction checks | OpenAlex, Crossref, PubPeer endpoint handling | Retraction/correction/concerning-paper analysis |
+| AI detection | transformers + torch | RoBERTa-based AI-writing scoring |
+| Grammar | language_tool_python | Grammar/spelling diagnostics |
+
+### 2.5 Security and Platform Dependencies
+
+| Concern | Implementation |
+|---|---|
+| Authentication | JWT (HS256) via python-jose |
+| Password hashing | bcrypt |
+| Encryption | PyCryptodome AES-GCM stack used by crypto layer |
+| Middleware | Security headers + rate limiting middleware |
+
+---
+
+## 3) Repository Macro Modules
+
+### 3.1 Backend API Module
+
+Path: backend/app/api
+
+Responsibilities:
+- Hosts v1 router composition and endpoint modules.
+- Exposes REST endpoints for auth, sessions, chat, tools, upload, and admin.
+- Chat handlers are HTTP endpoints (no WebSocket handlers currently implemented in this module).
+
+Route composition:
+- backend/app/api/v1/router.py includes: auth, admin, sessions, chat, tools, upload.
+
+Representative endpoint surface:
+- /auth: register, login, me, admin/promote.
+- /chat: completions, session-targeted completion, encrypted completion.
+- /sessions: CRUD + message listing.
+- /tools: verify-citation, journal-match, retraction-scan, summarize-pdf, detect-ai-writing, check-grammar.
+- /upload: upload, list, stats, download/delete, presigned URLs.
+- /admin: overview, user role management, file/storage management.
+
+### 3.2 Core Platform Module
+
+Path: backend/app/core
+
+Responsibilities:
+- settings and environment normalization.
+- database session/engine wiring.
+- cryptography and encrypted payload support.
+- security primitives (password/JWT/current-user dependency).
+- RBAC + ABAC authorization gateway.
+- security headers and rate-limiter middleware.
+- audit logging and limiter state management.
+
+Key behavior highlights:
+- Startup security validators reject insecure defaults outside development.
+- JWT payload includes sub, exp, iat, and jti claims.
+- Security and rate-limit middleware are globally attached in app startup.
+
+### 3.3 Service Layer Module
+
+Path: backend/app/services
+
+Responsibilities:
+- Business orchestration for sessions/messages/files.
+- LLM orchestration and function-calling state machine.
+- Bootstrap/admin creation on startup.
+- Heuristic fallback routing when provider calls fail.
+- Storage strategy abstraction.
+
+Notable services:
+- llm_service.py: Groq orchestration, strict function-calling loop, and lightweight auto-title generation for new chats.
+- chat_service.py: mode routing, file-context injection, persistence of user/assistant messages.
+- file_service.py and storage_service.py: file metadata and storage interactions.
+- heuristic_router.py: semantic intent fallback when Groq is unavailable.
+
+### 3.4 Academic Tools Module
+
+Path: backend/app/services/tools
+
+Responsibilities:
+- Implements domain tools callable by LLM or direct tool endpoints.
+- Exposes singleton instances for runtime use.
+
+Tool set:
+- citation_checker: reference extraction + verification pipeline.
+- retraction_scan: DOI risk/retraction/concerning-paper checks.
+- journal_finder: ChromaDB semantic match for journal CFP recommendations using Specter2 embeddings and bounded similarity scoring.
+- ai_writing_detector: ML + rule-based AI text likelihood.
+- grammar_checker: LanguageTool-based correction diagnostics.
+
+### 3.5 Data Engineering Pipeline Module
+
+Path: backend/crawler
+
+Responsibilities:
+- Crawl live CFP sources from configured publishers.
+- Normalize records into deterministic format.
+- Embed title/scope text with a 768-dimensional academic retrieval model.
+- Rebuild and upsert ChromaDB collection used by Journal Finder.
+
+Pipeline files:
+- sources.json: source URLs and CSS selectors.
+- universal_scraper.py: DrissionPage extraction executor for live CFP pages.
+- db_builder.py: embedding + ChromaDB load.
+- run.py: orchestration entrypoint.
+
+---
+
+## 4) Deep-Dive Mechanics
+
+### 4.1 LLM Function Calling Loop (backend/app/services/llm_service.py)
+
+Operational sequence:
+
+1. Build message array:
+- Add system prompt.
+- Append conversation history.
+- Append current user message.
+
+2. Invoke Groq chat completions:
+- model = settings.groq_model
+- tools = _GROQ_TOOLS
+- tool_choice = auto
+
+3. If tool_calls are present:
+- Parse each requested function name and JSON arguments.
+- Dispatch to local Python callable via _TOOL_FUNCTIONS registry.
+- Capture tool output.
+- Append tool message back into conversation.
+- Continue iterative loop.
+
+4. If no tool_calls:
+- Final synthesized assistant text is returned.
+- If tool calls happened earlier, map first tool to message_type and build structured tool_results payload for frontend cards.
+
+5. Loop safety:
+- Max iterations capped by _MAX_FC_ITERATIONS = 5.
+
+6. Fallback path on provider failure:
+- _call_chat_completions is retried with tenacity.
+- After retry failure, _try_heuristic_fallback attempts semantic intent routing + direct local tool execution.
+- If heuristic routing cannot classify intent, return static overload/failure message.
+
+### 4.1.1 Context Management and Token-Limit Protections
+
+Router protections in `llm_service.py`:
+
+- Sliding window: only the last 4 user/assistant history messages are sent to Groq.
+- History truncation: each retained history message is capped at 2,000 characters and suffixed with `...[truncated]` when clipped.
+- Current-input truncation: the active user payload is capped at 10,000 characters and tagged with a visible truncation notice.
+- Defense in depth: `detect_ai_writing()` also truncates oversized text before calling the local detector.
+
+Architectural purpose:
+
+- Groq is treated primarily as a router/tool-caller, not as a long-context document processor.
+- These limits protect the OpenAI-compatible Groq request body from 413 payload/rate-limit failures and 400 tool-use failures caused by oversized JSON arguments.
+- The system preserves enough recent context for intent routing while preventing massive pasted text from destabilizing tool calling.
+
+### 4.1.2 Auto-Title Generation
+
+New-session UX behavior:
+
+- When the first user message is sent in a session whose title is still the default placeholder, the backend issues a secondary lightweight `generate_simple()` call to produce a concise Vietnamese title.
+- The title-generator prompt is constrained to return only a 4-5 word session summary with no explanation text.
+- The generated title is committed back to the `chat_sessions.title` field before the chat response is returned.
+- Chat completion responses now include the updated serialized session object so the frontend sidebar can sync the renamed session immediately without relying on raw first-message text.
+
+Strict response contract:
+
+```python
+@dataclass
+class FunctionCallingResponse:
+    text: str
+    tool_calls: list[dict[str, Any]]
+    message_type: str
+    tool_results: dict[str, Any] | None
+```
+
+### 4.2 Data Pipeline and Degradation Behavior (backend/crawler)
+
+Execution flow:
+
+1. run.py initializes UniversalScraper.
+2. UniversalScraper loads sources.json.
+3. For each publisher source:
+- Open the live page with DrissionPage Chromium automation.
+- Wait for dynamic content and anti-bot JavaScript challenges to settle.
+- Extract title, deadline, scope, link, and publisher metadata from the rendered DOM using configured CSS selectors.
+
+4. Aggregate all scraped records.
+5. Always call seed_database(records):
+- Delete existing journal_cfps collection (stale data purge).
+- Recreate/get collection with cosine metric.
+- Encode title + scope using allenai/specter2_base (768 dimensions).
+- Upsert in batches.
+
+Architecture note:
+- The vector database now uses 768-dimensional embeddings tailored for academic literature via allenai/specter2_base, replacing the previous 384-dimensional all-MiniLM-L6-v2 general-purpose vectors.
+
+Code-truth on fallback policy:
+- Zero-hallucination behavior exists.
+- If a source fails to load, is blocked by anti-bot defenses, or returns no parseable data, that source is skipped.
+- If all sources fail, pipeline logs empty result and ChromaDB can be left empty.
+- There is currently no seed_data.json fallback in backend/crawler.
+
+Implication for future agents:
+- Do not document or implement fake-data fallback.
+- If introducing static fallback later, it must be real curated data and explicitly versioned.
+
+### 4.3 Semantic Journal Matching (backend/app/services/tools/journal_finder.py)
+
+Runtime mechanics:
+
+1. Startup wiring:
+- Connect to persistent ChromaDB directory at backend/data/chroma_db.
+- Open collection journal_cfps if available.
+- Load the fixed SentenceTransformer model allenai/specter2_base so query embeddings match the ingestion pipeline exactly.
+
+2. Query flow on recommend(abstract, title, top_k):
+- Build query text from title + abstract.
+- Detect candidate topical domains from keyword heuristics.
+- Query ChromaDB using allenai/specter2_base embeddings only.
+
+3. Ranking logic:
+- Normalize `None` metadata to `{}` before field access.
+- Convert returned ChromaDB distance with `1.0 - dist`, clamp similarity into `[0.0, 1.0]`, apply domain-overlap bonus, then clamp again for a robust final score.
+- Build response rows with journal title, score, rationale, URL, publisher, domains, deadline.
+- Sort by score descending and return top_k.
+
+Behavior under missing data:
+- If collection is missing or empty, returns empty list rather than raising runtime failure.
+
+---
+
+## 5) API and Security Contracts That Must Not Drift
+
+### 5.1 Chat Contract
+
+- chat completion endpoints return session_id + serialized session + serialized user_message + assistant_message.
+- assistant tool responses are encoded through message_type and tool_results payload.
+
+### 5.2 Tool Invocation Contract
+
+- Tool endpoints persist interaction into chat history through chat_service.persist_tool_interaction.
+- Output shape must remain compatible with frontend tool result cards.
+
+### 5.3 Auth/Security Contract
+
+- JWT claims include sub, exp, iat, jti.
+- Access control combines permission gates (RBAC) and ownership checks (ABAC).
+- Middleware always enforces security headers and rate limiting unless explicitly disabled by settings.
+
+Operational note:
+- auth/login currently builds access token with explicit 24h timedelta in endpoint code, while settings default is 60 minutes. Treat as current behavior, and align deliberately in future changes.
+
+---
+
+## 6) Source-of-Truth File Index
+
+| Domain | Primary Files |
+|---|---|
+| App bootstrap | backend/app/main.py |
+| API router | backend/app/api/v1/router.py |
+| Auth/session/chat endpoints | backend/app/api/v1/endpoints/*.py |
+| Settings/security | backend/app/core/config.py, backend/app/core/security.py, backend/app/core/authorization.py |
+| Middleware/rate limiting | backend/app/core/middleware.py, backend/app/core/rate_limit.py |
+| LLM orchestration | backend/app/services/llm_service.py |
+| Chat orchestration | backend/app/services/chat_service.py |
+| Academic tools | backend/app/services/tools/*.py |
+| Crawler and vector ingestion | backend/crawler/*.py, backend/crawler/sources.json |
+| Embedding store | backend/data/chroma_db |
+
+---
+
+## 7) Agent Handoff Checklist
+
+Before changing architecture-sensitive code:
+
+- Confirm behavior in code, not in legacy docs.
+- Preserve zero-hallucination constraints.
+- Preserve function-calling data contracts.
+- Validate fallback behavior under provider outage and crawler scrape failure.
+- Keep tool payload formats backward compatible with frontend renderers.

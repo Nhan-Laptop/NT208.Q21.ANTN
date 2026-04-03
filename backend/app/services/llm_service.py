@@ -33,6 +33,21 @@ from app.models.chat_message import ChatMessage, MessageType
 
 logger = logging.getLogger(__name__)
 
+_MAX_HISTORY_MESSAGES = 4
+_MAX_HISTORY_MESSAGE_CHARS = 2000
+_MAX_ROUTER_INPUT_CHARS = 10000
+_MAX_TITLE_SOURCE_CHARS = 2000
+_TRUNCATED_HISTORY_SUFFIX = " ...[truncated]"
+_TRUNCATED_INPUT_SUFFIX = (
+    "\n\n...[Nội dung đã được hệ thống cắt ngắn để đảm bảo giới hạn API]..."
+)
+_DEFAULT_CHAT_TITLE = "Trò chuyện mới"
+_TITLE_GENERATOR_SYSTEM_INSTRUCTION = (
+    "You are a title generator. Generate a very short, concise title (max 5 words) "
+    "for a chat session based on the user's first message. Respond ONLY with the "
+    "title itself, no quotes, no explanations. Language: Vietnamese."
+)
+
 # ---------- groq SDK import ----------------------------------------------
 try:
     from groq import Groq
@@ -154,6 +169,26 @@ def _make_serializable(obj: Any) -> Any:
         return obj
     return str(obj)  # fallback — force to string
 
+
+def _truncate_text(
+    text: str,
+    limit: int,
+    suffix: str,
+    *,
+    log_label: str | None = None,
+) -> str:
+    """Trim oversized text inputs before they reach the Groq router/tool."""
+    if len(text) <= limit:
+        return text
+    if log_label:
+        logger.warning(
+            "Truncating %s from %d to %d chars",
+            log_label,
+            len(text),
+            limit,
+        )
+    return text[:limit] + suffix
+
 # =========================================================================
 # Tool wrapper functions (callable by Gemini via Function Calling)
 # =========================================================================
@@ -259,7 +294,13 @@ def detect_ai_writing(text: str) -> dict:
         details.
     """
     try:
-        result = ai_writing_detector.analyze(text)
+        safe_text = _truncate_text(
+            text,
+            _MAX_ROUTER_INPUT_CHARS,
+            _TRUNCATED_INPUT_SUFFIX,
+            log_label="detect_ai_writing input",
+        )
+        result = ai_writing_detector.analyze(safe_text)
         return _make_serializable(asdict(result))
     except Exception as exc:
         logger.error("detect_ai_writing failed: %s", exc, exc_info=True)
@@ -587,12 +628,32 @@ class GroqLLMService:
         messages: list[dict[str, str]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
         ]
-        for msg in history:
+
+        recent_history = (
+            history[-_MAX_HISTORY_MESSAGES:]
+            if len(history) > _MAX_HISTORY_MESSAGES
+            else history
+        )
+
+        for msg in recent_history:
             role = "user" if msg.role.value == "user" else "assistant"
             text = (msg.content or "").strip()
+            text = _truncate_text(
+                text,
+                _MAX_HISTORY_MESSAGE_CHARS,
+                _TRUNCATED_HISTORY_SUFFIX,
+                log_label="history message",
+            )
             if text:
                 messages.append({"role": role, "content": text})
-        messages.append({"role": "user", "content": user_text})
+
+        safe_user_text = _truncate_text(
+            user_text,
+            _MAX_ROUTER_INPUT_CHARS,
+            _TRUNCATED_INPUT_SUFFIX,
+            log_label="user_text",
+        )
+        messages.append({"role": "user", "content": safe_user_text})
         return messages
 
     # ------------------------------------------------------------------
@@ -830,6 +891,30 @@ class GroqLLMService:
         except (RetryError, Exception):
             logger.exception("Groq generate (simple) failed after retries.")
             return None
+
+    def generate_chat_title(self, user_text: str) -> str:
+        """Generate a concise session title from the first user prompt."""
+        prompt = _truncate_text(
+            user_text.strip(),
+            _MAX_TITLE_SOURCE_CHARS,
+            "",
+            log_label="chat title source",
+        )
+        if not prompt:
+            return _DEFAULT_CHAT_TITLE
+
+        result = self.generate_simple(
+            prompt,
+            _TITLE_GENERATOR_SYSTEM_INSTRUCTION,
+        )
+        if not result:
+            return _DEFAULT_CHAT_TITLE
+
+        cleaned = " ".join(result.replace("\n", " ").split()).strip(" \"'`")
+        if not cleaned:
+            return _DEFAULT_CHAT_TITLE
+
+        return " ".join(cleaned.split()[:5])[:255] or _DEFAULT_CHAT_TITLE
 
     def summarize_text(self, text: str, max_words: int = 180) -> str:
         prompt = (

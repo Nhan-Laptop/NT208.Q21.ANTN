@@ -35,6 +35,7 @@ export interface Message {
 
 export interface ChatCompletionResponse {
   session_id: string;
+  session: Session;
   user_message: Message;
   assistant_message: Message;
 }

@@ -34,10 +34,9 @@ transformers>=4.35.0  # RoBERTa for AI writing detection
 torch>=2.0.0  # Required by transformers (CPU version sufficient)
 huggingface-hub>=0.20.0  # Model downloads + authentication
 
-# Vector Database & Web Scraping
+# Vector Database & Live Web Scraping
 chromadb>=0.4.0
-beautifulsoup4>=4.12.0
-cloudscraper>=1.2.71
+DrissionPage>=4.0.0
 
 # API Wrappers - Citation & Retraction Checking
 pyalex>=0.13  # OpenAlex API wrapper

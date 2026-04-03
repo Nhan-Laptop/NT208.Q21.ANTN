@@ -8,7 +8,7 @@ from app.models.chat_session import SessionMode
 
 
 class SessionCreate(BaseModel):
-    title: str = Field(default="New Chat", max_length=255)
+    title: str = Field(default="Trò chuyện mới", max_length=255)
     mode: SessionMode = SessionMode.GENERAL_QA
 
 
@@ -53,6 +53,7 @@ class SessionChatRequest(BaseModel):
 
 class ChatCompletionResponse(BaseModel):
     session_id: str
+    session: SessionOut
     user_message: MessageOut
     assistant_message: MessageOut
 

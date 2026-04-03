@@ -3,13 +3,12 @@ Journal Finder — intelligent journal recommendation backed by ChromaDB.
 
 Queries a persistent ChromaDB vector store (seeded by ``backend/crawler/``)
 using SentenceTransformer embeddings.  Falls back to an empty list if the
-DB is missing or empty — never crashes the chat.
+DB is missing, empty, or the embedding model is unavailable — never crashes
+the chat.
 """
 
 import logging
-import math
 import re
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -50,13 +49,12 @@ try:
 except Exception:
     pass
 
-TOKEN_RE = re.compile(r"[a-zA-Z]{3,}")
-
 # ---------------------------------------------------------------------------
 # ChromaDB path  (backend/data/chroma_db/)
 # ---------------------------------------------------------------------------
 _CHROMA_DIR = Path(__file__).resolve().parents[3] / "data" / "chroma_db"
 _COLLECTION_NAME = "journal_cfps"
+_EMBED_MODEL = "allenai/specter2_base"
 
 # ---------------------------------------------------------------------------
 # Domain keywords (unchanged from V1)
@@ -89,16 +87,16 @@ class JournalFinder:
     ``[]`` without crashing.
     """
 
-    _MODEL_CANDIDATES = [
-        "all-MiniLM-L6-v2",                       # same as db_builder
-        "allenai/specter2_base",
-        "sentence-transformers/all-MiniLM-L6-v2",
-    ]
-
     def __init__(self, use_ml: bool = True) -> None:
         self._model = None
         self._collection = None
         self._use_ml = use_ml and _ST_AVAILABLE
+
+        if use_ml and not _ST_AVAILABLE:
+            logger.warning(
+                "sentence-transformers is unavailable; %s retrieval disabled.",
+                _EMBED_MODEL,
+            )
 
         # Connect to ChromaDB
         if _CHROMA_AVAILABLE and _CHROMA_DIR.exists():
@@ -129,21 +127,17 @@ class JournalFinder:
         if _model_cache is not None:
             self._model = _model_cache
             return
-        for name in self._MODEL_CANDIDATES:
-            for local_only in (False, True):
-                try:
-                    mode = "local-cache" if local_only else "online"
-                    logger.info("Loading model %s (%s) ...", name, mode)
-                    self._model = SentenceTransformer(
-                        name, trust_remote_code=False, local_files_only=local_only,
-                    )
-                    _model_cache = self._model
-                    logger.info("Model %s loaded (%s).", name, mode)
-                    return
-                except Exception as exc:
-                    logger.warning("Failed to load %s (%s): %s", name, mode, exc)
-        logger.warning("No ML model available — JournalFinder disabled.")
-        self._use_ml = False
+        try:
+            logger.info("Loading model %s ...", _EMBED_MODEL)
+            self._model = SentenceTransformer(
+                _EMBED_MODEL,
+                trust_remote_code=False,
+            )
+            _model_cache = self._model
+            logger.info("Model %s loaded.", _EMBED_MODEL)
+        except Exception as exc:
+            logger.warning("Failed to load %s: %s", _EMBED_MODEL, exc)
+            self._use_ml = False
 
     # ------------------------------------------------------------------
     # Domain detection
@@ -162,23 +156,6 @@ class JournalFinder:
         if not detected or not meta_domains:
             return 0.0
         return len(set(meta_domains) & set(detected)) * 0.05
-
-    # ------------------------------------------------------------------
-    # TF-IDF fallback (no ChromaDB)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _vectorize(text: str) -> Counter:
-        return Counter(t.lower() for t in TOKEN_RE.findall(text))
-
-    @staticmethod
-    def _cosine(v1: Counter, v2: Counter) -> float:
-        dot = sum(v1[k] * v2.get(k, 0) for k in v1)
-        if dot == 0:
-            return 0.0
-        n1 = math.sqrt(sum(x * x for x in v1.values()))
-        n2 = math.sqrt(sum(x * x for x in v2.values()))
-        return dot / (n1 * n2) if n1 and n2 else 0.0
 
     # ------------------------------------------------------------------
     # Recommend
@@ -213,18 +190,25 @@ class JournalFinder:
 
         # Rank & build output
         ranked: list[dict[str, Any]] = []
-        method = "SentenceTransformer embedding" if self._use_ml else "ChromaDB cosine"
+        method = f"{_EMBED_MODEL} embedding"
 
         for dist, meta, doc in results:
-            # ChromaDB cosine distance → similarity
-            similarity = 1.0 - dist
+            meta = meta or {}
+            doc = doc or ""
+
+            raw_distance = float(dist) if dist is not None else 1.0
+            base_sim = 1.0 - raw_distance
+            similarity = max(0.0, min(base_sim, 1.0))
 
             meta_domains = [d.strip() for d in meta.get("domains", "").split(",") if d.strip()]
-            similarity += self._domain_bonus(meta_domains, detected)
+            similarity = max(
+                0.0,
+                min(similarity + self._domain_bonus(meta_domains, detected), 1.0),
+            )
 
             ranked.append({
                 "journal": meta.get("title", "Unknown"),
-                "score": round(min(similarity, 1.0), 4),
+                "score": round(similarity, 4),
                 "reason": f"Matched via {method} similarity. {doc[:120]}...",
                 "url": meta.get("url", ""),
                 "publisher": meta.get("publisher", ""),
@@ -249,18 +233,16 @@ class JournalFinder:
         """Query ChromaDB with an embedded query. Returns list of
         (distance, metadata, document) tuples."""
 
-        if self._model is not None:
-            embedding = self._model.encode([query_text], show_progress_bar=False).tolist()[0]
-            result = self._collection.query(
-                query_embeddings=[embedding],
-                n_results=top_k,
+        if self._model is None:
+            raise RuntimeError(
+                f"{_EMBED_MODEL} is unavailable; cannot query ChromaDB safely.",
             )
-        else:
-            # Fallback: use ChromaDB's built-in document query
-            result = self._collection.query(
-                query_texts=[query_text],
-                n_results=top_k,
-            )
+
+        embedding = self._model.encode([query_text], show_progress_bar=False).tolist()[0]
+        result = self._collection.query(
+            query_embeddings=[embedding],
+            n_results=top_k,
+        )
 
         distances = result.get("distances", [[]])[0]
         metadatas = result.get("metadatas", [[]])[0]
@@ -279,8 +261,8 @@ class JournalFinder:
     @property
     def model_name(self) -> str:
         if self._model is not None:
-            return getattr(self._model, "model_card_text", "all-MiniLM-L6-v2")
-        return "ChromaDB default"
+            return _EMBED_MODEL
+        return f"{_EMBED_MODEL} (unavailable)"
 
     @property
     def collection_count(self) -> int:

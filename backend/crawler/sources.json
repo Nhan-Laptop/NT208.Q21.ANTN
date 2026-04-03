@@ -4,11 +4,11 @@
     "url": "https://www.sciencedirect.com/browse/calls-for-papers",
     "base_url": "https://www.sciencedirect.com",
     "selectors": {
-      "item_container": "div.call-for-papers-item, li.call-for-papers-result",
-      "title": "h3 a, h2 a, .result-title a",
-      "deadline": "span.deadline, .date-info, dd.deadline",
-      "scope": "p.description, div.scope-text, .result-description",
-      "link": "h3 a, h2 a, .result-title a"
+      "item_container": "div.call-for-papers-item, li.call-for-papers-result, article, div[class*='call-for-papers'], div[class*='result']",
+      "title": "h2 a, h3 a, a.anchor, a[href*='/special-issue/call-for-papers'], a[href*='/journal/']",
+      "deadline": "[class*='deadline'], dd, time, span[class*='date']",
+      "scope": "p, [class*='description'], [class*='summary'], [class*='scope']",
+      "link": "h2 a, h3 a, a.anchor, a[href*='/special-issue/call-for-papers'], a[href*='/journal/']"
     }
   },
   {
@@ -16,11 +16,11 @@
     "url": "https://www.mdpi.com/about/announcements/call_for_papers",
     "base_url": "https://www.mdpi.com",
     "selectors": {
-      "item_container": "div.announcement-item, div.card, .generic-item",
-      "title": "h2 a, h3 a, .title a",
-      "deadline": "span.date, .deadline-text, time",
-      "scope": "p, .description, .abstract-text",
-      "link": "h2 a, h3 a, .title a"
+      "item_container": "div.announcement-item, article, div[class*='announcement'], div[class*='special'], div.card",
+      "title": "h2 a, h3 a, a[href*='/special_issue/'], a[href*='/announcement/'], a[href*='/journal/']",
+      "deadline": "time, [class*='deadline'], [class*='date']",
+      "scope": "p, [class*='description'], [class*='abstract'], [class*='summary'], [class*='excerpt']",
+      "link": "h2 a, h3 a, a[href*='/special_issue/'], a[href*='/announcement/'], a[href*='/journal/']"
     }
   },
   {
@@ -28,11 +28,11 @@
     "url": "https://www.computer.org/publications/author-resources/calls-for-papers",
     "base_url": "https://www.computer.org",
     "selectors": {
-      "item_container": "div.cfp-item, article.cfp-entry, tr.cfp-row, li.cfp-listing",
-      "title": "h3 a, h4 a, td.title a, .cfp-title",
-      "deadline": "span.deadline, td.deadline, .cfp-deadline",
-      "scope": "p.description, td.description, .cfp-description",
-      "link": "h3 a, h4 a, td.title a, .cfp-title a"
+      "item_container": "div.cfp-item, article.cfp-entry, article, div[class*='cfp'], div[class*='call-for-papers'], div[class*='card']",
+      "title": "h2 a, h3 a, h4 a, a[href*='/call-for-papers'], a[href*='/conference/'], a[href*='/journal/']",
+      "deadline": "[class*='deadline'], time, [class*='date']",
+      "scope": "p, [class*='description'], [class*='summary'], [class*='content']",
+      "link": "h2 a, h3 a, h4 a, a[href*='/call-for-papers'], a[href*='/conference/'], a[href*='/journal/']"
     }
   }
 ]
