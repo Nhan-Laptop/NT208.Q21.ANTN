@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import json
 import logging
+import html
+import os
 import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
+from app.core.config import settings
 from DrissionPage import ChromiumOptions, ChromiumPage
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,17 @@ _DEADLINE_PATTERNS = (
     ),
 )
 
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_backend_path(path_value: str | None) -> str | None:
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = _BACKEND_ROOT / path
+    return str(path.resolve())
+
 
 class UniversalScraper:
     """Configuration-driven scraper that reads rules from *sources.json*."""
@@ -71,12 +85,34 @@ class UniversalScraper:
     ) -> None:
         path = Path(sources_path) if sources_path else _SOURCES_PATH
         with open(path, "r", encoding="utf-8") as fh:
-            self._sources: list[dict[str, Any]] = json.load(fh)
+            raw = json.load(fh)
+        if isinstance(raw, dict):
+            raw = raw.get("sources", raw)
+        if not isinstance(raw, list):
+            raw = []
+        self._sources: list[dict[str, Any]] = raw
         self._default_wait = wait_seconds
 
         co = ChromiumOptions()
+        browser_path = _resolve_backend_path(settings.academic_browser_path)
+        if browser_path:
+            co.set_browser_path(browser_path)
+        library_path = _resolve_backend_path(settings.academic_browser_library_path)
+        if library_path:
+            existing = os.environ.get("LD_LIBRARY_PATH")
+            os.environ["LD_LIBRARY_PATH"] = f"{library_path}:{existing}" if existing else library_path
         if headless:
             co.headless()
+            co.set_argument("--headless=new")
+        co.set_local_port(9223)
+        co.set_user_data_path(str((_BACKEND_ROOT / ".cache" / "drissionpage-profile").resolve()))
+        co.set_argument("--no-sandbox")
+        co.set_argument("--disable-dev-shm-usage")
+        co.set_argument("--disable-gpu")
+        co.set_argument("--disable-background-networking")
+        co.set_argument("--disable-sync")
+        co.set_argument("--disable-component-update")
+        co.set_argument("--disable-features", "HttpsUpgrades,HttpsFirstBalancedModeAutoEnable")
         self.page = ChromiumPage(co)
 
         logger.info(
@@ -142,6 +178,9 @@ class UniversalScraper:
     # ------------------------------------------------------------------
 
     def _scrape_source(self, src: dict[str, Any]) -> list[dict[str, Any]]:
+        if src.get("parser") == "wikicfp_recent":
+            return self._scrape_wikicfp_recent(src)
+
         url = src["url"]
         selectors = src.get("selectors", {})
         base_url = src.get("base_url", "")
@@ -210,6 +249,61 @@ class UniversalScraper:
 
         return records
 
+    def _scrape_wikicfp_recent(self, src: dict[str, Any]) -> list[dict[str, Any]]:
+        url = src["url"]
+        publisher = src.get("publisher", "WikiCFP")
+        base_url = src.get("base_url", "http://www.wikicfp.com")
+        wait_seconds = float(src.get("wait_seconds", self._default_wait))
+
+        logger.info("[%s] Loading %s via DrissionPage.", publisher, url)
+        self.page.get(url)
+        self.page.wait(wait_seconds)
+
+        body_text = self._safe_text(self.page.ele("css:body"))
+        if self._looks_blocked(body_text):
+            logger.warning("[%s] page appears blocked after render; skipping without fake data.", publisher)
+            return []
+
+        html_text = getattr(self.page, "html", "") or ""
+        row_pattern = re.compile(
+            r"<tr[^>]*>\s*"
+            r"<td[^>]*rowspan=[\"']?2[\"']?[^>]*>\s*<a\s+href=[\"'](?P<href>[^\"']+)[\"'][^>]*>(?P<title>.*?)</a>.*?</td>\s*"
+            r"<td[^>]*colspan=[\"']?3[\"']?[^>]*>(?P<description>.*?)</td>.*?</tr>\s*"
+            r"<tr[^>]*>\s*"
+            r"<td[^>]*>(?P<event_dates>.*?)</td>\s*"
+            r"<td[^>]*>(?P<location>.*?)</td>\s*"
+            r"<td[^>]*>(?P<deadline>.*?)</td>",
+            re.IGNORECASE | re.DOTALL,
+        )
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for match in row_pattern.finditer(html_text):
+            title = self._html_to_text(match.group("title"))
+            href = html.unescape(match.group("href"))
+            link = self._resolve_url(base_url, href)
+            if not title or link in seen:
+                continue
+            seen.add(link)
+            description = self._html_to_text(match.group("description"))
+            deadline = self._html_to_text(match.group("deadline"))
+            if deadline.upper() == "TBD":
+                deadline = ""
+            records.append(
+                {
+                    "title": title,
+                    "deadline": deadline,
+                    "scope": description,
+                    "url": link,
+                    "publisher": publisher,
+                    "location": self._html_to_text(match.group("location")),
+                    "event_dates": self._html_to_text(match.group("event_dates")),
+                    "domains": ["computer science", "call for papers"],
+                    "source_external_id": href,
+                    "source_name": publisher,
+                }
+            )
+        return records[: int(src.get("max_records", 10))]
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -262,6 +356,10 @@ class UniversalScraper:
     @staticmethod
     def _clean_text(text: str) -> str:
         return " ".join(text.split()).strip()
+
+    def _html_to_text(self, raw_html: str) -> str:
+        without_tags = re.sub(r"<[^>]+>", " ", raw_html or "")
+        return self._clean_text(html.unescape(without_tags))
 
     def _safe_text(self, element: Any) -> str:
         if element is None:

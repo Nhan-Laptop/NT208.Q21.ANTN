@@ -1,11 +1,12 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, String
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 from app.core.encrypted_types import EncryptedText
+from app.core.sa_compat import Mapped, mapped_column
 
 
 class FileAttachment(Base):
@@ -26,7 +27,7 @@ class FileAttachment(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     storage_key: Mapped[str] = mapped_column(EncryptedText, nullable=False)
     storage_url: Mapped[str] = mapped_column(EncryptedText, nullable=False)
-    storage_encrypted: Mapped[bool] = mapped_column(default=True, nullable=False)
+    storage_encrypted: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     storage_encryption_alg: Mapped[str] = mapped_column(String(64), default="AES-256-GCM", nullable=False)
     extracted_text: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

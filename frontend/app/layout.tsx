@@ -1,14 +1,7 @@
 import type { Metadata } from "next";
 import { Providers } from "@/app/providers";
-import { Inter } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
-
-const inter = Inter({
-  subsets: ["latin", "vietnamese"],
-  variable: "--font-sans-override",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "AIRA",
@@ -17,7 +10,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="vi" className={inter.variable} suppressHydrationWarning>
+    <html lang="vi" suppressHydrationWarning>
       <body suppressHydrationWarning>
         <Script id="strip-extension-attrs" strategy="beforeInteractive">
           {`

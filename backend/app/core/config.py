@@ -19,7 +19,38 @@ class Settings(BaseSettings):
     api_v1_str: str = "/api/v1"
     debug: bool = False
 
-    database_url: str = "sqlite:///./aira.db"
+    database_url: str = Field(default="sqlite:///./aira.db", min_length=1)
+    alembic_database_url: str | None = None
+    chroma_db_path: str = Field(default="data/chroma_db", min_length=1)
+    academic_seed_path: str = Field(default="data/academic_seed.json", min_length=1)
+    academic_live_sources_path: str = Field(default="crawler/sources.json", min_length=1)
+    academic_live_crawl_enabled: bool = True
+    crawler_user_agent: str = "AIRA-ScholarlyCrawler/1.0 contact:admin@aira.local"
+    crawler_rate_limit_seconds: float = 2.0
+    crawler_timeout_seconds: float = 30.0
+    crawler_max_retries: int = 3
+    crawler_raw_storage_path: str = "data/raw_snapshots"
+    clarivate_manual_import_dir: str = "data/imports/clarivate"
+    clarivate_username: str | None = None
+    clarivate_password: str | None = None
+    use_browser_crawler: bool = False
+    browser_headless: bool = True
+    academic_browser_path: str | None = None
+    academic_browser_library_path: str | None = None
+    hf_cache_dir: str = Field(default=".cache/huggingface", min_length=1)
+    specter2_model_name: str = Field(default="allenai/specter2", min_length=1)
+    specter2_fallback_model_name: str = Field(default="allenai/specter2_base", min_length=1)
+    specter2_max_chars: int = Field(default=12000, ge=1000)
+    academic_embedding_hash_fallback: bool = False
+    ai_detect_ml_enabled: bool = True
+    ai_detect_model_name: str = Field(default="roberta-base-openai-detector", min_length=1)
+    ai_detect_allow_download: bool = True
+    ai_detect_ensemble_weight_ml: float = Field(default=0.7, ge=0.0, le=1.0)
+    ai_detect_ensemble_weight_rules: float = Field(default=0.3, ge=0.0, le=1.0)
+    ai_detect_use_specter2: bool = False
+    academic_enable_startup_schema_create: bool | None = None
+    academic_enable_startup_source_bootstrap: bool | None = None
+    academic_enable_startup_chroma_init: bool | None = None
 
     jwt_secret_key: str = "replace-me-in-production"
     jwt_algorithm: str = "HS256"
@@ -72,6 +103,8 @@ class Settings(BaseSettings):
             object.__setattr__(self, "groq_api_key", None)
         if isinstance(self.hf_token, str) and not self.hf_token.strip():
             object.__setattr__(self, "hf_token", None)
+        if isinstance(self.alembic_database_url, str) and not self.alembic_database_url.strip():
+            object.__setattr__(self, "alembic_database_url", None)
         return self
 
     # Hugging Face token for authenticated model downloads (optional)
@@ -90,11 +123,15 @@ class Settings(BaseSettings):
     s3_bucket_name: str | None = None
 
     # Local storage settings
+    storage_backend: str = "auto"
     local_storage_path: str = "local_storage"
     local_storage_cleanup_days: int = 90
 
-    max_upload_size_mb: int = 20
-    allowed_mime_types: str = "application/pdf,image/png,image/jpeg,image/gif,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    max_upload_size_mb: int = Field(default=20, gt=0)
+    allowed_mime_types: str = Field(
+        default="application/pdf,image/png,image/jpeg,image/gif,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        min_length=1,
+    )
 
     cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     cors_allow_credentials: bool = False
@@ -133,9 +170,49 @@ class Settings(BaseSettings):
 
     transport_encryption_enabled: bool = True
 
+    @model_validator(mode="after")
+    def _validate_academic_runtime_safety(self) -> "Settings":
+        env = (self.app_env or "development").strip().lower()
+        object.__setattr__(self, "app_env", env)
+        if env == "production" and self.database_url.startswith("sqlite"):
+            raise ValueError("CRITICAL: DATABASE_URL must not use SQLite in production.")
+        if env in {"staging", "production"} and self.academic_embedding_hash_fallback:
+            raise ValueError(
+                "CRITICAL: ACADEMIC_EMBEDDING_HASH_FALLBACK must be false in staging/production."
+            )
+        if env in {"staging", "production"} and self.academic_enable_startup_schema_create:
+            raise ValueError(
+                "CRITICAL: ACADEMIC_ENABLE_STARTUP_SCHEMA_CREATE must not be true in staging/production."
+            )
+        storage_backend = (self.storage_backend or "auto").strip().lower()
+        if storage_backend not in {"auto", "local", "s3"}:
+            raise ValueError("STORAGE_BACKEND must be one of: auto, local, s3.")
+        object.__setattr__(self, "storage_backend", storage_backend)
+        if not self.allowed_mime_types_list:
+            raise ValueError("ALLOWED_MIME_TYPES must contain at least one MIME type.")
+        return self
+
     @property
     def master_key_path(self) -> Path:
         return Path(self.master_key_file)
+
+    @property
+    def startup_schema_create_enabled(self) -> bool:
+        if self.academic_enable_startup_schema_create is not None:
+            return self.academic_enable_startup_schema_create
+        return self.app_env == "development"
+
+    @property
+    def startup_source_bootstrap_enabled(self) -> bool:
+        if self.academic_enable_startup_source_bootstrap is not None:
+            return self.academic_enable_startup_source_bootstrap
+        return self.app_env == "development"
+
+    @property
+    def startup_chroma_init_enabled(self) -> bool:
+        if self.academic_enable_startup_chroma_init is not None:
+            return self.academic_enable_startup_chroma_init
+        return self.app_env == "development"
 
 
 @lru_cache

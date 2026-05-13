@@ -5,11 +5,11 @@ import { Session } from "@/lib/types";
 import { ChevronDown } from "lucide-react";
 
 const MODE_LABELS: Record<Session["mode"], string> = {
-  general_qa: "General Chat",
-  verification: "Citation Verification",
-  journal_match: "Journal Match",
-  retraction: "Retraction & PubPeer Scan",
-  ai_detection: "AI Detection",
+  general_qa: "Hỏi đáp học thuật",
+  verification: "Xác minh trích dẫn",
+  journal_match: "Gợi ý tạp chí",
+  retraction: "Rà soát rút bài",
+  ai_detection: "Nhận diện văn bản AI",
 };
 
 export function ModeSelector() {

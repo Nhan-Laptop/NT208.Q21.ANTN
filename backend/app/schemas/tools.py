@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
 
 
 class VerifyCitationRequest(BaseModel):
@@ -27,11 +29,31 @@ class CitationReportResponse(BaseModel):
 class JournalMatchRequest(BaseModel):
     session_id: str
     abstract: str = Field(min_length=30)
+    title: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_payload_shapes(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("abstract"):
+            return data
+        for key in ("text", "manuscript_text", "body_text"):
+            if data.get(key):
+                payload = dict(data)
+                payload["abstract"] = data[key]
+                return payload
+        return data
 
 
 class JournalItem(BaseModel):
     journal: str
-    score: float
+    venue_id: str | None = None
+    venue_type: str | None = None
+    entity_type: str = "venue"
+    production_eligible: bool = True
+    score: float | None = None
+    score_calibrated: bool = False
     reason: str
     url: str | None = None
     impact_factor: float | None = None
@@ -43,6 +65,13 @@ class JournalItem(BaseModel):
     acceptance_rate: float | None = None
     domains: list[str] = []
     detected_domains: list[str] = []
+    supporting_evidence: list[dict[str, Any]] = []
+    metric_provenance: dict[str, str] = {}
+    unverified_metrics: list[str] = []
+    score_breakdown: dict[str, float] = {}
+    warning_flags: list[str] = []
+    scope_fit: str | None = None
+    evidence_count: int = 0
 
 
 class JournalMatchResponse(BaseModel):
@@ -63,6 +92,8 @@ class RetractionItem(BaseModel):
     authors: list[str] = []
     pubpeer_comments: int = 0
     pubpeer_url: str | None = None
+    pubpeer_status: str = "not_checked"
+    has_pubpeer_discussion: bool = False
     risk_level: str = "UNKNOWN"
     has_retraction: bool = False
     has_correction: bool = False
@@ -72,6 +103,8 @@ class RetractionItem(BaseModel):
     journal: str | None = None
     publication_year: int | None = None
     sources_checked: list[str] = []
+    scan_skipped: bool = False
+    skip_reason: str | None = None
 
 
 class RetractionScanResponse(BaseModel):
@@ -82,7 +115,11 @@ class RetractionScanResponse(BaseModel):
 
 class PdfSummaryRequest(BaseModel):
     session_id: str
-    file_id: str | None = None
+    file_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID của file PDF cần tóm tắt (bắt buộc để tránh tóm tắt nhầm file).",
+    )
 
 
 class PdfSummaryResponse(BaseModel):
@@ -104,6 +141,13 @@ class AIWritingDetectResult(BaseModel):
     confidence: str
     flags: list[str]
     details: dict
+    method: str = "rule_based_heuristics"
+    ml_score: float | None = None
+    rule_score: float = 0.0
+    specter2_score: float | None = None
+    skipped_detectors: list[str] = []
+    fallback_reason: str | None = None
+    detectors_used: list[str] = []
 
 
 class AIWritingDetectResponse(BaseModel):

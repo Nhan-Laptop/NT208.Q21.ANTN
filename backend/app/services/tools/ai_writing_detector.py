@@ -10,12 +10,19 @@ Detection pipeline:
 import re
 import math
 import logging
+import os
+import shutil
+import signal
+from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 from enum import Enum
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
+_backend_root = Path(__file__).resolve().parents[3]
 
 # ---------------------------------------------------------------------------
 # Optional heavy deps – guard every import
@@ -49,6 +56,7 @@ class DetectionMethod(str, Enum):
     ROBERTA = "roberta_gpt2_detector"
     RULE_BASED = "rule_based_heuristics"
     ENSEMBLE = "ensemble"
+    ACADEMIC_SPECTER2 = "academic_specter2_detector"
 
 
 class Verdict(str, Enum):
@@ -137,19 +145,22 @@ FILLER_PHRASES = [
 class DetectionResult:
     """Result of AI writing detection analysis.
 
-    The fields ``score``, ``confidence``, ``flags``, ``details`` are kept
-    for backward compatibility with the existing ``AIWritingDetectResult``
-    schema & endpoint.  Extra fields are available for richer clients.
+    ``score``, ``confidence``, ``flags``, ``details`` are kept for
+    backward compatibility with ``AIWritingDetectResult`` schema.
+    Additional fields expose per-detector scores and pipeline info.
     """
     score: float             # 0.0 (human) -> 1.0 (AI)
     confidence: str          # LOW | MEDIUM | HIGH
     flags: list[str] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
-    # new enriched fields
     verdict: str = "UNCERTAIN"
     method: str = "rule_based_heuristics"
     ml_score: float | None = None
     rule_score: float = 0.0
+    specter2_score: float | None = None
+    skipped_detectors: list[str] = field(default_factory=list)
+    fallback_reason: str | None = None
+    detectors_used: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -166,16 +177,61 @@ class AIWritingDetector:
     """
 
     def __init__(self, use_ml: bool = True, device: str = "auto") -> None:
-        self._use_ml = use_ml and _TRANSFORMERS_AVAILABLE
+        self._use_ml = use_ml and settings.ai_detect_ml_enabled and _TRANSFORMERS_AVAILABLE
+        self._use_specter2 = settings.ai_detect_use_specter2
         self._model = None
         self._tokenizer = None
         self._device = None
+        self._model_load_attempted = False
+        self._requested_device = device
 
         self._ai_patterns = [re.compile(p, re.IGNORECASE) for p in AI_PATTERNS]
         self._filler_patterns = [re.compile(re.escape(p), re.IGNORECASE) for p in FILLER_PHRASES]
 
-        if self._use_ml:
-            self._load_model(device)
+    def _ensure_cache_dir(self) -> None:
+        cache_root = (_backend_root / settings.hf_cache_dir).resolve()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("HF_HOME", str(cache_root))
+        # TRANSFORMERS_CACHE is deprecated in favour of HF_HOME/hub.
+        # We intentionally do NOT set it so that huggingface_hub places
+        # downloaded files under HF_HOME/hub/ where local_files_only=True
+        # will find them.
+
+    def _ensure_model(self) -> None:
+        if not self._use_ml or self._model is not None or self._model_load_attempted:
+            return
+        self._model_load_attempted = True
+        self._load_model(self._requested_device)
+
+    @staticmethod
+    def _clean_partial_cache(model_name: str) -> None:
+        """Remove partial / corrupted cache entries for *model_name*.
+
+        Without this, a partially-downloaded model can leave config files
+        but missing weights, causing ``local_files_only=True`` to crash
+        on ``AttributeError`` instead of raising a clean ``OSError``.
+        """
+        hf_home = os.environ.get("HF_HOME")
+        if hf_home:
+            slug = f"models--{model_name.replace('/', '--')}"
+            # Check HF_HOME/hub/ (the huggingface_hub cache)
+            for path in Path(hf_home, "hub").glob(f"{slug}*"):
+                if path.exists():
+                    logger.warning("Removing partial cache: %s", path)
+                    shutil.rmtree(path)
+            # Also check HF_HOME/ directly for legacy layouts
+            for path in Path(hf_home).glob(f"{slug}*"):
+                if path.exists():
+                    logger.warning("Removing partial cache: %s", path)
+                    shutil.rmtree(path)
+        # Also check legacy TRANSFORMERS_CACHE
+        legacy = os.environ.get("TRANSFORMERS_CACHE")
+        if legacy:
+            slug = f"models--{model_name.replace('/', '--')}"
+            for path in Path(legacy).glob(f"{slug}*"):
+                if path.exists():
+                    logger.warning("Removing partial cache: %s", path)
+                    shutil.rmtree(path)
 
     def _load_model(self, device: str) -> None:
         global _detector_model, _detector_tokenizer
@@ -185,13 +241,47 @@ class AIWritingDetector:
             return
         try:
             logger.info("Loading RoBERTa GPT-2 detector...")
+            self._ensure_cache_dir()
             if device == "auto":
                 self._device = "cuda" if torch.cuda.is_available() else "cpu"
             else:
                 self._device = device
-            model_name = "roberta-base-openai-detector"
-            self._tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self._model = AutoModelForSequenceClassification.from_pretrained(model_name)
+            model_name = settings.ai_detect_model_name
+            try:
+                self._tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+                self._model = AutoModelForSequenceClassification.from_pretrained(
+                    model_name, local_files_only=True
+                )
+            except OSError:
+                if settings.ai_detect_allow_download:
+                    logger.info(
+                        "Model %s not cached, downloading (this may take a while)...",
+                        model_name,
+                    )
+                    # Clean any partial artifacts before starting fresh
+                    self._clean_partial_cache(model_name)
+                    self._tokenizer = AutoTokenizer.from_pretrained(
+                        model_name, local_files_only=False
+                    )
+                    self._model = AutoModelForSequenceClassification.from_pretrained(
+                        model_name, local_files_only=False
+                    )
+                else:
+                    raise
+            except (AttributeError, RuntimeError) as cache_err:
+                # Partial / corrupted cache: config files exist but weights missing
+                logger.warning("Corrupted cache for %s: %s. Cleaning and retrying...", model_name, cache_err)
+                self._clean_partial_cache(model_name)
+                if settings.ai_detect_allow_download:
+                    logger.info("Re-downloading %s ...", model_name)
+                    self._tokenizer = AutoTokenizer.from_pretrained(
+                        model_name, local_files_only=False
+                    )
+                    self._model = AutoModelForSequenceClassification.from_pretrained(
+                        model_name, local_files_only=False
+                    )
+                else:
+                    raise
             self._model.to(self._device)
             self._model.eval()
             _detector_model = self._model
@@ -199,6 +289,8 @@ class AIWritingDetector:
             logger.info("RoBERTa detector loaded on %s", self._device)
         except Exception as e:
             logger.warning("Failed to load RoBERTa detector: %s. Using rule-based only.", e)
+            # Clean any partial artifacts so the next attempt starts fresh
+            self._clean_partial_cache(settings.ai_detect_model_name)
             self._use_ml = False
 
     # -- text helpers ------------------------------------------------------
@@ -279,6 +371,7 @@ class AIWritingDetector:
     # -- ML analysis -------------------------------------------------------
 
     def _analyze_ml(self, text: str) -> float | None:
+        self._ensure_model()
         if not self._use_ml or self._model is None:
             return None
         try:
@@ -290,6 +383,41 @@ class AIWritingDetector:
         except Exception as e:
             logger.warning("ML analysis failed: %s", e)
             return None
+
+    # -- academic (SPECTER2) analysis --------------------------------------
+
+    def _analyze_academic(self, text: str) -> tuple[float | None, str | None]:
+        """Use SPECTER2 embeddings to detect AI academic writing patterns.
+
+        Returns (score, skip_reason).  When SPECTER2 is disabled or not
+        ready, returns (None, reason_string).
+        """
+        if not self._use_specter2:
+            return None, None  # not skipped, simply not configured
+        try:
+            from app.services.embeddings.specter2_service import specter2_service
+
+            if not specter2_service.is_ready:
+                return None, "specter2_service_not_ready"
+
+            embedding = specter2_service.embed_text(text)
+            if embedding is None:
+                return None, "specter2_embedding_failed"
+
+            # Lightweight heuristic on embedding norm / length as a proxy
+            # for typical AI academic text patterns.
+            import numpy as np  # already guarded at module level
+
+            vec = np.array(embedding, dtype=np.float64)
+            norm = float(np.linalg.norm(vec))
+            entropy_estimate = (
+                -np.sum((vec / (norm + 1e-12)) ** 2) / max(len(vec), 1)
+            )
+            score = max(0.0, min(1.0, 0.5 + (entropy_estimate + 0.02) * 2.0))
+            return score, None
+        except Exception as exc:
+            logger.warning("SPECTER2 academic analysis failed: %s", exc)
+            return None, f"specter2_error: {exc}"
 
     # -- rule-based analysis -----------------------------------------------
 
@@ -357,7 +485,7 @@ class AIWritingDetector:
     # -- public API --------------------------------------------------------
 
     def analyze(self, text: str) -> DetectionResult:
-        """Analyze text for AI writing indicators."""
+        """Analyze text for AI writing indicators using ensemble detection."""
         if len(text) < 50:
             return DetectionResult(
                 score=0.5, confidence="LOW",
@@ -367,17 +495,59 @@ class AIWritingDetector:
                 method=DetectionMethod.RULE_BASED.value,
             )
 
+        # Run all available detectors
         rule_score, flags, details = self._analyze_rules(text)
         ml_score = self._analyze_ml(text)
+        specter2_score, specter2_skip_reason = self._analyze_academic(text)
+
+        detectors_used = ["rule_based"]
+        skipped_detectors: list[str] = []
+        fallback_reason: str | None = None
 
         if ml_score is not None:
-            final = 0.7 * ml_score + 0.3 * rule_score
-            method = DetectionMethod.ENSEMBLE.value
+            detectors_used.append("roberta_gpt2_detector")
+        else:
+            if not settings.ai_detect_ml_enabled:
+                skipped_detectors.append("roberta_gpt2_detector(disabled_by_config)")
+            elif not _TRANSFORMERS_AVAILABLE:
+                skipped_detectors.append("roberta_gpt2_detector(deps_not_installed)")
+            else:
+                skipped_detectors.append("roberta_gpt2_detector(model_not_available)")
+
+        if specter2_score is not None:
+            detectors_used.append("academic_specter2_detector")
+        elif specter2_skip_reason:
+            skipped_detectors.append(f"academic_specter2_detector({specter2_skip_reason})")
+
+        # Ensemble scoring
+        details["rule_raw_score"] = round(rule_score, 4)
+        if ml_score is not None:
             details["ml_raw_score"] = round(ml_score, 4)
-            details["rule_raw_score"] = round(rule_score, 4)
+
+        w_ml = settings.ai_detect_ensemble_weight_ml
+        w_rule = settings.ai_detect_ensemble_weight_rules
+
+        if ml_score is not None and specter2_score is not None:
+            w_specter2 = 0.2
+            w_ml_adj = w_ml * (1.0 - w_specter2)
+            w_rule_adj = w_rule * (1.0 - w_specter2)
+            final = w_ml_adj * ml_score + w_rule_adj * rule_score + w_specter2 * specter2_score
+            method = DetectionMethod.ENSEMBLE.value
+        elif ml_score is not None:
+            total_w = w_ml + w_rule
+            final = (w_ml / total_w) * ml_score + (w_rule / total_w) * rule_score
+            method = DetectionMethod.ENSEMBLE.value
         else:
             final = rule_score
             method = DetectionMethod.RULE_BASED.value
+            if not _TRANSFORMERS_AVAILABLE:
+                fallback_reason = "roberta_deps_not_installed"
+            elif not settings.ai_detect_ml_enabled:
+                fallback_reason = "roberta_disabled_by_config"
+            elif self._model_load_attempted:
+                fallback_reason = "roberta_model_load_failed"
+            else:
+                fallback_reason = "roberta_disabled_by_request"
 
         # verdict
         if final < 0.25:
@@ -408,6 +578,10 @@ class AIWritingDetector:
             method=method,
             ml_score=round(ml_score, 4) if ml_score is not None else None,
             rule_score=round(rule_score, 4),
+            specter2_score=round(specter2_score, 4) if specter2_score is not None else None,
+            skipped_detectors=skipped_detectors,
+            fallback_reason=fallback_reason,
+            detectors_used=detectors_used,
         )
 
     def get_verdict(self, score: float) -> str:
@@ -435,10 +609,18 @@ class AIWritingDetector:
         return self._use_ml and self._model is not None
 
     @property
+    def is_specter2_enabled(self) -> bool:
+        return self._use_specter2
+
+    @property
     def model_info(self) -> str:
+        parts = []
         if self.is_ml_enabled:
-            return "RoBERTa GPT-2 OpenAI Detector"
-        return "Rule-based heuristics only"
+            parts.append("RoBERTa GPT-2 OpenAI Detector")
+        if self._use_specter2:
+            parts.append("SPECTER2 Academic Detector")
+        parts.append("Rule-based heuristics")
+        return " + ".join(parts) if parts else "Rule-based heuristics only"
 
 
 # Singleton

@@ -1,3 +1,3 @@
-from . import admin, auth, chat, sessions, tools, upload
+from . import admin, auth, chat, crawl_admin, journal_match, manuscripts, sessions, tools, upload, venues
 
-__all__ = ["admin", "auth", "chat", "sessions", "tools", "upload"]
+__all__ = ["admin", "auth", "chat", "crawl_admin", "journal_match", "manuscripts", "sessions", "tools", "upload", "venues"]

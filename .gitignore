@@ -1,39 +1,120 @@
+# =========================
 # Secrets and environment files
+# =========================
 .env
 .env.*
 !.env.example
+!.env.local.example
+!.env.production.example
+!.env.staging.example
+
+backend/.env
+frontend/.env.local
+frontend/.env.*.local
 
 # Local keys
 .aira_master_key
 
+# =========================
 # Python
+# =========================
 .venv/
+venv/
+env/
+ENV/
 backend/.venv/
+
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+
+# =========================
 # Local databases and logs
+# =========================
 *.db
+*.sqlite
+*.sqlite3
 *.log
 
+backend/aira.db
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
+
+# =========================
 # Temporary and backup artifacts
+# =========================
 *.bak
 *.corrupted
+*.tmp
+tmp/
+temp/
 
+# =========================
 # Frontend build/cache
+# =========================
 node_modules/
 frontend/node_modules/
+frontend/.npm-cache/
+.npm/
+.pnpm-store/
+.yarn/
+
 .next/
 frontend/.next/
 dist/
 build/
+out/
 *.tsbuildinfo
 
+# =========================
 # Data/cache outputs
+# =========================
 backend/data/chroma_db/
+backend/.cache/
+backend/models/
 
+local_storage/
+backend/data/storage/
+backend/uploads/
+backend/data/raw_snapshots/
+backend/reports/
+backend/data/academic_seed.json
+
+playwright-report/
+test-results/
+
+# =========================
+# Docs / internal notes (optional)
+# =========================
+CLAUDE.md
+CODEX.md
+AGENTS.md
+Report.md
+FINAL_REPORT_FEATURES.md
+aira_system_prompt.md
+.codex
+
+# =========================
 # OS/editor junk
+# =========================
 .DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

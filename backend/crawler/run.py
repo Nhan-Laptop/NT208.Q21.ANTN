@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-Crawler Runner — scrape CFP data and seed the ChromaDB vector store.
-
-Usage::
-
-    cd backend/
-    python -m crawler.run          # from backend/ directory
-    # or
-    python crawler/run.py          # direct execution
-"""
+"""Run the academic crawl and indexing pipeline."""
 
 from __future__ import annotations
 
@@ -29,36 +20,39 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    from crawler.universal_scraper import UniversalScraper
-    from crawler.db_builder import seed_database
+    from app.core.database import Base, SessionLocal, engine
+    from app.models.user import User
+    from crawler.scheduler import crawl_scheduler
 
-    logger.info("=== AIRA Crawler Pipeline (DrissionPage) ===")
-
-    # Step 1: Scrape
-    scraper = UniversalScraper()
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
     try:
-        records = scraper.scrape_all()
+        user = db.query(User).filter(User.email == "crawler@aira.local").first()
+        if user is None:
+            user = User(email="crawler@aira.local", full_name="Crawler Runner", hashed_password="disabled")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        job = crawl_scheduler.run_crawl_job(
+            db,
+            current_user=user,
+            include_bootstrap=True,
+            include_live_sources=True,
+        )
+        logger.info(
+            "Crawl complete status=%s seen=%d created=%d updated=%d indexed=%d",
+            job.status,
+            job.records_seen,
+            job.records_created,
+            job.records_updated,
+            job.records_indexed,
+        )
+        print(
+            f"Crawl job {job.id} completed with status={job.status} "
+            f"seen={job.records_seen} indexed={job.records_indexed}"
+        )
     finally:
-        scraper.close()
-
-    print(f"\n🕷️ DrissionPage scraped {len(records)} REAL CFP record(s).\n")
-    logger.info("DrissionPage scraped %d REAL CFP record(s).", len(records))
-
-    if not records:
-        print("\n⚠️  No real data scraped. Database is empty.\n")
-        logger.warning("No real data scraped. Database will be empty.")
-
-    # Step 2: Seed DB (always run — wipes stale data even if 0 records)
-    warning_message = (
-        "⚠️ IMPORTANT: If you encounter a dimension mismatch error, manually "
-        "delete the entire 'backend/data/chroma_db' folder to clear old "
-        "384-dimensional embeddings before running this script again."
-    )
-    print(f"\n{warning_message}\n")
-    logger.warning(warning_message)
-    count = seed_database(records)
-    print(f"\n✅ Pipeline complete — {count} REAL record(s) ingested into ChromaDB.\n")
-    logger.info("Pipeline complete — %d REAL document(s) in ChromaDB.", count)
+        db.close()
 
 
 if __name__ == "__main__":

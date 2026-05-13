@@ -25,6 +25,11 @@ from typing import Any
 
 import numpy as np
 
+from app.services.academic_verification_formatter import (
+    format_citation_summary,
+    format_retraction_summary,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── DOI regex (case-insensitive, handles most real-world DOI formats) ────
@@ -156,7 +161,8 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
     ],
     _Intent.JOURNAL: [
         "tạp chí", "journal", "nộp bài", "submit", "gợi ý tạp chí",
-        "recommend journal",
+        "recommend journal", "đề xuất tạp chí", "journal recommendation",
+        "journal match", "nơi nộp bài",
     ],
     _Intent.AI_DETECT: [
         "ai viết", "ai writing", "phát hiện ai", "detect ai",
@@ -170,9 +176,14 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
 }
 
 _CITATION_EXPLICIT_RE = re.compile(
-    r"\b(citation|verify\s+citation|reference\s+check|bibliography"
+    r"\b(citation|verify\s+citation|verify\s+doi|reference\s+check|bibliography"
     r"|trích\s*dẫn|xác\s*minh\s*trích\s*dẫn|kiểm\s*tra\s*tài\s*liệu\s*tham\s*khảo"
     r"|kiểm\s*tra\s*doi)\b",
+    re.IGNORECASE,
+)
+_JOURNAL_EXPLICIT_RE = re.compile(
+    r"\b(\nơi\s*nộp\s*bài|gợi\s*ý\s*tạp\s*chí|đề\s*xuất\s*tạp\s*chí|"
+    r"journal\s+recommendation|journal\s+match|tìm\s*tạp\s*chí|recommend\s+journal)\b",
     re.IGNORECASE,
 )
 _RETRACTION_EXPLICIT_RE = re.compile(
@@ -339,6 +350,8 @@ def _detect_intent(user_text: str, has_doi: bool) -> str | None:
     low = user_text.lower()
 
     # Explicit user request should override DOI/default heuristics.
+    if _JOURNAL_EXPLICIT_RE.search(low):
+        return _Intent.JOURNAL
     if _CITATION_EXPLICIT_RE.search(low) and not _RETRACTION_EXPLICIT_RE.search(low):
         return _Intent.CITATION
     if _RETRACTION_EXPLICIT_RE.search(low) and not _CITATION_EXPLICIT_RE.search(low):
@@ -346,16 +359,21 @@ def _detect_intent(user_text: str, has_doi: bool) -> str | None:
 
     # ── Layer 1: Smart defaults ──────────────────────────────────────
     if has_doi:
-        # DOI present — check if another intent is stronger first
+        # DOI-only input is an exact identifier lookup. Default to citation
+        # verification, unless the user explicitly mentions retraction.
         sem_intent, sem_score = _semantic_router.classify(user_text)
-        if sem_intent and sem_intent != _Intent.RETRACTION and sem_score >= 0.55:
-            # Very confident non-retraction intent even though DOI present
+        if sem_intent and sem_score >= 0.55:
             logger.info(
-                "Smart default overridden: DOI present but semantic=%s (%.3f).",
+                "DOI smart default overridden by semantic intent=%s (%.3f).",
                 sem_intent, sem_score,
             )
             return sem_intent
-        return _Intent.RETRACTION
+        if _RETRACTION_EXPLICIT_RE.search(low):
+            return _Intent.RETRACTION
+        if _CITATION_EXPLICIT_RE.search(low):
+            return _Intent.CITATION
+        # Bare DOI / DOI URL without explicit keywords → citation
+        return _Intent.CITATION
 
     # Long text without DOI → likely AI detection or grammar checking
     text_len = len(user_text.strip())
@@ -395,83 +413,44 @@ def _detect_intent(user_text: str, has_doi: bool) -> str | None:
 
 def _template_retraction(results: dict) -> str:
     """Generate fallback text for retraction scan results."""
-    items = results.get("results", [])
     summary = results.get("summary", {})
-    count = int(summary.get("total_checked", summary.get("total", len(items))) or 0)
-    no_doi = bool(summary.get("no_doi_found", False))
-    retracted = summary.get("retracted", 0)
-    concerns = summary.get("concerns", 0)
-    pubpeer = sum(1 for r in items if r.get("pubpeer_comments", 0) > 0)
-
-    lines = [
-        "🔍 **(Chế độ dự phòng — Groq offline)**",
-    ]
-    if no_doi or count == 0:
-        lines.append("Không phát hiện DOI hợp lệ, nên chưa có mục nào để quét retraction.")
-        return "\n".join(lines)
-
-    lines.append(f"Đã quét **{count}** DOI.")
-    if retracted:
-        lines.append(f"⚠️ Phát hiện **{retracted}** bài bị rút bỏ (RETRACTED).")
-    if concerns:
-        lines.append(f"⚠️ **{concerns}** bài có biểu thức quan ngại (Expression of Concern).")
-    if pubpeer:
-        lines.append(f"💬 **{pubpeer}** bài có bình luận trên PubPeer.")
-    if not retracted and not concerns and not pubpeer:
-        lines.append("✅ Không phát hiện vấn đề nghiêm trọng.")
-    lines.append("\nXem chi tiết ở bảng kết quả bên dưới.")
-    return "\n".join(lines)
+    return format_retraction_summary(summary)
 
 
 def _template_citation(results: dict) -> str:
     """Generate fallback text for citation verification results."""
     stats = results.get("statistics", {})
-    total = int(stats.get("total", 0) or 0)
     no_citation = bool(results.get("no_citation_found", False) or stats.get("no_citation_found", False))
-    valid = int(stats.get("valid", 0) or 0) + int(stats.get("doi_verified", 0) or 0)
-    partial = int(stats.get("partial_match", 0) or 0)
-    hallucinated = int(stats.get("hallucinated", 0) or 0)
-    unverified = int(stats.get("unverified", 0) or 0)
-
-    lines = [
-        "📚 **(Chế độ dự phòng — Groq offline)**",
-    ]
-
-    if no_citation or total == 0:
-        lines.append("Không phát hiện mẫu citation/DOI hợp lệ trong nội dung đã cung cấp.")
-        return "\n".join(lines)
-
-    lines.append(f"Đã kiểm tra **{total}** trích dẫn.")
-    lines.append(f"✅ Hợp lệ/đã xác minh DOI: **{valid}**")
-    if partial:
-        lines.append(f"🟡 Khớp một phần: **{partial}**")
-    if hallucinated:
-        lines.append(f"❌ Có dấu hiệu sai/hallucinated: **{hallucinated}**")
-    if unverified:
-        lines.append(f"⚠️ Chưa xác minh được (có thể do lỗi lookup tạm thời): **{unverified}**")
-    lines.append("\nXem chi tiết ở bảng kết quả bên dưới.")
-    return "\n".join(lines)
+    return format_citation_summary(stats, no_citation_found=no_citation)
 
 
 def _template_journal(results: dict) -> str:
     """Generate fallback text for journal matching results."""
     journals = results.get("journals", [])
     count = len(journals)
+    if count == 0:
+        return (
+            "Mình chưa tìm thấy journal phù hợp từ dữ liệu học thuật hiện có. "
+            "Bạn có thể bổ sung abstract, keyword, hoặc phương pháp nghiên cứu để mình thử lại."
+        )
     lines = [
-        "📖 **(Chế độ dự phòng — Groq offline)**",
-        f"Tìm thấy **{count}** tạp chí phù hợp.",
+        f"Mình tìm thấy **{count}** gợi ý journal từ dữ liệu học thuật hiện có. "
+        "Đây là recommendation có căn cứ, không phải đảm bảo được chấp nhận.",
     ]
     for i, j in enumerate(journals[:3], 1):
         name = j.get("journal", j.get("name", j.get("journal_name", "N/A")))
-        score = j.get("similarity_score", j.get("score", j.get("match_score", 0)))
-        try:
-            score_str = f"{float(score):.1%}"
-        except (TypeError, ValueError):
-            score_str = str(score)
-        lines.append(f"  {i}. {name} (score: {score_str})")
+        if j.get("score_calibrated"):
+            score = j.get("similarity_score", j.get("score", j.get("match_score", 0)))
+            try:
+                score_str = f" (score: {float(score):.1%})"
+            except (TypeError, ValueError):
+                score_str = f" (score: {score})"
+        else:
+            score_str = ""
+        lines.append(f"  {i}. {name}{score_str}")
     if count > 3:
         lines.append(f"  … và {count - 3} tạp chí khác.")
-    lines.append("\nXem chi tiết ở bảng kết quả bên dưới.")
+    lines.append("\nBạn có thể xem điểm khớp và lý do ở bảng kết quả bên dưới.")
     return "\n".join(lines)
 
 

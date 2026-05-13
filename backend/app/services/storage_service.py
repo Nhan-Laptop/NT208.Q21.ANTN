@@ -21,9 +21,16 @@ from enum import Enum
 from pathlib import Path
 from typing import BinaryIO
 
-import boto3
-from botocore.config import Config
-from botocore.exceptions import ClientError
+try:
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+except ImportError:  # pragma: no cover - optional dependency guard
+    boto3 = None  # type: ignore[assignment]
+    Config = None  # type: ignore[assignment]
+
+    class ClientError(Exception):
+        pass
 
 from app.core.config import settings
 from app.core.crypto import crypto_manager
@@ -157,6 +164,8 @@ class S3Storage(BaseStorage):
         access_key_id: str,
         secret_access_key: str,
     ):
+        if boto3 is None or Config is None:
+            raise RuntimeError("boto3 is required for S3 storage.")
         self._bucket = bucket_name
         self._region = region
         
@@ -677,9 +686,15 @@ class StorageService:
 
     def __init__(self):
         self._backend: BaseStorage
-        
-        # Check if S3 is configured
-        if (
+        backend_mode = settings.storage_backend
+
+        # Local development can force filesystem storage even when S3
+        # credentials are present in a private .env.
+        if backend_mode == "local":
+            self._backend = LocalStorage(getattr(settings, "local_storage_path", "local_storage"))
+            self._storage_type = StorageType.LOCAL
+            logger.info("Storage service initialized with local backend")
+        elif (
             settings.aws_access_key_id
             and settings.aws_secret_access_key
             and settings.s3_bucket_name
@@ -694,6 +709,8 @@ class StorageService:
                 self._storage_type = StorageType.S3
                 logger.info("Storage service initialized with S3 backend")
             except Exception as e:
+                if backend_mode == "s3":
+                    raise
                 logger.warning(f"S3 initialization failed, falling back to local: {e}")
                 self._backend = LocalStorage(settings.local_storage_path)
                 self._storage_type = StorageType.LOCAL

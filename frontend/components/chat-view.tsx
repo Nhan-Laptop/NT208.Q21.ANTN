@@ -1,6 +1,5 @@
 "use client";
 
-import { api, showApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useChat } from "@/lib/chat-store";
 import { useAutoScroll } from "@/lib/useAutoScroll";
@@ -19,7 +18,6 @@ import {
   X,
 } from "lucide-react";
 import {
-  ChangeEvent,
   FormEvent,
   KeyboardEvent,
   memo,
@@ -29,6 +27,15 @@ import {
   useState,
 } from "react";
 import clsx from "clsx";
+
+const MESSAGE_TYPE_LABELS: Record<string, string> = {
+  citation_report: "Xác minh trích dẫn",
+  journal_list: "Gợi ý tạp chí",
+  retraction_report: "Rà soát rút bài",
+  pdf_summary: "Tóm tắt PDF",
+  ai_writing_detection: "Nhận diện văn bản AI",
+  grammar_report: "Rà soát ngữ pháp",
+};
 
 /* ====================================================================
  * ChatView — main exported component
@@ -101,17 +108,17 @@ export function ChatView() {
             <Sparkles className="w-7 h-7 text-accent dark:text-dark-accent" />
           </div>
           <h1 className="text-2xl font-semibold text-text-primary dark:text-dark-text-primary mb-2">
-            How can I help you today?
+            Mình có thể hỗ trợ gì cho nghiên cứu của bạn?
           </h1>
           <p className="text-text-secondary dark:text-dark-text-secondary text-sm max-w-md text-center mb-6">
-            Ask research questions, verify citations, find journals, or check for AI-written content.
+            Hỏi đáp từ dữ liệu học thuật đã lưu, xác minh trích dẫn, gợi ý tạp chí, hoặc rà soát tín hiệu rút bài.
           </p>
           <div className="flex flex-wrap gap-2 justify-center max-w-lg">
             {[
-              "Verify a citation in APA format",
-              "Find journals for my paper",
-              "Check if references are retracted",
-              "Detect AI writing in my text",
+              "Xác minh một reference APA",
+              "Gợi ý tạp chí cho manuscript",
+              "Kiểm tra DOI có tín hiệu rút bài",
+              "Nhận diện văn bản AI",
             ].map((s) => (
               <button
                 key={s}
@@ -228,7 +235,7 @@ function InputArea({
   fileUpload,
   showAttach,
 }: InputAreaProps) {
-  const { selectedFile, isUploading, fileInputRef, onFileChange, openFilePicker, reset, setSelectedFile } =
+  const { selectedFile, isUploading, fileInputRef, onFileChange, openFilePicker, reset } =
     fileUpload;
 
   return (
@@ -268,7 +275,8 @@ function InputArea({
                 onClick={openFilePicker}
                 disabled={isUploading}
                 className="p-2 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-bg-secondary dark:text-dark-text-tertiary dark:hover:text-dark-text-primary dark:hover:bg-dark-surface-hover transition-colors disabled:opacity-50"
-                title="Attach file"
+                title="Đính kèm tệp"
+                aria-label="Đính kèm tệp"
               >
                 <Paperclip size={18} />
               </button>
@@ -281,7 +289,7 @@ function InputArea({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder="Send a message..."
+              placeholder="Nhập câu hỏi, DOI, trích dẫn hoặc nội dung manuscript..."
               rows={1}
               className="w-full resize-none rounded-xl border border-border bg-bg-primary px-4 py-3 pr-12 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent dark:border-dark-border dark:bg-dark-bg-primary dark:text-dark-text-primary dark:placeholder:text-dark-text-tertiary dark:focus:ring-dark-accent/20 dark:focus:border-dark-accent transition-colors"
               style={{ maxHeight: 200 }}
@@ -303,7 +311,7 @@ function InputArea({
 
         <div className="flex items-center justify-end mt-2">
           <span className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
-            Shift+Enter for new line
+            Shift+Enter để xuống dòng
           </span>
         </div>
       </div>
@@ -387,7 +395,7 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
           <span>{new Date(message.created_at).toLocaleTimeString()}</span>
           {message.message_type !== "text" && message.message_type !== "file_upload" && (
             <span className="px-1.5 py-0.5 rounded bg-bg-secondary dark:bg-dark-bg-secondary text-[10px]">
-              {message.message_type.replace(/_/g, " ")}
+              {MESSAGE_TYPE_LABELS[message.message_type] ?? message.message_type.replace(/_/g, " ")}
             </span>
           )}
         </div>

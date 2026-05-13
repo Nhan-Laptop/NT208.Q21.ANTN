@@ -10,7 +10,7 @@ Data sources (auto-selected):
 import re
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 from enum import Enum
 
 import httpx
@@ -70,6 +70,7 @@ class PubPeerInfo:
     url: str | None = None
     latest_comment_date: str | None = None
     concerns: list[str] = field(default_factory=list)
+    status: str = "not_checked"  # no_comments | has_comments | lookup_failed | not_checked
 
 
 @dataclass(slots=True)
@@ -99,10 +100,14 @@ class RetractionResult:
     is_retracted_openalex: bool = False
     openalex_id: str | None = None
     pubpeer_info: PubPeerInfo | None = None
+    has_pubpeer_discussion: bool = False
+    pubpeer_status: str = "not_checked"
     publication_year: int | None = None
     journal: str | None = None
     authors: list[str] = field(default_factory=list)
     sources_checked: list[str] = field(default_factory=list)
+    scan_skipped: bool = False
+    skip_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,16 +215,19 @@ class RetractionScanner:
             )
             if resp.status_code != 200:
                 logger.debug("PubPeer returned %s for %s", resp.status_code, doi)
+                info.status = "lookup_failed"
                 return info
             ct = resp.headers.get("content-type", "")
             if "json" not in ct:
                 logger.debug("PubPeer returned non-JSON (%s) for %s", ct, doi)
+                info.status = "lookup_failed"
                 return info
 
             data = resp.json()
             feedbacks = data.get("feedbacks", [])
             if not feedbacks:
                 # Paper is clean — no PubPeer comments
+                info.status = "no_comments"
                 return info
 
             fb = feedbacks[0]
@@ -228,6 +236,7 @@ class RetractionScanner:
                 info.has_comments = True
                 info.comment_count = total
                 info.url = fb.get("url") or info.url
+                info.status = "has_comments"
 
                 # Extract concern keywords from comment snippets if present
                 comments = fb.get("comments", [])
@@ -243,12 +252,17 @@ class RetractionScanner:
                         for kw in concern_kws:
                             if kw in txt and kw not in info.concerns:
                                 info.concerns.append(kw)
+            else:
+                info.status = "no_comments"
         except httpx.RequestError as e:
             logger.debug("PubPeer connection error for %s: %s", doi, e)
+            info.status = "lookup_failed"
         except httpx.HTTPStatusError as e:
             logger.debug("PubPeer HTTP error for %s: %s", doi, e.response.status_code)
+            info.status = "lookup_failed"
         except Exception as e:
             logger.debug("PubPeer failed for %s: %s", doi, e)
+            info.status = "lookup_failed"
         return info
 
     # -- risk calculation --------------------------------------------------
@@ -256,6 +270,7 @@ class RetractionScanner:
     @staticmethod
     def _calculate_risk(result: RetractionResult) -> tuple[RiskLevel, list[str]]:
         factors: list[str] = []
+        # Official retraction evidence (publisher / Crossref / OpenAlex)
         if result.has_retraction:
             factors.append("Paper has been RETRACTED by publisher")
             return RiskLevel.CRITICAL, factors
@@ -271,20 +286,26 @@ class RetractionScanner:
         if result.has_concern:
             factors.append("Expression of Concern issued")
             return RiskLevel.HIGH, factors
-        pp = result.pubpeer_info
-        if pp and pp.comment_count >= 5:
-            factors.append(f"Multiple PubPeer comments ({pp.comment_count})")
-            if pp.concerns:
-                factors.append(f"Concerns: {', '.join(pp.concerns[:3])}")
-            return RiskLevel.HIGH, factors
+        # Correction / erratum is a notable but non-critical signal
         if result.has_correction:
             factors.append("Paper has been corrected")
-        if pp and pp.comment_count >= 2:
+        # PubPeer comments — add as informational factors only
+        pp = result.pubpeer_info
+        if pp and pp.comment_count >= 5:
+            factors.append(f"Multiple PubPeer discussions ({pp.comment_count})")
+            if pp.concerns:
+                factors.append(f"Concerns: {'; '.join(pp.concerns[:3])}")
+        elif pp and pp.comment_count >= 2:
             factors.append(f"PubPeer activity ({pp.comment_count} comments)")
-            return RiskLevel.MEDIUM, factors
-        if pp and pp.comment_count >= 1:
+        elif pp and pp.comment_count >= 1:
             factors.append("Some PubPeer discussion")
-            return RiskLevel.LOW, factors
+        # Determine risk level based on official signals only
+        if result.has_retraction or result.is_retracted_openalex:
+            return RiskLevel.CRITICAL, factors
+        if result.has_concern:
+            return RiskLevel.HIGH, factors
+        if result.has_correction:
+            return RiskLevel.MEDIUM, factors
         return RiskLevel.NONE, factors
 
     # -- single DOI scan ---------------------------------------------------
@@ -337,6 +358,8 @@ class RetractionScanner:
         result.pubpeer_info = pp
         result.pubpeer_comments = pp.comment_count
         result.pubpeer_url = pp.url
+        result.has_pubpeer_discussion = pp.has_comments
+        result.pubpeer_status = pp.status
 
         # 4. Risk
         risk, factors = self._calculate_risk(result)
@@ -375,17 +398,83 @@ class RetractionScanner:
                 out.append(self.scan_doi(doi))
             except Exception as e:
                 logger.error("Error scanning DOI %s: %s", doi, e)
-                out.append(RetractionResult(doi=doi, status="ERROR", risk_factors=[str(e)]))
+                out.append(RetractionResult(
+                    doi=doi,
+                    status="ERROR",
+                    risk_factors=["Mình chưa hoàn tất được bước kiểm tra retraction cho DOI này."],
+                ))
+        return out
+
+    def scan_verified(
+        self,
+        text: str,
+        resolve_doi: Callable[[str], Any],
+    ) -> list[RetractionResult]:
+        dois = self.extract_doi(text)
+        if not dois:
+            logger.info("Retraction scan: no DOI detected in input text.")
+            return []
+
+        out: list[RetractionResult] = []
+        skip_message = (
+            "Vì chưa xác minh được tài liệu gốc, bước kiểm tra retraction được bỏ qua."
+        )
+        for doi in dois:
+            try:
+                resolved = resolve_doi(doi)
+            except Exception as e:
+                logger.debug("DOI resolution failed before retraction scan for %s: %s", doi, e)
+                out.append(RetractionResult(
+                    doi=doi,
+                    status="UNVERIFIED",
+                    risk_factors=[skip_message],
+                    sources_checked=["doi_resolution"],
+                    scan_skipped=True,
+                    skip_reason=skip_message,
+                ))
+                continue
+
+            status = str(getattr(resolved, "status", "") or "")
+            resolved_doi = str(getattr(resolved, "doi", "") or doi).strip().lower()
+            if status != "DOI_VERIFIED":
+                evidence = str(getattr(resolved, "evidence", "") or "").strip()
+                reason = f"{skip_message} {evidence}".strip()
+                out.append(RetractionResult(
+                    doi=resolved_doi or doi,
+                    status="UNVERIFIED",
+                    title=getattr(resolved, "title", None),
+                    risk_factors=[reason],
+                    sources_checked=["doi_resolution"],
+                    scan_skipped=True,
+                    skip_reason=reason,
+                ))
+                continue
+
+            try:
+                out.append(self.scan_doi(resolved_doi or doi))
+            except Exception as e:
+                logger.error("Error scanning verified DOI %s: %s", resolved_doi or doi, e)
+                out.append(RetractionResult(
+                    doi=resolved_doi or doi,
+                    status="ERROR",
+                    risk_factors=["Mình chưa hoàn tất được bước kiểm tra retraction cho DOI đã xác minh."],
+                ))
         return out
 
     def get_summary(self, results: list[RetractionResult]) -> dict[str, Any]:
-        checked_results = [r for r in results if r.status != "NO_DOI_FOUND"]
+        unresolved_results = [r for r in results if r.status == "UNVERIFIED"]
+        checked_results = [
+            r for r in results
+            if r.status not in {"NO_DOI_FOUND", "UNVERIFIED"}
+        ]
         total_checked = len(checked_results)
-        no_doi_found = total_checked == 0
+        no_doi_found = len(results) == 0
         return {
-            "total": total_checked,  # backward-compatible alias
+            "total": total_checked,
             "total_checked": total_checked,
             "no_doi_found": no_doi_found,
+            "unresolved": len(unresolved_results),
+            "scan_skipped": any(getattr(r, "scan_skipped", False) for r in unresolved_results) and total_checked == 0,
             "retracted": sum(1 for r in checked_results if r.status == "RETRACTED"),
             "concerns": sum(1 for r in checked_results if r.status == "CONCERN"),
             "corrected": sum(1 for r in checked_results if r.status == "CORRECTED"),
@@ -394,6 +483,10 @@ class RetractionScanner:
             "critical_risk": sum(1 for r in checked_results if r.risk_level_enum == RiskLevel.CRITICAL),
             "high_risk": sum(1 for r in checked_results if r.risk_level_enum == RiskLevel.HIGH),
             "pubpeer_discussions": sum(1 for r in checked_results if r.pubpeer_info and r.pubpeer_info.has_comments),
+            "pubpeer_lookup_failed": sum(
+                1 for r in results
+                if r.pubpeer_info and r.pubpeer_info.status == "lookup_failed"
+            ),
         }
 
     def close(self) -> None:
@@ -407,3 +500,9 @@ class RetractionScanner:
 
 # Singleton
 retraction_scanner = RetractionScanner()
+
+
+def scan_verified_retractions(text: str) -> list[RetractionResult]:
+    from app.services.tools.citation_checker import citation_checker
+
+    return retraction_scanner.scan_verified(text, citation_checker.verify_doi_exact)

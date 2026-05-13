@@ -10,6 +10,22 @@ Organized by domain:
 """
 
 from app.schemas.admin import AdminOverview, AdminUserOut
+from app.schemas.academic import (
+    CrawlJobOut,
+    CrawlReindexRequest,
+    CrawlRunRequest,
+    ManuscriptAssessmentOut,
+    ManuscriptOut,
+    ManuscriptParseRequest,
+    ManuscriptParseResponse,
+    ManuscriptUploadResponse,
+    MatchCandidateOut,
+    MatchRequestCreate,
+    MatchRequestOut,
+    MatchResultResponse,
+    VenueSearchItem,
+    VenueSearchResponse,
+)
 from app.schemas.auth import PromoteUserRequest, Token, UserCreate, UserOut
 from app.schemas.chat import (
     ChatCompletionRequest,
@@ -44,7 +60,19 @@ __all__ = [
     # Admin
     "AdminOverview",
     "AdminUserOut",
+    "CrawlJobOut",
+    "CrawlReindexRequest",
+    "CrawlRunRequest",
     # Auth
+    "ManuscriptAssessmentOut",
+    "ManuscriptOut",
+    "ManuscriptParseRequest",
+    "ManuscriptParseResponse",
+    "ManuscriptUploadResponse",
+    "MatchCandidateOut",
+    "MatchRequestCreate",
+    "MatchRequestOut",
+    "MatchResultResponse",
     "PromoteUserRequest",
     "Token",
     "UserCreate",
@@ -77,4 +105,6 @@ __all__ = [
     # Upload
     "FileAttachmentOut",
     "FileUploadResponse",
+    "VenueSearchItem",
+    "VenueSearchResponse",
 ]

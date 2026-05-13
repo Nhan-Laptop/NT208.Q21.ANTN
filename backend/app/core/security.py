@@ -5,12 +5,17 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 import bcrypt
-from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
+
+try:
+    from jose import JWTError, jwt
+except ImportError:  # pragma: no cover - optional dependency guard
+    JWTError = Exception  # type: ignore[assignment]
+    jwt = None  # type: ignore[assignment]
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_v1_str}/auth/login")
 
@@ -28,6 +33,8 @@ def get_password_hash(password: str) -> str:
 
 
 def create_access_token(subject: str, expires_delta: timedelta | None = None) -> str:
+    if jwt is None:
+        raise SecurityError("python-jose is required for token creation.")
     now = datetime.now(timezone.utc)
     expire = now + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
     payload = {
@@ -40,6 +47,8 @@ def create_access_token(subject: str, expires_delta: timedelta | None = None) ->
 
 
 def decode_access_token(token: str) -> str:
+    if jwt is None:
+        raise SecurityError("python-jose is required for token decoding.")
     try:
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
         sub = payload.get("sub")

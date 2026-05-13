@@ -1,13 +1,22 @@
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+
+try:
+    from sqlalchemy.orm import DeclarativeBase
+except ImportError:  # pragma: no cover - compatibility for older SQLAlchemy
+    DeclarativeBase = None  # type: ignore[assignment]
+    from sqlalchemy.orm import declarative_base
 
 from app.core.config import settings
 
 
-class Base(DeclarativeBase):
-    pass
+if DeclarativeBase is not None:
+    class Base(DeclarativeBase):
+        pass
+else:  # pragma: no cover - compatibility for older SQLAlchemy
+    Base = declarative_base()
 
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}

@@ -1,38 +1,130 @@
-[
-  {
-    "publisher": "Elsevier",
-    "url": "https://www.sciencedirect.com/browse/calls-for-papers",
-    "base_url": "https://www.sciencedirect.com",
-    "selectors": {
-      "item_container": "div.call-for-papers-item, li.call-for-papers-result, article, div[class*='call-for-papers'], div[class*='result']",
-      "title": "h2 a, h3 a, a.anchor, a[href*='/special-issue/call-for-papers'], a[href*='/journal/']",
-      "deadline": "[class*='deadline'], dd, time, span[class*='date']",
-      "scope": "p, [class*='description'], [class*='summary'], [class*='scope']",
-      "link": "h2 a, h3 a, a.anchor, a[href*='/special-issue/call-for-papers'], a[href*='/journal/']"
+{
+  "sources": [
+    {
+      "id": "scimago",
+      "name": "SCImago Journal Rank",
+      "base_url": "https://www.scimagojr.com/journalrank.php",
+      "source_type": "journal_rank",
+      "access_mode": "public_download",
+      "crawl_strategy": "discover_official_csv_then_parse",
+      "allowed_domains": ["www.scimagojr.com", "scimagojr.com"],
+      "rate_limit": 2,
+      "enabled": true,
+      "priority": 10,
+      "parser": "scimago",
+      "expected_entities": ["venue", "venue_metric"],
+      "notes": "Prefer SCImago export endpoint when public; record blocked HTTP statuses without fallback data.",
+      "config": {
+        "download_urls": ["https://www.scimagojr.com/journalrank.php?out=xls"]
+      }
+    },
+    {
+      "id": "scopus",
+      "name": "Elsevier Scopus Content",
+      "base_url": "https://www.elsevier.com/products/scopus/content#4-titles-on-scopus",
+      "source_type": "journal_index",
+      "access_mode": "public_download",
+      "crawl_strategy": "discover_public_title_list_workbooks",
+      "allowed_domains": ["www.elsevier.com", "elsevier.com", "downloads.ctfassets.net"],
+      "rate_limit": 3,
+      "enabled": true,
+      "priority": 20,
+      "parser": "scopus",
+      "expected_entities": ["venue"],
+      "notes": "Only parse title-list downloads that are linked publicly from Elsevier pages."
+    },
+    {
+      "id": "clarivate_mjl",
+      "name": "Clarivate Web of Science Master Journal List",
+      "base_url": "https://mjl.clarivate.com/collection-list-downloads",
+      "source_type": "journal_index",
+      "access_mode": "manual_import",
+      "crawl_strategy": "manual_csv_xlsx_import",
+      "allowed_domains": ["mjl.clarivate.com"],
+      "rate_limit": 5,
+      "enabled": true,
+      "priority": 30,
+      "parser": "clarivate",
+      "expected_entities": ["venue"],
+      "notes": "Clarivate MJL may require registration/login. Do not bypass auth; import user-downloaded files from data/imports/clarivate."
+    },
+    {
+      "id": "sciencedirect_cfp",
+      "name": "ScienceDirect Calls for Papers",
+      "base_url": "https://www.sciencedirect.com/browse/calls-for-papers",
+      "source_type": "cfp",
+      "access_mode": "public_html",
+      "crawl_strategy": "html_list_plus_allowed_detail_pages",
+      "allowed_domains": ["www.sciencedirect.com", "sciencedirect.com"],
+      "rate_limit": 3,
+      "enabled": true,
+      "priority": 40,
+      "parser": "sciencedirect_cfp",
+      "expected_entities": ["cfp"],
+      "notes": "Important CFP source; detail pages are fetched only when public and robots-allowed."
+    },
+    {
+      "id": "core_ranks",
+      "name": "CORE Conference Ranks",
+      "base_url": "https://portal.core.edu.au/conf-ranks/",
+      "source_type": "conference_rank",
+      "access_mode": "public_html",
+      "crawl_strategy": "discover_csv_export_then_html_table",
+      "allowed_domains": ["portal.core.edu.au"],
+      "rate_limit": 3,
+      "enabled": true,
+      "priority": 50,
+      "parser": "core_ranks",
+      "expected_entities": ["venue", "venue_metric"],
+      "notes": "Prefer public export endpoints; otherwise parse visible HTML tables without interactive bypass."
+    },
+    {
+      "id": "elsevier_journal_finder",
+      "name": "Elsevier Journal Finder",
+      "base_url": "https://journalfinder.elsevier.com/",
+      "source_type": "external_recommender",
+      "access_mode": "interactive_only",
+      "crawl_strategy": "no_bulk_crawl_document_external_tool",
+      "allowed_domains": ["journalfinder.elsevier.com"],
+      "rate_limit": 5,
+      "enabled": true,
+      "priority": 60,
+      "parser": "elsevier_journal_finder",
+      "expected_entities": [],
+      "notes": "Interactive recommender; use only via official integration/manual workflow if permission is granted."
+    },
+    {
+      "id": "ieee_publication_recommender",
+      "name": "IEEE Publication Recommender",
+      "base_url": "https://publication-recommender.ieee.org/home",
+      "source_type": "external_recommender",
+      "access_mode": "interactive_only",
+      "crawl_strategy": "no_bulk_crawl_document_external_tool",
+      "allowed_domains": ["publication-recommender.ieee.org"],
+      "rate_limit": 5,
+      "enabled": true,
+      "priority": 70,
+      "parser": "ieee_publication_recommender",
+      "expected_entities": [],
+      "notes": "Interactive recommender; no bulk scraping or fabricated recommendations."
+    },
+    {
+      "id": "springer",
+      "name": "Springer Link Journals",
+      "base_url": "https://link.springer.com/journals",
+      "source_type": "journal_directory",
+      "access_mode": "public_html",
+      "crawl_strategy": "incremental_alphabet_html",
+      "allowed_domains": ["link.springer.com"],
+      "rate_limit": 3,
+      "enabled": true,
+      "priority": 80,
+      "parser": "springer",
+      "expected_entities": ["venue"],
+      "notes": "Crawl A-Z pages such as /journals/a/1 when public and robots-allowed.",
+      "config": {
+        "pages_per_letter": 1
+      }
     }
-  },
-  {
-    "publisher": "MDPI",
-    "url": "https://www.mdpi.com/about/announcements/call_for_papers",
-    "base_url": "https://www.mdpi.com",
-    "selectors": {
-      "item_container": "div.announcement-item, article, div[class*='announcement'], div[class*='special'], div.card",
-      "title": "h2 a, h3 a, a[href*='/special_issue/'], a[href*='/announcement/'], a[href*='/journal/']",
-      "deadline": "time, [class*='deadline'], [class*='date']",
-      "scope": "p, [class*='description'], [class*='abstract'], [class*='summary'], [class*='excerpt']",
-      "link": "h2 a, h3 a, a[href*='/special_issue/'], a[href*='/announcement/'], a[href*='/journal/']"
-    }
-  },
-  {
-    "publisher": "IEEE",
-    "url": "https://www.computer.org/publications/author-resources/calls-for-papers",
-    "base_url": "https://www.computer.org",
-    "selectors": {
-      "item_container": "div.cfp-item, article.cfp-entry, article, div[class*='cfp'], div[class*='call-for-papers'], div[class*='card']",
-      "title": "h2 a, h3 a, h4 a, a[href*='/call-for-papers'], a[href*='/conference/'], a[href*='/journal/']",
-      "deadline": "[class*='deadline'], time, [class*='date']",
-      "scope": "p, [class*='description'], [class*='summary'], [class*='content']",
-      "link": "h2 a, h3 a, h4 a, a[href*='/call-for-papers'], a[href*='/conference/'], a[href*='/journal/']"
-    }
-  }
-]
+  ]
+}
