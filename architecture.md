@@ -25,6 +25,7 @@ Nếu bất kỳ phần/diagram cũ bên dưới mâu thuẫn, ưu tiên snapsho
 - Pseudo tool syntax không có native `tool_calls` được coi là đường đi không hợp lệ và sẽ chuyển fallback hoặc trả warning hợp lệ.
 - Grammar corrected_text dùng cơ chế auto-apply bảo thủ: chỉ áp dụng low-risk fixes; các sửa đổi rủi ro (thuật ngữ khoa học, acronym, DOI-like identifiers...) chỉ được report trong `issues`, không tự sửa.
 - AI-writing verdict là ước lượng xác suất từ mô hình/heuristics, không được diễn đạt như bằng chứng kết luận tuyệt đối.
+- Citation verification có hai nhánh độc lập: (a) **DOI exact** qua Crossref/OpenAlex DOI lookup (`DOI_VERIFIED` / `DOI_NOT_FOUND`, không fallback fuzzy); (b) **No-DOI metadata matching** qua `search_crossref_candidates()` + `search_openalex_candidates()` rồi `score_candidate()` (title 0.45 · authors 0.25 · year 0.15 · venue 0.10 · vol/pages 0.05) + `choose_best_match()` với safety caps. Status enum: `METADATA_VERIFIED` / `LIKELY_MATCH` / `POSSIBLE_MATCH` / `AMBIGUOUS_MATCH` / `UNVERIFIED_NO_DOI` / `NO_MATCH_FOUND` / `PARSE_FAILED`. **Confidence-based, không phải xác minh tuyệt đối.** Crossref/OpenAlex fail độc lập, không crash; không synth DOI/metadata; không dùng LLM để parse/verify (CODEX.md Directive 1).
 - Retraction scan khi không có DOI được biểu diễn rõ là `total_checked=0` và `no_doi_found=true`.
 - Journal vector pipeline: ChromaDB `journal_cfps` + `allenai/specter2_base` (768-dim) cho ingest và retrieval.
 - Heuristic fallback: `all-MiniLM-L6-v2` chỉ còn dùng cho fallback intent classification (`heuristic_router.py`), không dùng cho JournalFinder vector retrieval.
@@ -266,7 +267,7 @@ graph LR
 
 | Tool | File | ML Model / API | Chức năng |
 |------|------|----------------|-----------|
-| **CitationChecker** | `tools/citation_checker.py` | PyAlex + Habanero + httpx | Verify citations: extract DOI → query OpenAlex/Crossref → fuzzy match → confidence score |
+| **CitationChecker** | `tools/citation_checker.py` | PyAlex + Habanero + httpx | Hai nhánh xác minh: (1) **DOI exact** — Crossref/OpenAlex DOI lookup, trả `DOI_VERIFIED`/`DOI_NOT_FOUND`. (2) **No-DOI metadata matching** — `parse_reference_metadata()` → `search_crossref_candidates()` + `search_openalex_candidates()` → merge dedupe → `score_candidate()` (title 0.45 · authors 0.25 · year 0.15 · venue 0.10 · vol/pages 0.05) → `choose_best_match()` với safety caps (title_sim < 0.75 ⇒ max `POSSIBLE_MATCH`; author_overlap=0 và year_score<1 ⇒ max `POSSIBLE_MATCH`; top1−top2<0.05 ⇒ `AMBIGUOUS_MATCH`). Status enum: `METADATA_VERIFIED`/`LIKELY_MATCH`/`POSSIBLE_MATCH`/`AMBIGUOUS_MATCH`/`UNVERIFIED_NO_DOI`/`NO_MATCH_FOUND`/`PARSE_FAILED`. Crossref/OpenAlex fail độc lập, không crash. Confidence-based, không phải xác minh tuyệt đối. Tôn trọng CODEX.md Directive 1 (zero hallucination) — không synth DOI/metadata, không dùng LLM để parse/verify. |
 | **JournalFinder** | `tools/journal_finder.py` | ChromaDB + SentenceTransformer (`allenai/specter2_base`) | Recommend journals: query ChromaDB `journal_cfps` collection with Specter2 embeddings (768-dim) + bounded similarity scoring. Data seeded by `backend/crawler/` pipeline |
 | **RetractionScanner** | `tools/retraction_scan.py` | Crossref + OpenAlex + PubPeer | Scan DOIs: check retraction status, risk level, title-based detection, PubPeer comments |
 | **AIWritingDetector** | `tools/ai_writing_detector.py` | RoBERTa (`roberta-base-openai-detector`) | Detect AI text: ensemble 70% ML (RoBERTa) + 30% rule-based (7 features) |
@@ -1295,18 +1296,23 @@ graph TB
             HabHTTP -->|"success"| DOI_OK
         end
 
-        subgraph VERIFY_AUTHOR["Author-Year Verification Path"]
-            PyAlexSDK["PyAlex SDK<br/>Works().search_filter(author, year)"]
-            PyAlexHTTP["httpx fallback<br/>GET openalex.org/works?search="]
-            FuzzyMatch["Fuzzy Author Match<br/>difflib.SequenceMatcher"]
-            StatusDecide["VALID (≥0.85) | PARTIAL_MATCH (≥0.5)<br/>| UNVERIFIED | HALLUCINATED"]
-            PyAlexSDK -->|"fail"| PyAlexHTTP
-            PyAlexSDK -->|"results"| FuzzyMatch
-            PyAlexHTTP -->|"results"| FuzzyMatch
-            FuzzyMatch --> StatusDecide
+        subgraph VERIFY_META["No-DOI Metadata Matching Path"]
+            ParseRef["parse_reference_metadata(raw)<br/>title/authors/year/venue/vol/pages<br/>(heuristic — no LLM)"]
+            CRSearch["search_crossref_candidates(ref)<br/>Habanero + httpx fallback"]
+            OASearch["search_openalex_candidates(ref)<br/>pyalex + httpx fallback"]
+            MergeDedup["_merge_candidates()<br/>dedupe by DOI / normalized title"]
+            Score["score_candidate()<br/>title 0.45 · authors 0.25 · year 0.15<br/>· venue 0.10 · vol/pages 0.05"]
+            ChooseBest["choose_best_match()<br/>+ safety caps + AMBIGUOUS detection"]
+            MetaStatus["METADATA_VERIFIED · LIKELY_MATCH<br/>POSSIBLE_MATCH · AMBIGUOUS_MATCH<br/>UNVERIFIED_NO_DOI · NO_MATCH_FOUND<br/>PARSE_FAILED"]
+            ParseRef -->|"low conf / no title"| MetaStatus
+            ParseRef --> CRSearch
+            ParseRef --> OASearch
+            CRSearch --> MergeDedup
+            OASearch --> MergeDedup
+            MergeDedup --> Score --> ChooseBest --> MetaStatus
         end
 
-        Stats["get_statistics()<br/>verified / hallucinated / unverified / total"]
+        Stats["get_statistics()<br/>doi_verified · metadata_verified · likely_match<br/>possible_match · ambiguous_match · no_match_found<br/>parse_failed · unverified_no_doi · total<br/>(verified_rate, risk_rate)"]
     end
 
     subgraph PERSIST["📊 Endpoint Processing"]
@@ -3255,36 +3261,41 @@ graph LR
         HTTPX_CR --> CR_Result
     end
 
-    subgraph OPENALEX_CHAIN["🔬 OpenAlex Verification (Author path)"]
-        PyAlexSDK["PyAlex SDK<br/>Works().search_filter()"]
-        PyAlexFail{"Success?"}
-        HTTPX_OA["httpx fallback<br/>GET api.openalex.org<br/>/works?search="]
-        FuzzyMatch["Fuzzy Author Match<br/>SequenceMatcher"]
-        OA_Result["VALID (≥0.85)<br/>PARTIAL_MATCH (≥0.5)<br/>UNVERIFIED / HALLUCINATED"]
+    subgraph META_CHAIN["🔬 No-DOI Metadata Matching"]
+        ParseMeta["parse_reference_metadata()<br/>title/authors/year/venue/vol/pages<br/>(heuristic, no LLM)"]
+        ConfGate{"confidence > 0.4<br/>and has title?"}
+        CRCands["search_crossref_candidates()<br/>Habanero / httpx (fail-safe)"]
+        OACands["search_openalex_candidates()<br/>pyalex / httpx (fail-safe)"]
+        Merge2["_merge_candidates()<br/>dedupe by DOI / norm-title"]
+        ScoreEngine["score_candidate()<br/>0.45·title + 0.25·authors<br/>+ 0.15·year + 0.10·venue<br/>+ 0.05·vol/pages"]
+        Caps["choose_best_match()<br/>safety caps + AMBIGUOUS gap<br/>(< 0.05)"]
+        MetaResult["METADATA_VERIFIED · LIKELY<br/>POSSIBLE · AMBIGUOUS<br/>UNVERIFIED_NO_DOI<br/>NO_MATCH_FOUND · PARSE_FAILED"]
 
-        PyAlexSDK --> PyAlexFail
-        PyAlexFail -->|"Yes"| FuzzyMatch
-        PyAlexFail -->|"No"| HTTPX_OA
-        HTTPX_OA --> FuzzyMatch
-        FuzzyMatch --> OA_Result
+        ParseMeta --> ConfGate
+        ConfGate -->|"No"| MetaResult
+        ConfGate -->|"Yes"| CRCands
+        ConfGate -->|"Yes"| OACands
+        CRCands --> Merge2
+        OACands --> Merge2
+        Merge2 --> ScoreEngine --> Caps --> MetaResult
     end
 
     subgraph OUTPUT["📤 Output"]
         Merge["Merge results<br/>get_statistics()"]
-        Schema["CitationCheckResult<br/>→ CitationItem (Pydantic)"]
+        Schema["CitationCheckResult<br/>(+ verification_mode, matched_*,<br/>candidates, evidence_breakdown,<br/>warning)<br/>→ CitationItem (Pydantic)"]
     end
 
     %% Flow
     UserText --> RegexEngine
     DOI_Pat -->|"has DOI"| Hab
-    APA_Pat -->|"author-year"| PyAlexSDK
-    IEEE_Pat -->|"author-year"| PyAlexSDK
-    Num_Pat -->|"author-year"| PyAlexSDK
-    Van_Pat -->|"author-year"| PyAlexSDK
-    Paren_Pat -->|"author-year"| PyAlexSDK
+    APA_Pat -->|"no DOI"| ParseMeta
+    IEEE_Pat -->|"no DOI"| ParseMeta
+    Num_Pat -->|"no DOI"| ParseMeta
+    Van_Pat -->|"no DOI"| ParseMeta
+    Paren_Pat -->|"no DOI"| ParseMeta
 
     CR_Result --> Merge
-    OA_Result --> Merge
+    MetaResult --> Merge
     Merge --> Schema
 
     %% Styles
@@ -3298,9 +3309,9 @@ graph LR
     class UserText input
     class RegexEngine,DOI_Pat,APA_Pat,IEEE_Pat,Num_Pat,Van_Pat,Paren_Pat extract
     class Hab,HTTPX_CR,CR_Result crossref
-    class PyAlexSDK,HTTPX_OA,FuzzyMatch,OA_Result openalex
+    class ParseMeta,CRCands,OACands,Merge2,ScoreEngine,Caps,MetaResult openalex
     class Merge,Schema output
-    class HabFail,PyAlexFail fail
+    class HabFail,ConfGate fail
 ```
 
 ### 7.15 Component Diagram — Retraction Scan đa nguồn

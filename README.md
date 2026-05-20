@@ -63,7 +63,7 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 | Feature | Description | Powered By |
 |---------|-------------|------------|
 | 💬 **General Q&A** | Conversational AI for research questions with backend context protection (4-message router window, input truncation, pass-by-reference for long/file text) | Groq (LLaMA 3.1) |
-| 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI) from text → verify against authoritative databases → detect hallucinated references | OpenAlex + Crossref |
+| 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI). DOI inputs → exact Crossref/OpenAlex lookup. References **without DOI** → metadata matching: Crossref + OpenAlex candidate search → weighted score (title 0.45 · authors 0.25 · year 0.15 · venue 0.10 · vol/pages 0.05) → safety-capped verdict (`METADATA_VERIFIED` · `LIKELY_MATCH` · `POSSIBLE_MATCH` · `AMBIGUOUS_MATCH` · `UNVERIFIED_NO_DOI` · `NO_MATCH_FOUND` · `PARSE_FAILED`). Confidence-based, **not absolute verification**. Zero-hallucination (CODEX.md Directive 1) — never synthesize DOI/metadata; API failures degrade gracefully. | OpenAlex + Crossref |
 | 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by ChromaDB semantic search + domain match | ChromaDB + SPECTER2 (`allenai/specter2_base`) |
 | 🔍 **Retraction Scanning** | Check DOIs against retraction databases → multi-source risk assessment (NONE → CRITICAL) | Crossref + OpenAlex + PubPeer |
 | 🤖 **AI Writing Detection** | Ensemble estimate: 70% RoBERTa ML classifier + 30% rule-based heuristics (7 linguistic features) → 5-level probabilistic verdict scale (not definitive proof) | RoBERTa + Custom Rules |
@@ -553,7 +553,7 @@ python security/pentest/quick_audit.py --base-url http://localhost:8000
 
 - [x] JWT Authentication + RBAC/ABAC authorization
 - [x] Chat AI with Groq LLaMA 3.1 (context memory, file-aware responses)
-- [x] Citation Verification (6 regex patterns, OpenAlex + Crossref)
+- [x] Citation Verification (6 regex patterns; DOI exact lookup + no-DOI metadata matching via Crossref+OpenAlex search)
 - [x] Journal Matching (ChromaDB vector search, dynamic crawler pipeline)
 - [x] Retraction Scanning (Crossref + OpenAlex + PubPeer, risk levels)
 - [x] AI Writing Detection (RoBERTa ensemble, 7 heuristics)

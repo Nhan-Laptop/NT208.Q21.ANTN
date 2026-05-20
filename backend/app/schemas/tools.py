@@ -18,6 +18,17 @@ class CitationItem(BaseModel):
     year: int | None = None
     source: str | None = None
     confidence: float = 0.0
+    # No-DOI metadata-matching fields (all optional; backward compatible).
+    verification_mode: str | None = None
+    input_doi: str | None = None
+    matched_doi: str | None = None
+    matched_title: str | None = None
+    matched_year: int | None = None
+    matched_authors: list[str] = []
+    matched_venue: str | None = None
+    candidates: list[dict[str, Any]] = []
+    warning: str | None = None
+    evidence_breakdown: dict[str, float] | None = None
 
 
 class CitationReportResponse(BaseModel):

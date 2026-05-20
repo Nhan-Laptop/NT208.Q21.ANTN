@@ -17,11 +17,30 @@ def format_citation_summary(stats: dict[str, Any], *, no_citation_found: bool = 
 
     valid = _count(stats, "valid")
     doi_verified = _count(stats, "doi_verified")
-    verified = valid + doi_verified
-    partial = _count(stats, "partial_match")
-    hallucinated = _count(stats, "hallucinated")
-    unverified = _count(stats, "unverified")
+    metadata_verified = _count(stats, "metadata_verified")
+    likely_match = _count(stats, "likely_match")
+    possible_match = _count(stats, "possible_match")
+    ambiguous_match = _count(stats, "ambiguous_match")
+    unverified_no_doi = _count(stats, "unverified_no_doi")
+    no_match_found = _count(stats, "no_match_found")
+    parse_failed = _count(stats, "parse_failed")
+    verified = valid + doi_verified + metadata_verified + likely_match
+    partial = _count(stats, "partial_match") + possible_match + ambiguous_match
+    hallucinated = _count(stats, "hallucinated") + no_match_found
+    unverified = _count(stats, "unverified") + unverified_no_doi + parse_failed
     doi_not_found = _count(stats, "doi_not_found")
+    metadata_match_total = (
+        metadata_verified + likely_match + possible_match + ambiguous_match
+        + unverified_no_doi + no_match_found + parse_failed
+    )
+    metadata_suffix = ""
+    if metadata_match_total > 0:
+        metadata_suffix = (
+            f" Trong đó có {metadata_match_total} mục không kèm DOI được xác minh qua metadata "
+            f"(METADATA_VERIFIED={metadata_verified}, LIKELY={likely_match}, "
+            f"POSSIBLE={possible_match}, AMBIGUOUS={ambiguous_match}, "
+            f"NO_MATCH={no_match_found}, PARSE_FAILED={parse_failed})."
+        )
 
     if doi_not_found > 0 and verified == 0 and partial == 0:
         return (
@@ -46,7 +65,8 @@ def format_citation_summary(stats: dict[str, Any], *, no_citation_found: bool = 
     if partial > 0:
         return (
             f"Mình đã kiểm tra {total} mục trích dẫn. Có {verified} mục khớp rõ ràng, "
-            f"nhưng {partial} mục chỉ khớp một phần nên cần rà soát thủ công thêm. "
+            f"nhưng {partial} mục chỉ khớp một phần nên cần rà soát thủ công thêm."
+            f"{metadata_suffix} "
             "Hãy ưu tiên kiểm tra lại DOI, tiêu đề và thông tin tác giả của các mục chưa chắc chắn."
         )
 
@@ -63,7 +83,8 @@ def format_citation_summary(stats: dict[str, Any], *, no_citation_found: bool = 
         )
 
     return (
-        f"Mình đã kiểm tra {total} mục trích dẫn và chưa thấy dấu hiệu bất thường rõ ràng. "
+        f"Mình đã kiểm tra {total} mục trích dẫn và chưa thấy dấu hiệu bất thường rõ ràng."
+        f"{metadata_suffix} "
         "Bạn có thể xem phần chi tiết để đối chiếu từng mục nếu cần."
     )
 

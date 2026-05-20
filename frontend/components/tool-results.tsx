@@ -438,6 +438,15 @@ export function DoiMetadataCard({ payload }: { payload: DoiMetadataPayload }) {
  * CitationReportCard — for citation_report results
  * ==================================================================== */
 
+interface CitationCandidate {
+  source?: string;
+  title?: string | null;
+  authors?: string[];
+  year?: number | null;
+  venue?: string | null;
+  doi?: string | null;
+}
+
 interface CitationItem {
   raw_text?: string;
   citation?: string;
@@ -448,13 +457,31 @@ interface CitationItem {
   title?: string;
   source?: string;
   details?: string;
+  // No-DOI metadata-matching fields (optional, backward compatible)
+  verification_mode?: string | null;
+  input_doi?: string | null;
+  matched_doi?: string | null;
+  matched_title?: string | null;
+  matched_year?: number | null;
+  matched_authors?: string[];
+  matched_venue?: string | null;
+  candidates?: CitationCandidate[];
+  warning?: string | null;
+  evidence_breakdown?: Record<string, number> | null;
 }
+
+const GREEN_STATUSES = new Set([
+  "VERIFIED", "FOUND", "DOI_VERIFIED", "VALID", "METADATA_VERIFIED",
+]);
+const RED_STATUSES = new Set([
+  "HALLUCINATED", "NOT_FOUND", "DOI_NOT_FOUND", "NO_MATCH_FOUND", "PARSE_FAILED",
+]);
 
 function statusIcon(status: string) {
   const s = status.toUpperCase();
-  if (s === "VERIFIED" || s === "FOUND" || s === "DOI_VERIFIED" || s === "VALID")
+  if (GREEN_STATUSES.has(s) || s === "LIKELY_MATCH")
     return <CheckCircle2 size={14} className="text-emerald-500" />;
-  if (s === "HALLUCINATED" || s === "NOT_FOUND" || s === "DOI_NOT_FOUND")
+  if (RED_STATUSES.has(s))
     return <XCircle size={14} className="text-red-500" />;
   return <HelpCircle size={14} className="text-amber-500" />;
 }
@@ -468,17 +495,27 @@ function citationStatusLabel(status: string) {
   if (s === "HALLUCINATED" || s === "NOT_FOUND") return "Chưa tìm thấy nguồn";
   if (s === "UNVERIFIED") return "Chưa xác minh được";
   if (s === "NO_CITATION_FOUND") return "Thiếu thông tin";
+  // Metadata-matching statuses
+  if (s === "METADATA_VERIFIED") return "Khớp metadata (cao)";
+  if (s === "LIKELY_MATCH") return "Có khả năng khớp";
+  if (s === "POSSIBLE_MATCH") return "Khớp khả dĩ";
+  if (s === "AMBIGUOUS_MATCH") return "Trùng nhiều ứng viên";
+  if (s === "UNVERIFIED_NO_DOI") return "Không đủ tin cậy (no DOI)";
+  if (s === "NO_MATCH_FOUND") return "Không tìm thấy nguồn";
+  if (s === "PARSE_FAILED") return "Không phân tích được";
   return status || "Chưa rõ";
 }
 
 function statusBadge(status: string) {
   const s = status.toUpperCase();
-  const cls =
-    s === "VERIFIED" || s === "FOUND" || s === "DOI_VERIFIED" || s === "VALID"
-      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400"
-      : s === "HALLUCINATED" || s === "NOT_FOUND" || s === "DOI_NOT_FOUND"
-        ? "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
-        : "bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400";
+  let cls: string;
+  if (GREEN_STATUSES.has(s) || s === "LIKELY_MATCH") {
+    cls = "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400";
+  } else if (RED_STATUSES.has(s)) {
+    cls = "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400";
+  } else {
+    cls = "bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400";
+  }
   return (
     <span className={clsx("inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded", cls)}>
       {statusIcon(status)}
@@ -487,14 +524,94 @@ function statusBadge(status: string) {
   );
 }
 
+function MetadataMatchDetails({ c }: { c: CitationItem }) {
+  const ev = c.evidence_breakdown ?? null;
+  const cands = c.candidates ?? [];
+  const hasMatched = c.matched_title || c.matched_doi || c.matched_year || c.matched_venue;
+
+  return (
+    <div className="mt-2 space-y-2">
+      {hasMatched && (
+        <div className="text-[11px] text-text-secondary dark:text-dark-text-secondary space-y-0.5">
+          {c.matched_title && (
+            <div>
+              <span className="text-text-tertiary dark:text-dark-text-tertiary">Matched:</span>{" "}
+              <span className="text-text-primary dark:text-dark-text-primary">{c.matched_title}</span>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+            {c.matched_doi && <span>DOI: {c.matched_doi}</span>}
+            {c.matched_year != null && <span>Năm: {c.matched_year}</span>}
+            {c.matched_venue && <span>Tạp chí: {c.matched_venue}</span>}
+          </div>
+        </div>
+      )}
+
+      {ev && (
+        <details className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
+          <summary className="cursor-pointer select-none">Chi tiết điểm khớp</summary>
+          <div className="mt-1 space-y-0.5">
+            {[
+              ["Title", ev.title_similarity],
+              ["Authors", ev.author_overlap],
+              ["Year", ev.year_score],
+              ["Venue", ev.venue_similarity],
+              ["Vol/Pages", ev.page_volume_bonus],
+              ["Tổng", ev.final_score],
+            ].map(([label, value]) => {
+              const v = typeof value === "number" ? value : 0;
+              return (
+                <div key={label as string} className="flex items-center gap-2">
+                  <span className="w-16">{label}</span>
+                  <div className="flex-1 h-1.5 bg-amber-100/60 dark:bg-amber-900/20 rounded">
+                    <div
+                      className="h-1.5 bg-amber-400 dark:bg-amber-500 rounded"
+                      style={{ width: `${Math.max(0, Math.min(1, v)) * 100}%` }}
+                    />
+                  </div>
+                  <span className="w-10 text-right">{(v * 100).toFixed(0)}%</span>
+                </div>
+              );
+            })}
+          </div>
+        </details>
+      )}
+
+      {cands.length > 0 && (
+        <details className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
+          <summary className="cursor-pointer select-none">Ứng viên khác (top {cands.length})</summary>
+          <ol className="mt-1 space-y-1 list-decimal pl-4">
+            {cands.slice(0, 3).map((cand, idx) => (
+              <li key={idx}>
+                <span className="text-text-primary dark:text-dark-text-primary">
+                  {cand.title || "(không có tiêu đề)"}
+                </span>
+                <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px]">
+                  {cand.year != null && <span>Năm: {cand.year}</span>}
+                  {cand.doi && <span>DOI: {cand.doi}</span>}
+                  {cand.source && <span>Nguồn: {cand.source}</span>}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+
+      {c.warning && (
+        <p className="text-[11px] text-amber-600 dark:text-amber-400">{c.warning}</p>
+      )}
+    </div>
+  );
+}
+
 export function CitationReportCard({ citations }: { citations: CitationItem[] }) {
   const verified = citations.filter((c) => {
     const s = (c.status ?? "").toUpperCase();
-    return s === "VERIFIED" || s === "FOUND" || s === "DOI_VERIFIED" || s === "VALID";
+    return GREEN_STATUSES.has(s) || s === "LIKELY_MATCH";
   }).length;
   const hallucinated = citations.filter((c) => {
     const s = (c.status ?? "").toUpperCase();
-    return s === "HALLUCINATED" || s === "NOT_FOUND" || s === "DOI_NOT_FOUND";
+    return RED_STATUSES.has(s);
   }).length;
 
   return (
@@ -509,24 +626,35 @@ export function CitationReportCard({ citations }: { citations: CitationItem[] })
           <span className="text-[10px] text-red-600 dark:text-red-400">✗{hallucinated}</span>
         )}
       </div>
-      {citations.map((c, i) => (
-        <div
-          key={i}
-          className="rounded-xl border border-border dark:border-dark-border bg-surface dark:bg-dark-surface p-3"
-        >
-          <div className="flex items-start justify-between gap-2 mb-1">
-            <p className="text-xs text-text-primary dark:text-dark-text-primary line-clamp-2">
-              {c.raw_text || c.citation_text || c.citation || "Trích dẫn"}
-            </p>
-            {statusBadge(c.status ?? "UNKNOWN")}
+      {citations.map((c, i) => {
+        const isMetadataMatch = c.verification_mode === "metadata_match";
+        return (
+          <div
+            key={i}
+            className="rounded-xl border border-border dark:border-dark-border bg-surface dark:bg-dark-surface p-3"
+          >
+            <div className="flex items-start justify-between gap-2 mb-1">
+              <p className="text-xs text-text-primary dark:text-dark-text-primary line-clamp-2">
+                {c.raw_text || c.citation_text || c.citation || "Trích dẫn"}
+              </p>
+              <div className="flex items-center gap-1 shrink-0">
+                {isMetadataMatch && (
+                  <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400">
+                    No DOI · Metadata match
+                  </span>
+                )}
+                {statusBadge(c.status ?? "UNKNOWN")}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
+              {c.doi && <span>DOI: {c.doi}</span>}
+              {c.confidence != null && <span>Độ tin cậy: {(c.confidence * 100).toFixed(0)}%</span>}
+              {c.source && <span>Nguồn: {c.source}</span>}
+            </div>
+            {isMetadataMatch && <MetadataMatchDetails c={c} />}
           </div>
-          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
-            {c.doi && <span>DOI: {c.doi}</span>}
-            {c.confidence != null && <span>Độ tin cậy: {(c.confidence * 100).toFixed(0)}%</span>}
-            {c.source && <span>Nguồn: {c.source}</span>}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

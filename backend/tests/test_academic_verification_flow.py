@@ -59,26 +59,29 @@ class AcademicVerificationFlowTest(unittest.TestCase):
         self.assertIn("chưa tìm thấy bản ghi học thuật khớp hoàn toàn", friendly)
         self.assertIn("không dùng kết quả gần giống", friendly)
 
-    def test_non_doi_citation_text_keeps_fuzzy_partial_match_path(self) -> None:
-        checker = CitationChecker()
-        partial = CitationCheckResult(
-            citation="Smith (2023)",
-            status="PARTIAL_MATCH",
-            evidence="Possible match: nearby record",
-            doi="10.5555/nearby",
-            title="Nearby Record",
-            confidence=0.5,
-        )
+    def test_non_doi_inline_citation_routes_to_metadata_match_and_parse_fails_without_title(self) -> None:
+        """Bare 'Author (Year)' inline cite has no title → metadata-match path returns PARSE_FAILED.
 
-        with patch.object(checker, "_verify_openalex", return_value=partial) as openalex:
+        The legacy fuzzy _verify_openalex path was removed; non-DOI refs must produce
+        either a real metadata match (with title) or PARSE_FAILED — never a guess.
+        """
+        checker = CitationChecker()
+
+        with (
+            patch(
+                "app.services.tools.citation_checker.search_crossref_candidates",
+                side_effect=AssertionError("must not be called without a title"),
+            ),
+            patch(
+                "app.services.tools.citation_checker.search_openalex_candidates",
+                side_effect=AssertionError("must not be called without a title"),
+            ),
+        ):
             results = checker.verify("Smith (2023)")
 
         self.assertGreaterEqual(len(results), 1)
-        self.assertTrue(all(result.status == "PARTIAL_MATCH" for result in results))
-        self.assertGreaterEqual(openalex.call_count, 1)
-        friendly = format_citation_summary(checker.get_statistics(results))
-        self.assertIn("chỉ khớp một phần", friendly)
-        self.assertIn("đối chiếu thêm DOI", friendly)
+        self.assertTrue(all(r.verification_mode == "metadata_match" for r in results))
+        self.assertTrue(all(r.status == "PARSE_FAILED" for r in results))
 
     def test_unresolved_doi_skips_retraction_scan_gracefully(self) -> None:
         scanner = RetractionScanner()
