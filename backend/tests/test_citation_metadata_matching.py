@@ -19,6 +19,13 @@ from app.services.tools.citation_checker import (
     CandidateWork,
     CitationChecker,
     CitationCheckResult,
+    _normalize_semantic_scholar_paper,
+    build_csl_json,
+    build_completed_metadata,
+    format_apa_reference,
+    format_bibtex,
+    parse_reference_metadata,
+    search_semantic_scholar_candidates,
 )
 
 
@@ -48,7 +55,28 @@ def _attn_candidate(source: str, *, doi: str | None = "10.5555/attention", year:
     )
 
 
+class _CitationTestSettings:
+    def __init__(
+        self,
+        *,
+        semantic_scholar_enabled: bool = False,
+        semantic_scholar_api_key: str | None = None,
+        semantic_scholar_fallback_threshold: float = 0.90,
+    ) -> None:
+        self.semantic_scholar_enabled = semantic_scholar_enabled
+        self.semantic_scholar_api_key = semantic_scholar_api_key
+        self.semantic_scholar_fallback_threshold = semantic_scholar_fallback_threshold
+
+
 class CitationMetadataMatchingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.settings_patch = patch(
+            "app.services.tools.citation_checker.get_settings",
+            return_value=_CitationTestSettings(semantic_scholar_enabled=False),
+        )
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
     # ------------------------------------------------------------------ #
     # 1. DOI valid path still works                                       #
     # ------------------------------------------------------------------ #
@@ -99,6 +127,10 @@ class CitationMetadataMatchingTest(unittest.TestCase):
         self.assertEqual(r.matched_year, 2017)
         self.assertIsNotNone(r.evidence_breakdown)
         self.assertGreaterEqual(r.evidence_breakdown["title_similarity"], 0.75)
+        self.assertIsNotNone(r.completed_metadata)
+        self.assertEqual(r.completed_metadata["doi"], "10.5555/attention")
+        self.assertIn("Attention is all you need", r.formatted_apa or "")
+        self.assertIn("doi = {10.5555/attention}", r.formatted_bibtex or "")
 
     # ------------------------------------------------------------------ #
     # 3. IEEE no-DOI real ref → metadata_match runs without crashing      #
@@ -200,7 +232,7 @@ class CitationMetadataMatchingTest(unittest.TestCase):
         )
         cand_b = CandidateWork(
             source="openalex",
-            title="Attention is all you need.",  # one trailing dot
+            title="Attention is all you need!",  # very close, but not title+year deduped
             authors=list(full_authors),
             year=2017,
             venue=venue,
@@ -280,6 +312,230 @@ class CitationMetadataMatchingTest(unittest.TestCase):
         self.assertIsNone(r.matched_doi)
         self.assertIsNone(r.matched_title)
         self.assertEqual(r.candidates, [])
+
+    # ------------------------------------------------------------------ #
+    # 9. Candidate without DOI must not synthesize DOI or DOI URL         #
+    # ------------------------------------------------------------------ #
+    def test_no_doi_candidate_does_not_fabricate_doi(self) -> None:
+        checker = CitationChecker()
+        with (
+            patch(
+                "app.services.tools.citation_checker.search_crossref_candidates",
+                return_value=[_attn_candidate("crossref", doi=None)],
+            ),
+            patch(
+                "app.services.tools.citation_checker.search_openalex_candidates",
+                return_value=[],
+            ),
+        ):
+            results = checker.verify(APA_NO_DOI_REAL)
+
+        r = [item for item in results if item.verification_mode == "metadata_match"][0]
+        self.assertIsNone(r.matched_doi)
+        self.assertIsNotNone(r.completed_metadata)
+        self.assertNotIn("doi", r.completed_metadata)
+        self.assertNotIn("doi =", (r.formatted_bibtex or "").lower())
+        self.assertNotIn("https://doi.org", r.formatted_apa or "")
+
+    # ------------------------------------------------------------------ #
+    # 10. Formatters tolerate missing authors/year                        #
+    # ------------------------------------------------------------------ #
+    def test_formatters_missing_author_year_do_not_crash(self) -> None:
+        metadata = {"title": "Metadata matching without complete fields", "source": "crossref", "type": "misc"}
+
+        apa = format_apa_reference(metadata)
+        bibtex = format_bibtex(metadata)
+        csl = build_csl_json(metadata)
+
+        self.assertIn("Metadata matching without complete fields", apa)
+        self.assertIn("@misc", bibtex)
+        self.assertEqual(csl["title"], "Metadata matching without complete fields")
+
+    # ------------------------------------------------------------------ #
+    # 11. BibTeX key is deterministic                                     #
+    # ------------------------------------------------------------------ #
+    def test_bibtex_key_is_deterministic(self) -> None:
+        metadata = build_completed_metadata(_attn_candidate("crossref"), confidence=0.99)
+
+        first = format_bibtex(metadata)
+        second = format_bibtex(metadata)
+
+        self.assertEqual(first, second)
+        self.assertIn("@article{vaswani2017attentionisall", first)
+
+    # ------------------------------------------------------------------ #
+    # 12. Semantic Scholar normalize full paper                           #
+    # ------------------------------------------------------------------ #
+    def test_semantic_scholar_normalize_full_paper(self) -> None:
+        paper = {
+            "paperId": "abc123",
+            "url": "https://www.semanticscholar.org/paper/abc123",
+            "title": "A Semantic Scholar Test Paper",
+            "authors": [{"authorId": "1", "name": "Ada Lovelace"}],
+            "year": 2024,
+            "venue": "Test Conference",
+            "externalIds": {"DOI": "10.1234/TEST"},
+            "publicationTypes": ["Conference"],
+        }
+
+        cand = _normalize_semantic_scholar_paper(paper)
+
+        self.assertIsNotNone(cand)
+        assert cand is not None
+        self.assertEqual(cand.source, "semantic_scholar")
+        self.assertEqual(cand.title, "A Semantic Scholar Test Paper")
+        self.assertEqual(cand.authors, ["Ada Lovelace"])
+        self.assertEqual(cand.year, 2024)
+        self.assertEqual(cand.venue, "Test Conference")
+        self.assertEqual(cand.doi, "10.1234/test")
+        self.assertEqual(cand.external_id, "abc123")
+        self.assertEqual(cand.external_id_type, "semantic_scholar")
+
+    # ------------------------------------------------------------------ #
+    # 13. Semantic Scholar missing DOI does not fabricate DOI             #
+    # ------------------------------------------------------------------ #
+    def test_semantic_scholar_missing_doi_does_not_fabricate(self) -> None:
+        cand = _normalize_semantic_scholar_paper({
+            "paperId": "abc123",
+            "url": "https://www.semanticscholar.org/paper/abc123",
+            "title": "No DOI Paper",
+            "authors": [{"name": "Ada Lovelace"}],
+            "year": 2024,
+            "venue": "Test Journal",
+            "externalIds": {},
+        })
+
+        self.assertIsNotNone(cand)
+        assert cand is not None
+        self.assertIsNone(cand.doi)
+        completed = build_completed_metadata(cand, confidence=0.95)
+        self.assertNotIn("doi", completed)
+
+    # ------------------------------------------------------------------ #
+    # 14. Crossref/OpenAlex fail then Semantic Scholar is used            #
+    # ------------------------------------------------------------------ #
+    def test_crossref_openalex_fail_semantic_scholar_hit(self) -> None:
+        checker = CitationChecker()
+
+        def _boom(*_args, **_kwargs):
+            raise httpx.RequestError("network down")
+
+        semantic_candidate = _attn_candidate("semantic_scholar")
+        semantic_candidate.external_id = "s2-attention"
+        semantic_candidate.external_id_type = "semantic_scholar"
+        with (
+            patch(
+                "app.services.tools.citation_checker.get_settings",
+                return_value=_CitationTestSettings(semantic_scholar_enabled=True),
+            ),
+            patch("app.services.tools.citation_checker.search_crossref_candidates", side_effect=_boom),
+            patch("app.services.tools.citation_checker.search_openalex_candidates", side_effect=_boom),
+            patch(
+                "app.services.tools.citation_checker.search_semantic_scholar_candidates",
+                return_value=[semantic_candidate],
+            ) as semantic_search,
+        ):
+            results = checker.verify(APA_NO_DOI_REAL)
+
+        r = [item for item in results if item.verification_mode == "metadata_match"][0]
+        self.assertTrue(semantic_search.called)
+        self.assertEqual(r.source, "semantic_scholar")
+        self.assertEqual(r.matched_title, "Attention is all you need")
+
+    # ------------------------------------------------------------------ #
+    # 15. Strong Crossref/OpenAlex score skips Semantic Scholar           #
+    # ------------------------------------------------------------------ #
+    def test_strong_crossref_openalex_score_skips_semantic_scholar(self) -> None:
+        checker = CitationChecker()
+        with (
+            patch(
+                "app.services.tools.citation_checker.get_settings",
+                return_value=_CitationTestSettings(semantic_scholar_enabled=True),
+            ),
+            patch(
+                "app.services.tools.citation_checker.search_crossref_candidates",
+                return_value=[_attn_candidate("crossref")],
+            ),
+            patch(
+                "app.services.tools.citation_checker.search_openalex_candidates",
+                return_value=[],
+            ),
+            patch(
+                "app.services.tools.citation_checker.search_semantic_scholar_candidates",
+                side_effect=AssertionError("Semantic Scholar must not be called for strong matches"),
+            ),
+        ):
+            results = checker.verify(APA_NO_DOI_REAL)
+
+        r = [item for item in results if item.verification_mode == "metadata_match"][0]
+        self.assertEqual(r.source, "crossref")
+
+    # ------------------------------------------------------------------ #
+    # 16. Low Crossref/OpenAlex score triggers Semantic Scholar           #
+    # ------------------------------------------------------------------ #
+    def test_low_crossref_openalex_score_triggers_semantic_scholar(self) -> None:
+        checker = CitationChecker()
+        weak = CandidateWork(
+            source="crossref",
+            title="A different paper about sequence models",
+            authors=["smith"],
+            year=2015,
+            venue="Other Venue",
+            doi="10.0000/weak",
+        )
+        semantic_candidate = _attn_candidate("semantic_scholar")
+        semantic_candidate.external_id = "s2-attention"
+        semantic_candidate.external_id_type = "semantic_scholar"
+        with (
+            patch(
+                "app.services.tools.citation_checker.get_settings",
+                return_value=_CitationTestSettings(semantic_scholar_enabled=True),
+            ),
+            patch("app.services.tools.citation_checker.search_crossref_candidates", return_value=[weak]),
+            patch("app.services.tools.citation_checker.search_openalex_candidates", return_value=[]),
+            patch(
+                "app.services.tools.citation_checker.search_semantic_scholar_candidates",
+                return_value=[semantic_candidate],
+            ) as semantic_search,
+        ):
+            results = checker.verify(APA_NO_DOI_REAL)
+
+        r = [item for item in results if item.verification_mode == "metadata_match"][0]
+        self.assertTrue(semantic_search.called)
+        self.assertEqual(r.source, "semantic_scholar")
+        self.assertEqual(r.matched_doi, "10.5555/attention")
+
+    # ------------------------------------------------------------------ #
+    # 17. Semantic Scholar 429/timeout returns [] without crashing        #
+    # ------------------------------------------------------------------ #
+    def test_semantic_scholar_429_and_timeout_do_not_crash(self) -> None:
+        parsed = parse_reference_metadata(APA_NO_DOI_REAL)
+
+        class RateLimitClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def get(self, *_args, **_kwargs):
+                return httpx.Response(429, request=httpx.Request("GET", "https://example.test"))
+
+        class TimeoutClient(RateLimitClient):
+            def get(self, *_args, **_kwargs):
+                raise httpx.TimeoutException("timeout")
+
+        with patch(
+            "app.services.tools.citation_checker.get_settings",
+            return_value=_CitationTestSettings(semantic_scholar_enabled=True),
+        ):
+            with patch("app.services.tools.citation_checker.httpx.Client", RateLimitClient):
+                self.assertEqual(search_semantic_scholar_candidates(parsed), [])
+            with patch("app.services.tools.citation_checker.httpx.Client", TimeoutClient):
+                self.assertEqual(search_semantic_scholar_candidates(parsed), [])
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 | Feature | Description | Powered By |
 |---------|-------------|------------|
 | 💬 **General Q&A** | Conversational AI for research questions with backend context protection (4-message router window, input truncation, pass-by-reference for long/file text) | Groq (LLaMA 3.1) |
-| 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI). DOI inputs → exact Crossref/OpenAlex lookup. References **without DOI** → metadata matching: Crossref + OpenAlex candidate search → weighted score (title 0.45 · authors 0.25 · year 0.15 · venue 0.10 · vol/pages 0.05) → safety-capped verdict (`METADATA_VERIFIED` · `LIKELY_MATCH` · `POSSIBLE_MATCH` · `AMBIGUOUS_MATCH` · `UNVERIFIED_NO_DOI` · `NO_MATCH_FOUND` · `PARSE_FAILED`). Confidence-based, **not absolute verification**. Zero-hallucination (CODEX.md Directive 1) — never synthesize DOI/metadata; API failures degrade gracefully. | OpenAlex + Crossref |
+| 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI). DOI inputs → exact Crossref/OpenAlex lookup. References **without DOI** → metadata matching: Crossref + OpenAlex, with optional Semantic Scholar fallback when no candidates exist or best score is below threshold. Matched no-DOI references can return source-backed completion metadata plus APA-like text, BibTeX, and CSL JSON. Confidence-based, **not absolute verification**. Zero-hallucination — never synthesize DOI/metadata; API failures degrade gracefully. | OpenAlex + Crossref + Semantic Scholar |
 | 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by ChromaDB semantic search + domain match | ChromaDB + SPECTER2 (`allenai/specter2_base`) |
 | 🔍 **Retraction Scanning** | Check DOIs against retraction databases → multi-source risk assessment (NONE → CRITICAL) | Crossref + OpenAlex + PubPeer |
 | 🤖 **AI Writing Detection** | Ensemble estimate: 70% RoBERTa ML classifier + 30% rule-based heuristics (7 linguistic features) → 5-level probabilistic verdict scale (not definitive proof) | RoBERTa + Custom Rules |
@@ -72,6 +72,17 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 | 🔐 **End-to-End Encryption** | 5-layer security: HTTPS → JWT (HS256) → DB encryption (AES-256-GCM) → File encryption → Optional client-side payload encryption | PyCryptodome |
 | 🌙 **Dark Mode** | System preference detection + manual toggle, powered by Tailwind CSS v4 design tokens | Tailwind v4 |
 | 👤 **Admin Dashboard** | Real-time overview (users, sessions, files, storage), user management, audit logging | React Query |
+
+### Citation Metadata Completion
+
+For no-DOI references with a selected source candidate, CitationChecker now returns:
+
+- `completed_metadata`: only fields present in the selected Crossref/OpenAlex/Semantic Scholar candidate.
+- `formatted_apa`: APA-like reference text for user review, not a claim of full APA 7 compliance.
+- `formatted_bibtex`: deterministic BibTeX using `article`, `inproceedings`, or `misc`.
+- `csl_json`: compact CSL JSON suitable for citation-manager import flows.
+
+If a candidate has no DOI, the response does not invent a DOI or DOI URL. `PARSE_FAILED` and `NO_MATCH_FOUND` results do not include completion metadata.
 
 ---
 
@@ -191,6 +202,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 | **Groq** | LLM (LLaMA 3.1: chat, summarization, function calling) | Free tier: 30 req/min |
 | **OpenAlex** | Scholarly metadata (250M+ works) | Free, no API key required |
 | **Crossref** | DOI verification, retraction metadata | Free, `update-to` field for retraction detection |
+| **Semantic Scholar** | Optional no-DOI citation fallback and metadata completion source | API key optional; configured by `SEMANTIC_SCHOLAR_ENABLED`, `SEMANTIC_SCHOLAR_API_KEY`, `SEMANTIC_SCHOLAR_FALLBACK_THRESHOLD` |
 | **PubPeer** | Post-publication peer review comments | Free, community-driven early warnings |
 | **AWS S3** | Object storage (optional) | Fallback: local filesystem |
 
@@ -553,7 +565,7 @@ python security/pentest/quick_audit.py --base-url http://localhost:8000
 
 - [x] JWT Authentication + RBAC/ABAC authorization
 - [x] Chat AI with Groq LLaMA 3.1 (context memory, file-aware responses)
-- [x] Citation Verification (6 regex patterns; DOI exact lookup + no-DOI metadata matching via Crossref+OpenAlex search)
+- [x] Citation Verification (6 regex patterns; DOI exact lookup + no-DOI metadata matching, metadata completion, optional Semantic Scholar fallback)
 - [x] Journal Matching (ChromaDB vector search, dynamic crawler pipeline)
 - [x] Retraction Scanning (Crossref + OpenAlex + PubPeer, risk levels)
 - [x] AI Writing Detection (RoBERTa ensemble, 7 heuristics)

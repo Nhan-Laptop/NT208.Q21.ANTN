@@ -17,6 +17,8 @@ from difflib import SequenceMatcher
 
 import httpx
 
+from app.core.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -67,6 +69,10 @@ _LEGACY_REGEX = re.compile(r"([A-Z][a-zA-Z\-]+\s+et\s+al\.?[,\s]+\(?\d{4}\)?)")
 
 OPENALEX_SEARCH_URL = "https://api.openalex.org/works"
 CROSSREF_WORKS_URL = "https://api.crossref.org/works"
+SEMANTIC_SCHOLAR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+SEMANTIC_SCHOLAR_FIELDS = (
+    "paperId,url,title,authors,year,venue,externalIds,publicationTypes,publicationDate"
+)
 
 _REF_SECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"\n\s*references?\s*\n", re.IGNORECASE),
@@ -130,6 +136,10 @@ class CitationCheckResult:
     candidates: list[dict[str, Any]] = field(default_factory=list)
     warning: str | None = None
     evidence_breakdown: dict[str, float] | None = None
+    completed_metadata: dict[str, Any] | None = None
+    formatted_apa: str | None = None
+    formatted_bibtex: str | None = None
+    csl_json: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -154,12 +164,15 @@ class ReferenceMetadata:
 @dataclass
 class CandidateWork:
     """Structure representing a candidate matching work retrieved from scholarly APIs."""
-    source: str          # e.g., "crossref", "openalex"
+    source: str          # e.g., "crossref", "openalex", "semantic_scholar"
     title: str | None = None
     authors: list[str] = field(default_factory=list)
     year: int | None = None
     venue: str | None = None
     doi: str | None = None
+    url: str | None = None
+    external_id: str | None = None
+    external_id_type: str | None = None
     volume: str | None = None
     issue: str | None = None
     pages: str | None = None
@@ -197,6 +210,304 @@ def normalize_author_name(name: str) -> str:
     name = re.sub(r'\b(et\s+al\.?|and|&)\b', '', name, flags=re.IGNORECASE)
     name = re.sub(r'[,\.\-\'\"]', ' ', name)
     return name.lower().strip()
+
+
+def _display_name_part(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if value.isupper() and len(value) <= 3:
+        return value
+    return "-".join(part.capitalize() for part in value.split("-") if part)
+
+
+def normalize_author_for_citation(name: str) -> str:
+    """Return a conservative citation-display form without inventing name parts."""
+    cleaned = re.sub(r"\s+", " ", (name or "").strip())
+    if not cleaned:
+        return ""
+
+    cleaned = re.sub(r"\b(et\s+al\.?|and|&)\b", "", cleaned, flags=re.IGNORECASE).strip(" ,;")
+    if not cleaned:
+        return ""
+
+    if "," in cleaned:
+        family, given = [part.strip() for part in cleaned.split(",", 1)]
+        family_display = " ".join(_display_name_part(p) for p in family.split() if p)
+        initials = []
+        for part in re.split(r"[\s.-]+", given):
+            if part:
+                initials.append(f"{part[0].upper()}.")
+        if initials:
+            return f"{family_display}, {' '.join(initials)}"
+        return family_display
+
+    parts = [p for p in re.split(r"\s+", cleaned) if p]
+    if len(parts) == 1:
+        return _display_name_part(parts[0])
+
+    family = _display_name_part(parts[-1])
+    initials = [f"{part[0].upper()}." for part in parts[:-1] if part]
+    if initials:
+        return f"{family}, {' '.join(initials)}"
+    return family
+
+
+def _format_apa_authors(authors: list[str]) -> str:
+    formatted = [normalize_author_for_citation(a) for a in authors if a]
+    formatted = [a for a in formatted if a]
+    if not formatted:
+        return ""
+    if len(formatted) == 1:
+        return formatted[0]
+    if len(formatted) == 2:
+        return f"{formatted[0]} & {formatted[1]}"
+    return f"{', '.join(formatted[:-1])}, & {formatted[-1]}"
+
+
+def infer_item_type(metadata: dict[str, Any]) -> str:
+    """Infer a BibTeX-safe item type from source metadata."""
+    raw_type = str(metadata.get("raw_type") or metadata.get("type") or "").lower()
+    venue = str(metadata.get("venue") or "").lower()
+    publication_types = metadata.get("publication_types") or []
+    if isinstance(publication_types, str):
+        publication_types = [publication_types]
+    publication_type_text = " ".join(str(p).lower() for p in publication_types)
+
+    combined = f"{raw_type} {venue} {publication_type_text}"
+    if any(token in combined for token in ("proceeding", "conference", "symposium", "workshop")):
+        return "inproceedings"
+    if any(token in combined for token in ("journal", "article")):
+        return "article"
+    if metadata.get("volume") or metadata.get("issue"):
+        return "article"
+    return "misc"
+
+
+def build_completed_metadata(
+    candidate: CandidateWork,
+    confidence: float,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Build source-backed completion metadata from the selected candidate only."""
+    if not candidate:
+        return {}
+
+    raw = candidate.raw or {}
+    publication_types = raw.get("publicationTypes")
+    metadata: dict[str, Any] = {}
+    for key, value in (
+        ("source", source or candidate.source),
+        ("confidence", round(confidence, 3)),
+        ("title", candidate.title),
+        ("authors", list(candidate.authors or [])),
+        ("year", candidate.year),
+        ("venue", candidate.venue),
+        ("doi", candidate.doi),
+        ("url", candidate.url),
+        ("external_id", candidate.external_id),
+        ("external_id_type", candidate.external_id_type),
+        ("volume", candidate.volume),
+        ("issue", candidate.issue),
+        ("pages", candidate.pages),
+        ("publication_types", publication_types),
+        ("raw_type", raw.get("type")),
+    ):
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        metadata[key] = value
+
+    item_type = infer_item_type(metadata)
+    metadata["type"] = item_type
+    metadata.pop("raw_type", None)
+    if metadata.get("publication_types") is None:
+        metadata.pop("publication_types", None)
+    return metadata
+
+
+def _append_sentence_period(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if value[-1] in ".!?":
+        return value
+    return f"{value}."
+
+
+def format_apa_reference(metadata: dict[str, Any]) -> str:
+    """Format an APA-like reference from source-backed metadata."""
+    if not metadata:
+        return ""
+
+    authors = metadata.get("authors") or []
+    if not isinstance(authors, list):
+        authors = []
+    author_text = _format_apa_authors([str(a) for a in authors])
+    year = metadata.get("year")
+    year_text = f"({year})." if year else "(n.d.)."
+    title = str(metadata.get("title") or "").strip()
+    venue = str(metadata.get("venue") or "").strip()
+    volume = str(metadata.get("volume") or "").strip()
+    issue = str(metadata.get("issue") or "").strip()
+    pages = str(metadata.get("pages") or "").strip()
+    doi = str(metadata.get("doi") or "").strip()
+    url = str(metadata.get("url") or "").strip()
+
+    parts: list[str] = []
+    if author_text:
+        parts.append(_append_sentence_period(author_text))
+        parts.append(year_text)
+        if title:
+            parts.append(_append_sentence_period(title))
+    else:
+        if title:
+            parts.append(_append_sentence_period(title))
+        parts.append(year_text)
+
+    container = ""
+    if venue:
+        container = venue
+        if volume:
+            container += f", {volume}"
+            if issue:
+                container += f"({issue})"
+        elif issue:
+            container += f", ({issue})"
+        if pages:
+            container += f", {pages}"
+    elif pages:
+        container = pages
+    if container:
+        parts.append(_append_sentence_period(container))
+
+    if doi:
+        parts.append(f"https://doi.org/{doi}")
+    elif url:
+        parts.append(url)
+
+    return " ".join(part for part in parts if part).strip()
+
+
+def _bibtex_escape(value: str) -> str:
+    return (
+        (value or "")
+        .replace("\\", "\\textbackslash{}")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+    )
+
+
+def _bibtex_key(metadata: dict[str, Any]) -> str:
+    authors = metadata.get("authors") or []
+    first_author = ""
+    if isinstance(authors, list) and authors:
+        first_author = normalize_author_name(str(authors[0])).split()[-1]
+
+    title = normalize_title(str(metadata.get("title") or ""))
+    title_words = [
+        word for word in re.findall(r"[a-z0-9]+", title)
+        if word not in {"a", "an", "the", "and", "of", "in", "on", "for", "to"}
+    ]
+    seed = first_author or (title_words[0] if title_words else "ref")
+    year = str(metadata.get("year") or "nd")
+    suffix = "".join(title_words[:3]) or "work"
+    key = re.sub(r"[^A-Za-z0-9]+", "", f"{seed}{year}{suffix}")
+    return key or "refndwork"
+
+
+def format_bibtex(metadata: dict[str, Any]) -> str:
+    """Format deterministic BibTeX without inventing DOI/URL or missing fields."""
+    if not metadata:
+        return ""
+
+    item_type = infer_item_type(metadata)
+    key = _bibtex_key(metadata)
+    fields: list[tuple[str, Any]] = []
+
+    def add(name: str, value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, str) and not value.strip():
+            return
+        fields.append((name, value))
+
+    add("title", metadata.get("title"))
+    authors = metadata.get("authors") or []
+    if isinstance(authors, list) and authors:
+        author_text = " and ".join(normalize_author_for_citation(str(a)) for a in authors if a)
+        add("author", author_text)
+    add("year", metadata.get("year"))
+    venue_field = "booktitle" if item_type == "inproceedings" else "journal"
+    add(venue_field, metadata.get("venue"))
+    add("volume", metadata.get("volume"))
+    add("number", metadata.get("issue"))
+    add("pages", metadata.get("pages"))
+    add("doi", metadata.get("doi"))
+    add("url", metadata.get("url"))
+
+    body = "\n".join(
+        f"  {name} = {{{_bibtex_escape(str(value))}}},"
+        for name, value in fields
+    )
+    if body:
+        return f"@{item_type}{{{key},\n{body}\n}}"
+    return f"@{item_type}{{{key}\n}}"
+
+
+def _csl_author(name: str) -> dict[str, str]:
+    formatted = normalize_author_for_citation(name)
+    if "," in formatted:
+        family, given = [part.strip() for part in formatted.split(",", 1)]
+        author = {"family": family}
+        if given:
+            author["given"] = given
+        return author
+    return {"family": formatted} if formatted else {}
+
+
+def build_csl_json(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Build compact CSL JSON from source-backed metadata."""
+    if not metadata:
+        return {}
+
+    item_type = infer_item_type(metadata)
+    csl_type = {
+        "article": "article-journal",
+        "inproceedings": "paper-conference",
+        "misc": "article",
+    }.get(item_type, "article")
+    csl: dict[str, Any] = {"type": csl_type}
+
+    for src_key, dst_key in (
+        ("title", "title"),
+        ("venue", "container-title"),
+        ("volume", "volume"),
+        ("issue", "issue"),
+        ("pages", "page"),
+        ("doi", "DOI"),
+        ("url", "URL"),
+        ("external_id", "id"),
+    ):
+        value = metadata.get(src_key)
+        if value is not None and (not isinstance(value, str) or value.strip()):
+            csl[dst_key] = value
+
+    authors = metadata.get("authors") or []
+    if isinstance(authors, list) and authors:
+        csl_authors = [_csl_author(str(a)) for a in authors]
+        csl_authors = [a for a in csl_authors if a]
+        if csl_authors:
+            csl["author"] = csl_authors
+
+    year = metadata.get("year")
+    if year:
+        csl["issued"] = {"date-parts": [[year]]}
+
+    return csl
 
 
 def normalize_venue(venue: str) -> str:
@@ -485,7 +796,8 @@ def _normalize_crossref_work(item: dict[str, Any]) -> CandidateWork:
     if doi:
         doi = CitationChecker.normalize_doi(doi)
 
-    # 6. Volume, Issue, Pages
+    # 6. URL / IDs / Volume / Issue / Pages
+    url = item.get("URL") if isinstance(item.get("URL"), str) else None
     volume = item.get("volume")
     issue = item.get("issue")
     pages = item.get("page")
@@ -497,6 +809,9 @@ def _normalize_crossref_work(item: dict[str, Any]) -> CandidateWork:
         year=year,
         venue=venue,
         doi=doi,
+        url=url,
+        external_id=doi,
+        external_id_type="crossref" if doi else None,
         volume=volume,
         issue=issue,
         pages=pages,
@@ -606,6 +921,13 @@ def _normalize_openalex_work(item: dict[str, Any]) -> CandidateWork:
     if doi:
         doi = CitationChecker.normalize_doi(doi)
 
+    url = None
+    primary = item.get("primary_location") or {}
+    if isinstance(primary, dict):
+        url = primary.get("landing_page_url") or primary.get("pdf_url")
+    if not url:
+        url = item.get("id") if isinstance(item.get("id"), str) else None
+
     biblio = item.get("biblio") or {}
     volume = biblio.get("volume") if isinstance(biblio, dict) else None
     issue = biblio.get("issue") if isinstance(biblio, dict) else None
@@ -624,6 +946,9 @@ def _normalize_openalex_work(item: dict[str, Any]) -> CandidateWork:
         year=year,
         venue=venue,
         doi=doi,
+        url=url,
+        external_id=item.get("id") if isinstance(item.get("id"), str) else None,
+        external_id_type="openalex" if item.get("id") else None,
         volume=str(volume) if volume is not None else None,
         issue=str(issue) if issue is not None else None,
         pages=pages,
@@ -679,11 +1004,120 @@ def search_openalex_candidates(ref: ReferenceMetadata, limit: int = 5) -> list[C
     return candidates
 
 
-def _merge_candidates(crossref_results: list[CandidateWork], openalex_results: list[CandidateWork]) -> list[CandidateWork]:
-    """Merge candidates from Crossref + OpenAlex, deduping by DOI then by normalized title."""
+def _normalize_semantic_scholar_paper(paper: dict[str, Any]) -> CandidateWork | None:
+    """Normalize a Semantic Scholar Graph API paper into CandidateWork."""
+    if not isinstance(paper, dict):
+        return None
+
+    title = paper.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return None
+
+    authors: list[str] = []
+    for author in paper.get("authors", []) or []:
+        if not isinstance(author, dict):
+            continue
+        name = author.get("name")
+        if isinstance(name, str) and name.strip():
+            authors.append(name.strip())
+
+    year = paper.get("year")
+    if year is not None:
+        try:
+            year = int(year)
+        except (TypeError, ValueError):
+            year = None
+
+    venue = paper.get("venue")
+    if not isinstance(venue, str) or not venue.strip():
+        venue = None
+
+    external_ids = paper.get("externalIds") or {}
+    doi = None
+    if isinstance(external_ids, dict):
+        doi_value = external_ids.get("DOI")
+        if isinstance(doi_value, str) and doi_value.strip():
+            doi = CitationChecker.normalize_doi(doi_value)
+
+    paper_id = paper.get("paperId")
+    if paper_id is not None:
+        paper_id = str(paper_id)
+
+    url = paper.get("url")
+    if not isinstance(url, str) or not url.strip():
+        url = None
+
+    return CandidateWork(
+        source="semantic_scholar",
+        title=title.strip(),
+        authors=authors,
+        year=year,
+        venue=venue.strip() if isinstance(venue, str) else None,
+        doi=doi,
+        url=url,
+        external_id=paper_id,
+        external_id_type="semantic_scholar" if paper_id else None,
+        raw=paper,
+    )
+
+
+def search_semantic_scholar_candidates(ref: ReferenceMetadata, limit: int = 5) -> list[CandidateWork]:
+    """Search Semantic Scholar for candidate matching works; return [] on all failures."""
+    if not ref or not ref.title:
+        return []
+
+    settings = get_settings()
+    if not settings.semantic_scholar_enabled:
+        return []
+
+    query = ref.title.strip()
+    if not query:
+        return []
+
+    headers = {"User-Agent": "AIRA/1.0 (mailto:aira@research.local)"}
+    if settings.semantic_scholar_api_key:
+        headers["x-api-key"] = settings.semantic_scholar_api_key
+
+    params = {
+        "query": query,
+        "limit": max(1, min(limit, 10)),
+        "fields": SEMANTIC_SCHOLAR_FIELDS,
+    }
+
+    candidates: list[CandidateWork] = []
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            resp = client.get(SEMANTIC_SCHOLAR_SEARCH_URL, params=params, headers=headers)
+        if resp.status_code == 429 or resp.status_code >= 500:
+            logger.warning("Semantic Scholar query returned retryable status code %s", resp.status_code)
+            return []
+        if resp.status_code != 200:
+            logger.warning("Semantic Scholar query returned status code %s", resp.status_code)
+            return []
+        payload = resp.json()
+        papers = payload.get("data", []) if isinstance(payload, dict) else []
+        if not isinstance(papers, list):
+            return []
+        for paper in papers:
+            candidate = _normalize_semantic_scholar_paper(paper)
+            if candidate:
+                candidates.append(candidate)
+    except (httpx.TimeoutException, httpx.RequestError, ValueError, TypeError) as e:
+        logger.warning("Semantic Scholar candidate search failed: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("Semantic Scholar candidate search failed unexpectedly: %s", e)
+        return []
+
+    return candidates
+
+
+def _merge_candidates(*candidate_groups: list[CandidateWork]) -> list[CandidateWork]:
+    """Merge candidates from scholarly sources, deduping by DOI, external ID, then title+year."""
     merged: list[CandidateWork] = []
     seen_dois: set[str] = set()
-    seen_titles: set[str] = set()
+    seen_external_ids: set[tuple[str, str]] = set()
+    seen_title_year: set[tuple[str, int | None]] = set()
 
     def _add(cand: CandidateWork) -> None:
         if cand.doi:
@@ -691,18 +1125,23 @@ def _merge_candidates(crossref_results: list[CandidateWork], openalex_results: l
             if key in seen_dois:
                 return
             seen_dois.add(key)
-        elif cand.title:
+        if cand.external_id:
+            external_key = ((cand.external_id_type or cand.source).lower(), cand.external_id.lower())
+            if external_key in seen_external_ids:
+                return
+            seen_external_ids.add(external_key)
+        if cand.title:
             tkey = normalize_title(cand.title)
-            if tkey and tkey in seen_titles:
+            title_year_key = (tkey, cand.year)
+            if tkey and title_year_key in seen_title_year:
                 return
             if tkey:
-                seen_titles.add(tkey)
+                seen_title_year.add(title_year_key)
         merged.append(cand)
 
-    for c in crossref_results:
-        _add(c)
-    for c in openalex_results:
-        _add(c)
+    for group in candidate_groups:
+        for c in group:
+            _add(c)
     return merged
 
 
@@ -724,7 +1163,13 @@ def score_candidate(ref: ReferenceMetadata, candidate: CandidateWork) -> dict[st
         if ref_authors_norm:
             matches = 0
             for ra in ref_authors_norm:
-                if any(ra == ca or SequenceMatcher(None, ra, ca).ratio() > 0.85 for ca in cand_authors_norm):
+                if any(
+                    ra == ca
+                    or ra in ca.split()
+                    or ca in ra.split()
+                    or SequenceMatcher(None, ra, ca).ratio() > 0.85
+                    for ca in cand_authors_norm
+                ):
                     matches += 1
             author_overlap = matches / len(ref_authors_norm)
 
@@ -1354,6 +1799,9 @@ class CitationChecker:
                 "year": c.year,
                 "venue": c.venue,
                 "doi": c.doi,
+                "url": c.url,
+                "external_id": c.external_id,
+                "external_id_type": c.external_id_type,
             })
 
         evidence_summary = None
@@ -1369,7 +1817,18 @@ class CitationChecker:
         elif match.status == "PARSE_FAILED":
             evidence_summary = "Reference parsing failed (insufficient metadata)."
         elif match.status == "NO_MATCH_FOUND":
-            evidence_summary = "No matching work found in Crossref/OpenAlex."
+            evidence_summary = "No matching work found in Crossref/OpenAlex/Semantic Scholar."
+
+        completed_metadata = None
+        formatted_apa = None
+        formatted_bibtex = None
+        csl_json = None
+        if best and match.status not in {"PARSE_FAILED", "NO_MATCH_FOUND"}:
+            completed_metadata = build_completed_metadata(best, match.confidence, source=best.source)
+            if completed_metadata:
+                formatted_apa = format_apa_reference(completed_metadata) or None
+                formatted_bibtex = format_bibtex(completed_metadata) or None
+                csl_json = build_csl_json(completed_metadata) or None
 
         return CitationCheckResult(
             citation=raw_citation,
@@ -1391,6 +1850,10 @@ class CitationChecker:
             candidates=cand_dicts,
             warning=match.warning,
             evidence_breakdown=match.evidence or None,
+            completed_metadata=completed_metadata,
+            formatted_apa=formatted_apa,
+            formatted_bibtex=formatted_bibtex,
+            csl_json=csl_json,
         )
 
     def _verify_metadata_match(self, citation: dict[str, Any]) -> CitationCheckResult:
@@ -1430,6 +1893,23 @@ class CitationChecker:
             logger.warning("search_openalex_candidates raised unexpectedly: %s", e)
 
         candidates = _merge_candidates(crossref_hits, openalex_hits)
+        try:
+            settings = get_settings()
+            if settings.semantic_scholar_enabled and ref.title:
+                should_search_semantic = False
+                if not candidates:
+                    should_search_semantic = True
+                else:
+                    preliminary = choose_best_match(ref, candidates)
+                    should_search_semantic = (
+                        preliminary.confidence < settings.semantic_scholar_fallback_threshold
+                    )
+                if should_search_semantic:
+                    semantic_hits = search_semantic_scholar_candidates(ref, limit=5)
+                    candidates = _merge_candidates(candidates, semantic_hits)
+        except Exception as e:
+            logger.warning("Semantic Scholar fallback failed unexpectedly: %s", e)
+
         match = choose_best_match(ref, candidates)
         return self._metadata_match_to_result(match, raw_citation=raw)
 

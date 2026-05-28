@@ -445,6 +445,24 @@ interface CitationCandidate {
   year?: number | null;
   venue?: string | null;
   doi?: string | null;
+  url?: string | null;
+  external_id?: string | null;
+  external_id_type?: string | null;
+}
+
+interface CompletedCitationMetadata {
+  source?: string;
+  confidence?: number;
+  type?: "article" | "inproceedings" | "misc" | string;
+  title?: string;
+  authors?: string[];
+  year?: number | null;
+  venue?: string | null;
+  doi?: string | null;
+  url?: string | null;
+  volume?: string | null;
+  issue?: string | null;
+  pages?: string | null;
 }
 
 interface CitationItem {
@@ -468,6 +486,10 @@ interface CitationItem {
   candidates?: CitationCandidate[];
   warning?: string | null;
   evidence_breakdown?: Record<string, number> | null;
+  completed_metadata?: CompletedCitationMetadata | null;
+  formatted_apa?: string | null;
+  formatted_bibtex?: string | null;
+  csl_json?: Record<string, unknown> | null;
 }
 
 const GREEN_STATUSES = new Set([
@@ -524,10 +546,41 @@ function statusBadge(status: string) {
   );
 }
 
+function citationSourceLabel(source?: string | null) {
+  const normalized = (source ?? "").toLowerCase();
+  if (normalized === "semantic_scholar") return "Semantic Scholar";
+  if (normalized.includes("openalex") || normalized === "pyalex") return "OpenAlex";
+  if (normalized.includes("crossref")) return "Crossref";
+  return source || "Nguồn";
+}
+
+function CitationSourceBadge({ source }: { source?: string | null }) {
+  if (!source) return null;
+  return (
+    <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 dark:bg-slate-800/50 dark:text-slate-300">
+      {citationSourceLabel(source)}
+    </span>
+  );
+}
+
 function MetadataMatchDetails({ c }: { c: CitationItem }) {
+  const [copiedKind, setCopiedKind] = useState<"apa" | "bibtex" | "csl" | null>(null);
   const ev = c.evidence_breakdown ?? null;
   const cands = c.candidates ?? [];
   const hasMatched = c.matched_title || c.matched_doi || c.matched_year || c.matched_venue;
+  const cslText = c.csl_json ? JSON.stringify(c.csl_json, null, 2) : "";
+  const hasFormatted = Boolean(c.formatted_apa || c.formatted_bibtex || cslText);
+
+  const handleCopy = useCallback(async (kind: "apa" | "bibtex" | "csl", text: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKind(kind);
+      setTimeout(() => setCopiedKind(null), 1800);
+    } catch {
+      /* clipboard API may be blocked */
+    }
+  }, []);
 
   return (
     <div className="mt-2 space-y-2">
@@ -583,18 +636,104 @@ function MetadataMatchDetails({ c }: { c: CitationItem }) {
           <ol className="mt-1 space-y-1 list-decimal pl-4">
             {cands.slice(0, 3).map((cand, idx) => (
               <li key={idx}>
-                <span className="text-text-primary dark:text-dark-text-primary">
-                  {cand.title || "(không có tiêu đề)"}
-                </span>
+                {cand.url ? (
+                  <a
+                    href={cand.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-text-primary dark:text-dark-text-primary hover:text-accent dark:hover:text-dark-accent hover:underline"
+                  >
+                    {cand.title || "(không có tiêu đề)"}
+                    <ExternalLink size={10} />
+                  </a>
+                ) : (
+                  <span className="text-text-primary dark:text-dark-text-primary">
+                    {cand.title || "(không có tiêu đề)"}
+                  </span>
+                )}
                 <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px]">
                   {cand.year != null && <span>Năm: {cand.year}</span>}
                   {cand.doi && <span>DOI: {cand.doi}</span>}
-                  {cand.source && <span>Nguồn: {cand.source}</span>}
+                  {cand.source && <CitationSourceBadge source={cand.source} />}
                 </div>
               </li>
             ))}
           </ol>
         </details>
+      )}
+
+      {hasFormatted && (
+        <div className="rounded-lg border border-border/80 dark:border-dark-border/80 bg-bg-secondary/50 dark:bg-dark-bg-secondary/50 p-2.5">
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <span className="text-[11px] font-semibold text-text-primary dark:text-dark-text-primary">
+              Gợi ý hoàn thiện trích dẫn
+            </span>
+            {c.completed_metadata?.source && <CitationSourceBadge source={c.completed_metadata.source} />}
+          </div>
+
+          {c.formatted_apa && (
+            <div className="rounded-md bg-surface dark:bg-dark-surface border border-border/70 dark:border-dark-border/70 p-2">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="text-[10px] font-semibold text-text-tertiary dark:text-dark-text-tertiary uppercase">
+                  APA-like
+                </span>
+                <button
+                  onClick={() => handleCopy("apa", c.formatted_apa ?? "")}
+                  className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md border border-border dark:border-dark-border text-text-secondary dark:text-dark-text-secondary hover:text-accent dark:hover:text-dark-accent"
+                  title="Sao chép APA-like"
+                >
+                  {copiedKind === "apa" ? <Check size={10} /> : <Copy size={10} />}
+                  {copiedKind === "apa" ? "Đã sao chép" : "Copy APA"}
+                </button>
+              </div>
+              <p className="text-[11px] leading-relaxed text-text-secondary dark:text-dark-text-secondary">
+                {c.formatted_apa}
+              </p>
+            </div>
+          )}
+
+          {c.formatted_bibtex && (
+            <details className="mt-2 text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
+              <summary className="cursor-pointer select-none">BibTeX</summary>
+              <div className="mt-1 rounded-md bg-surface dark:bg-dark-surface border border-border/70 dark:border-dark-border/70 p-2">
+                <div className="flex justify-end mb-1">
+                  <button
+                    onClick={() => handleCopy("bibtex", c.formatted_bibtex ?? "")}
+                    className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md border border-border dark:border-dark-border text-text-secondary dark:text-dark-text-secondary hover:text-accent dark:hover:text-dark-accent"
+                    title="Sao chép BibTeX"
+                  >
+                    {copiedKind === "bibtex" ? <Check size={10} /> : <Copy size={10} />}
+                    {copiedKind === "bibtex" ? "Đã sao chép" : "Copy BibTeX"}
+                  </button>
+                </div>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-text-secondary dark:text-dark-text-secondary">
+                  {c.formatted_bibtex}
+                </pre>
+              </div>
+            </details>
+          )}
+
+          {cslText && (
+            <details className="mt-2 text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
+              <summary className="cursor-pointer select-none">CSL JSON</summary>
+              <div className="mt-1 rounded-md bg-surface dark:bg-dark-surface border border-border/70 dark:border-dark-border/70 p-2">
+                <div className="flex justify-end mb-1">
+                  <button
+                    onClick={() => handleCopy("csl", cslText)}
+                    className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md border border-border dark:border-dark-border text-text-secondary dark:text-dark-text-secondary hover:text-accent dark:hover:text-dark-accent"
+                    title="Sao chép CSL JSON"
+                  >
+                    {copiedKind === "csl" ? <Check size={10} /> : <Copy size={10} />}
+                    {copiedKind === "csl" ? "Đã sao chép" : "Copy CSL"}
+                  </button>
+                </div>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-text-secondary dark:text-dark-text-secondary">
+                  {cslText}
+                </pre>
+              </div>
+            </details>
+          )}
+        </div>
       )}
 
       {c.warning && (
@@ -649,7 +788,7 @@ export function CitationReportCard({ citations }: { citations: CitationItem[] })
             <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
               {c.doi && <span>DOI: {c.doi}</span>}
               {c.confidence != null && <span>Độ tin cậy: {(c.confidence * 100).toFixed(0)}%</span>}
-              {c.source && <span>Nguồn: {c.source}</span>}
+              {c.source && <span>Nguồn: {citationSourceLabel(c.source)}</span>}
             </div>
             {isMetadataMatch && <MetadataMatchDetails c={c} />}
           </div>

@@ -2,7 +2,7 @@ import logging
 import secrets
 from functools import lru_cache
 from pathlib import Path
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _logger = logging.getLogger(__name__)
@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     admin_email: str = "admin@aira.local"
     admin_password: str = "ChangeMe!123"
 
+    @field_validator("debug", mode="before")
+    @classmethod
+    def _normalize_debug_flag(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "prod", "production", "off"}:
+                return False
+            if normalized in {"debug", "dev", "development", "on"}:
+                return True
+        return value
+
     @model_validator(mode="after")
     def _validate_security_defaults(self) -> "Settings":
         """Warn loudly (or block) when insecure defaults are detected."""
@@ -90,6 +101,9 @@ class Settings(BaseSettings):
 
     google_api_key: str | None = None
     groq_api_key: str | None = None
+    semantic_scholar_enabled: bool = True
+    semantic_scholar_api_key: str | None = None
+    semantic_scholar_fallback_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
     # Model names are provider-managed and may change.
     gemini_model: str = "gemini-flash-latest"
     groq_model: str = "llama-3.1-8b-instant"
@@ -101,6 +115,8 @@ class Settings(BaseSettings):
             object.__setattr__(self, "google_api_key", None)
         if isinstance(self.groq_api_key, str) and not self.groq_api_key.strip():
             object.__setattr__(self, "groq_api_key", None)
+        if isinstance(self.semantic_scholar_api_key, str) and not self.semantic_scholar_api_key.strip():
+            object.__setattr__(self, "semantic_scholar_api_key", None)
         if isinstance(self.hf_token, str) and not self.hf_token.strip():
             object.__setattr__(self, "hf_token", None)
         if isinstance(self.alembic_database_url, str) and not self.alembic_database_url.strip():

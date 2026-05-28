@@ -29,6 +29,10 @@ class CitationItem(BaseModel):
     candidates: list[dict[str, Any]] = []
     warning: str | None = None
     evidence_breakdown: dict[str, float] | None = None
+    completed_metadata: dict[str, Any] | None = None
+    formatted_apa: str | None = None
+    formatted_bibtex: str | None = None
+    csl_json: dict[str, Any] | None = None
 
 
 class CitationReportResponse(BaseModel):

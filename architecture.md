@@ -25,7 +25,7 @@ Nếu bất kỳ phần/diagram cũ bên dưới mâu thuẫn, ưu tiên snapsho
 - Pseudo tool syntax không có native `tool_calls` được coi là đường đi không hợp lệ và sẽ chuyển fallback hoặc trả warning hợp lệ.
 - Grammar corrected_text dùng cơ chế auto-apply bảo thủ: chỉ áp dụng low-risk fixes; các sửa đổi rủi ro (thuật ngữ khoa học, acronym, DOI-like identifiers...) chỉ được report trong `issues`, không tự sửa.
 - AI-writing verdict là ước lượng xác suất từ mô hình/heuristics, không được diễn đạt như bằng chứng kết luận tuyệt đối.
-- Citation verification có hai nhánh độc lập: (a) **DOI exact** qua Crossref/OpenAlex DOI lookup (`DOI_VERIFIED` / `DOI_NOT_FOUND`, không fallback fuzzy); (b) **No-DOI metadata matching** qua `search_crossref_candidates()` + `search_openalex_candidates()` rồi `score_candidate()` (title 0.45 · authors 0.25 · year 0.15 · venue 0.10 · vol/pages 0.05) + `choose_best_match()` với safety caps. Status enum: `METADATA_VERIFIED` / `LIKELY_MATCH` / `POSSIBLE_MATCH` / `AMBIGUOUS_MATCH` / `UNVERIFIED_NO_DOI` / `NO_MATCH_FOUND` / `PARSE_FAILED`. **Confidence-based, không phải xác minh tuyệt đối.** Crossref/OpenAlex fail độc lập, không crash; không synth DOI/metadata; không dùng LLM để parse/verify (CODEX.md Directive 1).
+- Citation verification có hai nhánh độc lập: (a) **DOI exact** qua Crossref/OpenAlex DOI lookup (`DOI_VERIFIED` / `DOI_NOT_FOUND`, không fallback fuzzy); (b) **No-DOI metadata matching** qua `search_crossref_candidates()` + `search_openalex_candidates()`, sau đó gọi Semantic Scholar fallback nếu không có candidates hoặc best score `< semantic_scholar_fallback_threshold` (mặc định `0.90`). Tất cả candidates được dedupe theo DOI, external ID, rồi normalized title+year; `score_candidate()` (title 0.45 · authors 0.25 · year 0.15 · venue 0.10 · vol/pages 0.05) + `choose_best_match()` với safety caps. Nếu có best candidate, backend có thể trả `completed_metadata`, APA-like, BibTeX và CSL JSON chỉ từ field thật của candidate. Status enum: `METADATA_VERIFIED` / `LIKELY_MATCH` / `POSSIBLE_MATCH` / `AMBIGUOUS_MATCH` / `UNVERIFIED_NO_DOI` / `NO_MATCH_FOUND` / `PARSE_FAILED`. **Confidence-based, không phải xác minh tuyệt đối.** Crossref/OpenAlex/Semantic Scholar fail độc lập, không crash; không synth DOI/metadata; không dùng LLM để parse/verify (CODEX.md Directive 1).
 - Retraction scan khi không có DOI được biểu diễn rõ là `total_checked=0` và `no_doi_found=true`.
 - Journal vector pipeline: ChromaDB `journal_cfps` + `allenai/specter2_base` (768-dim) cho ingest và retrieval.
 - Heuristic fallback: `all-MiniLM-L6-v2` chỉ còn dùng cho fallback intent classification (`heuristic_router.py`), không dùng cho JournalFinder vector retrieval.
@@ -267,7 +267,7 @@ graph LR
 
 | Tool | File | ML Model / API | Chức năng |
 |------|------|----------------|-----------|
-| **CitationChecker** | `tools/citation_checker.py` | PyAlex + Habanero + httpx | Hai nhánh xác minh: (1) **DOI exact** — Crossref/OpenAlex DOI lookup, trả `DOI_VERIFIED`/`DOI_NOT_FOUND`. (2) **No-DOI metadata matching** — `parse_reference_metadata()` → `search_crossref_candidates()` + `search_openalex_candidates()` → merge dedupe → `score_candidate()` (title 0.45 · authors 0.25 · year 0.15 · venue 0.10 · vol/pages 0.05) → `choose_best_match()` với safety caps (title_sim < 0.75 ⇒ max `POSSIBLE_MATCH`; author_overlap=0 và year_score<1 ⇒ max `POSSIBLE_MATCH`; top1−top2<0.05 ⇒ `AMBIGUOUS_MATCH`). Status enum: `METADATA_VERIFIED`/`LIKELY_MATCH`/`POSSIBLE_MATCH`/`AMBIGUOUS_MATCH`/`UNVERIFIED_NO_DOI`/`NO_MATCH_FOUND`/`PARSE_FAILED`. Crossref/OpenAlex fail độc lập, không crash. Confidence-based, không phải xác minh tuyệt đối. Tôn trọng CODEX.md Directive 1 (zero hallucination) — không synth DOI/metadata, không dùng LLM để parse/verify. |
+| **CitationChecker** | `tools/citation_checker.py` | PyAlex + Habanero + httpx | Hai nhánh xác minh: (1) **DOI exact** — Crossref/OpenAlex DOI lookup, trả `DOI_VERIFIED`/`DOI_NOT_FOUND`. (2) **No-DOI metadata matching** — `parse_reference_metadata()` → Crossref + OpenAlex candidates → Semantic Scholar fallback nếu không có candidates hoặc best score `< 0.90` → merge dedupe theo DOI / external ID / normalized title+year → `score_candidate()` (title 0.45 · authors 0.25 · year 0.15 · venue 0.10 · vol/pages 0.05) → `choose_best_match()` với safety caps. Khi có best candidate, trả metadata completion (`completed_metadata`, APA-like, BibTeX, CSL JSON) chỉ từ field thật của candidate. Status enum: `METADATA_VERIFIED`/`LIKELY_MATCH`/`POSSIBLE_MATCH`/`AMBIGUOUS_MATCH`/`UNVERIFIED_NO_DOI`/`NO_MATCH_FOUND`/`PARSE_FAILED`. Crossref/OpenAlex/Semantic Scholar fail độc lập, không crash. Confidence-based, không phải xác minh tuyệt đối. Zero hallucination — không synth DOI/metadata, không dùng LLM để parse/verify. |
 | **JournalFinder** | `tools/journal_finder.py` | ChromaDB + SentenceTransformer (`allenai/specter2_base`) | Recommend journals: query ChromaDB `journal_cfps` collection with Specter2 embeddings (768-dim) + bounded similarity scoring. Data seeded by `backend/crawler/` pipeline |
 | **RetractionScanner** | `tools/retraction_scan.py` | Crossref + OpenAlex + PubPeer | Scan DOIs: check retraction status, risk level, title-based detection, PubPeer comments |
 | **AIWritingDetector** | `tools/ai_writing_detector.py` | RoBERTa (`roberta-base-openai-detector`) | Detect AI text: ensemble 70% ML (RoBERTa) + 30% rule-based (7 features) |
@@ -1300,16 +1300,22 @@ graph TB
             ParseRef["parse_reference_metadata(raw)<br/>title/authors/year/venue/vol/pages<br/>(heuristic — no LLM)"]
             CRSearch["search_crossref_candidates(ref)<br/>Habanero + httpx fallback"]
             OASearch["search_openalex_candidates(ref)<br/>pyalex + httpx fallback"]
-            MergeDedup["_merge_candidates()<br/>dedupe by DOI / normalized title"]
+            S2Gate{"No candidates<br/>or best score < threshold?"}
+            S2Search["search_semantic_scholar_candidates(ref)<br/>Graph API paper/search (fail-safe)"]
+            MergeDedup["_merge_candidates()<br/>dedupe by DOI / external ID / title+year"]
             Score["score_candidate()<br/>title 0.45 · authors 0.25 · year 0.15<br/>· venue 0.10 · vol/pages 0.05"]
             ChooseBest["choose_best_match()<br/>+ safety caps + AMBIGUOUS detection"]
+            Completion["build_completed_metadata()<br/>APA-like · BibTeX · CSL JSON<br/>(candidate fields only)"]
             MetaStatus["METADATA_VERIFIED · LIKELY_MATCH<br/>POSSIBLE_MATCH · AMBIGUOUS_MATCH<br/>UNVERIFIED_NO_DOI · NO_MATCH_FOUND<br/>PARSE_FAILED"]
             ParseRef -->|"low conf / no title"| MetaStatus
             ParseRef --> CRSearch
             ParseRef --> OASearch
             CRSearch --> MergeDedup
             OASearch --> MergeDedup
-            MergeDedup --> Score --> ChooseBest --> MetaStatus
+            MergeDedup --> S2Gate
+            S2Gate -->|"Yes"| S2Search --> MergeDedup
+            S2Gate -->|"No"| Score
+            Score --> ChooseBest --> Completion --> MetaStatus
         end
 
         Stats["get_statistics()<br/>doi_verified · metadata_verified · likely_match<br/>possible_match · ambiguous_match · no_match_found<br/>parse_failed · unverified_no_doi · total<br/>(verified_rate, risk_rate)"]
@@ -1328,6 +1334,7 @@ graph TB
     subgraph EXTERNAL["🌐 External APIs"]
         CrossrefAPI["Crossref API<br/>api.crossref.org/works"]
         OpenAlexAPI["OpenAlex API<br/>api.openalex.org/works"]
+        SemanticAPI["Semantic Scholar Graph API<br/>api.semanticscholar.org/graph/v1"]
     end
 
     %% Flow connections
@@ -1348,6 +1355,7 @@ graph TB
     HabHTTP -->|"HTTP GET"| CrossrefAPI
     PyAlexSDK -->|"SDK call"| OpenAlexAPI
     PyAlexHTTP -->|"HTTP GET"| OpenAlexAPI
+    S2Search -->|"HTTP GET paper/search"| SemanticAPI
 
     VERIFY_DOI --> Stats
     VERIFY_AUTHOR --> Stats
@@ -1374,7 +1382,7 @@ graph TB
     class ChatSvc,FileCtx,GroqSvc,GroqAPI,FCLoop,FnCall llm
     class Extract,HabSDK,HabHTTP,DOI_OK,PyAlexSDK,PyAlexHTTP,FuzzyMatch,StatusDecide,Stats checker
     class MsgTable db
-    class CrossrefAPI,OpenAlexAPI external
+    class CrossrefAPI,OpenAlexAPI,SemanticAPI external
     class Convert,FnResp,Persist persist
 ```
 
@@ -2725,6 +2733,25 @@ if title.upper().startswith("RETRACTED:"):
 - `httpx.HTTPTransport(retries=2)` cho reliability
 - Crossref `update-to` field không đáng tin (rỗng cho nhiều paper đã retract) → bổ sung title-based detection
 
+### 7.4.1 Semantic Scholar Graph API
+
+| Thuộc tính | Chi tiết |
+|-----------|---------|
+| **Vai trò** | Optional fallback source cho no-DOI metadata matching và metadata completion |
+| **SDK chính** | Không dùng SDK; `httpx` gọi REST trực tiếp |
+| **Endpoint** | `GET https://api.semanticscholar.org/graph/v1/paper/search` |
+| **Fields** | `paperId,url,title,authors,year,venue,externalIds,publicationTypes,publicationDate` |
+| **Auth** | Optional `x-api-key`; nếu `SEMANTIC_SCHOLAR_API_KEY` rỗng thì gọi public unauthenticated |
+| **Config** | `SEMANTIC_SCHOLAR_ENABLED=true`; `SEMANTIC_SCHOLAR_FALLBACK_THRESHOLD=0.90` |
+| **Sử dụng bởi** | `citation_checker.py` |
+
+**Flow trong CitationChecker:**
+- Không gọi Semantic Scholar nếu `semantic_scholar_enabled=false` hoặc reference thiếu title.
+- Gọi fallback chỉ khi Crossref/OpenAlex không có candidates, hoặc best score hiện tại thấp hơn threshold.
+- Normalize paper thành `CandidateWork(source="semantic_scholar")` với `doi` chỉ lấy từ `externalIds.DOI`; không tạo DOI/URL giả.
+- 429, 5xx, timeout, network error hoặc JSON error trả `[]`, không crash endpoint.
+- Candidates từ ba nguồn được dedupe theo DOI, external ID, rồi normalized title+year; scoring và safety caps vẫn dùng `score_candidate()` và `choose_best_match()` chung.
+
 ### 7.5 PubPeer API
 
 | Thuộc tính | Chi tiết |
@@ -3213,16 +3240,17 @@ decoded = jwt.decode(token, settings.jwt_secret_key, algorithms=["HS256"])
 | 1 | Groq (LLaMA 3.1) | LLM API | `groq` | Heuristic Fallback → Static message | ✅ OK | ~0.8s |
 | 2 | OpenAlex | REST API | `pyalex` + `httpx` | SDK → HTTP → UNVERIFIED | ✅ OK | ~2.0s |
 | 3 | Crossref | REST API | `habanero` + `httpx` | SDK → HTTP → UNVERIFIED | ✅ OK | ~1.0s |
-| 4 | PubPeer | REST API | `httpx` (POST) | Graceful degrade → 0 comments | ✅ OK | ~0.4s |
-| 5 | HuggingFace Hub | Model Repo | `huggingface-hub` | Online → Local cache | ✅ OK | — |
-| 6 | ChromaDB | Vector DB | `chromadb` + `sentence-transformers` | Empty DB → return [] | ✅ OK | ~0.05s |
-| 7 | RoBERTa | ML Model | `transformers` + `torch` | ML → Rule-based only | ✅ OK | ~0.1s |
-| 8 | PyMuPDF | Library | `fitz` | — (required) | ✅ OK | <0.1s |
-| 9 | SQLAlchemy | ORM | `sqlalchemy` | — (required) | ✅ OK | <0.01s |
-| 10 | AWS S3 | Cloud Storage | `boto3` | LocalStorage fallback | ✅ Ready | — |
-| 11 | bcrypt | Library | `bcrypt` | — (required) | ✅ OK | <0.01s |
-| 12 | python-jose | Library | `jose` | — (required) | ✅ OK | <0.01s |
-| 13 | PyCryptodome | Library | `Crypto` | — (required) | ✅ OK | <0.01s |
+| 4 | Semantic Scholar | REST API | `httpx` | Disabled/429/5xx/timeout → return [] | ✅ Optional | ~1.0s |
+| 5 | PubPeer | REST API | `httpx` (POST) | Graceful degrade → 0 comments | ✅ OK | ~0.4s |
+| 6 | HuggingFace Hub | Model Repo | `huggingface-hub` | Online → Local cache | ✅ OK | — |
+| 7 | ChromaDB | Vector DB | `chromadb` + `sentence-transformers` | Empty DB → return [] | ✅ OK | ~0.05s |
+| 8 | RoBERTa | ML Model | `transformers` + `torch` | ML → Rule-based only | ✅ OK | ~0.1s |
+| 9 | PyMuPDF | Library | `fitz` | — (required) | ✅ OK | <0.1s |
+| 10 | SQLAlchemy | ORM | `sqlalchemy` | — (required) | ✅ OK | <0.01s |
+| 11 | AWS S3 | Cloud Storage | `boto3` | LocalStorage fallback | ✅ Ready | — |
+| 12 | bcrypt | Library | `bcrypt` | — (required) | ✅ OK | <0.01s |
+| 13 | python-jose | Library | `jose` | — (required) | ✅ OK | <0.01s |
+| 14 | PyCryptodome | Library | `Crypto` | — (required) | ✅ OK | <0.01s |
 
 ### 7.14 Component Diagram — Citation Verification với Fallback Chain
 
@@ -3266,9 +3294,12 @@ graph LR
         ConfGate{"confidence > 0.4<br/>and has title?"}
         CRCands["search_crossref_candidates()<br/>Habanero / httpx (fail-safe)"]
         OACands["search_openalex_candidates()<br/>pyalex / httpx (fail-safe)"]
-        Merge2["_merge_candidates()<br/>dedupe by DOI / norm-title"]
+        S2Gate{"No candidates<br/>or score < 0.90?"}
+        S2Cands["search_semantic_scholar_candidates()<br/>Graph API paper/search"]
+        Merge2["_merge_candidates()<br/>dedupe by DOI / external ID<br/>/ normalized title+year"]
         ScoreEngine["score_candidate()<br/>0.45·title + 0.25·authors<br/>+ 0.15·year + 0.10·venue<br/>+ 0.05·vol/pages"]
         Caps["choose_best_match()<br/>safety caps + AMBIGUOUS gap<br/>(< 0.05)"]
+        Complete["completed_metadata<br/>APA-like · BibTeX · CSL JSON"]
         MetaResult["METADATA_VERIFIED · LIKELY<br/>POSSIBLE · AMBIGUOUS<br/>UNVERIFIED_NO_DOI<br/>NO_MATCH_FOUND · PARSE_FAILED"]
 
         ParseMeta --> ConfGate
@@ -3277,12 +3308,15 @@ graph LR
         ConfGate -->|"Yes"| OACands
         CRCands --> Merge2
         OACands --> Merge2
-        Merge2 --> ScoreEngine --> Caps --> MetaResult
+        Merge2 --> S2Gate
+        S2Gate -->|"Yes"| S2Cands --> Merge2
+        S2Gate -->|"No"| ScoreEngine
+        ScoreEngine --> Caps --> Complete --> MetaResult
     end
 
     subgraph OUTPUT["📤 Output"]
         Merge["Merge results<br/>get_statistics()"]
-        Schema["CitationCheckResult<br/>(+ verification_mode, matched_*,<br/>candidates, evidence_breakdown,<br/>warning)<br/>→ CitationItem (Pydantic)"]
+        Schema["CitationCheckResult<br/>(+ verification_mode, matched_*,<br/>candidates, evidence_breakdown,<br/>warning, completion formats)<br/>→ CitationItem (Pydantic)"]
     end
 
     %% Flow
@@ -3309,7 +3343,7 @@ graph LR
     class UserText input
     class RegexEngine,DOI_Pat,APA_Pat,IEEE_Pat,Num_Pat,Van_Pat,Paren_Pat extract
     class Hab,HTTPX_CR,CR_Result crossref
-    class ParseMeta,CRCands,OACands,Merge2,ScoreEngine,Caps,MetaResult openalex
+    class ParseMeta,CRCands,OACands,S2Gate,S2Cands,Merge2,ScoreEngine,Caps,Complete,MetaResult openalex
     class Merge,Schema output
     class HabFail,ConfGate fail
 ```
