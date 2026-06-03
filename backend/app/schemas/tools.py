@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, model_validator
 
 class VerifyCitationRequest(BaseModel):
     session_id: str
-    text: str = Field(min_length=20)
+    text: str = Field(min_length=5)
 
 
 class CitationItem(BaseModel):
@@ -22,6 +22,10 @@ class CitationItem(BaseModel):
     verification_mode: str | None = None
     input_doi: str | None = None
     matched_doi: str | None = None
+    input_identifier: str | None = None
+    input_identifier_type: str | None = None
+    matched_identifier: str | None = None
+    matched_identifier_type: str | None = None
     matched_title: str | None = None
     matched_year: int | None = None
     matched_authors: list[str] = []
@@ -29,6 +33,13 @@ class CitationItem(BaseModel):
     candidates: list[dict[str, Any]] = []
     warning: str | None = None
     evidence_breakdown: dict[str, float] | None = None
+    reason: str | None = None
+    field_evidence: dict[str, Any] | None = None
+    source_diagnostics: dict[str, Any] | None = None
+    parse_status: str | None = None
+    search_attempted: bool = False
+    search_strategy: str | None = None
+    metadata_consistency: str | None = None
     completed_metadata: dict[str, Any] | None = None
     formatted_apa: str | None = None
     formatted_bibtex: str | None = None
@@ -163,6 +174,8 @@ class AIWritingDetectResult(BaseModel):
     skipped_detectors: list[str] = []
     fallback_reason: str | None = None
     detectors_used: list[str] = []
+    rule_source: str = "default_app_rules"
+    matched_rules: list[str] = []
 
 
 class AIWritingDetectResponse(BaseModel):

@@ -297,8 +297,16 @@ class SemanticIntentRouter:
     def classify(self, user_text: str) -> tuple[str | None, float]:
         """Return ``(intent, score)`` or ``(None, 0.0)`` if the model is
         unavailable or the confidence is below threshold."""
-        if not self._ensure_model():
+        scores = self.score_all(user_text)
+        if not scores:
             return None, 0.0
+        best_intent, best_score = scores[0]
+        return best_intent, best_score
+
+    def score_all(self, user_text: str) -> list[tuple[str, float]]:
+        """Return all semantic intent scores sorted high to low."""
+        if not self._ensure_model():
+            return []
 
         try:
             query_emb = self._model.encode(  # type: ignore[union-attr]
@@ -306,20 +314,25 @@ class SemanticIntentRouter:
             )
             # Cosine similarity (vectors already L2-normalised → dot product)
             similarities = (query_emb @ self._intent_embeddings.T)[0]  # type: ignore[union-attr]
-            best_idx = int(np.argmax(similarities))
-            best_score = float(similarities[best_idx])
-            best_intent = self._intent_labels[best_idx]
+            ranked = sorted(
+                (
+                    (label, float(score))
+                    for label, score in zip(self._intent_labels, similarities)
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )
 
             logger.debug(
                 "Semantic intent scores: %s | best=%s (%.3f)",
-                {l: f"{s:.3f}" for l, s in zip(self._intent_labels, similarities)},
-                best_intent,
-                best_score,
+                {label: f"{score:.3f}" for label, score in ranked},
+                ranked[0][0] if ranked else None,
+                ranked[0][1] if ranked else 0.0,
             )
-            return best_intent, best_score
+            return ranked
         except Exception as exc:
             logger.warning("SemanticIntentRouter.classify error: %s", exc)
-            return None, 0.0
+            return []
 
 
 # Module-level singleton (no work done until classify() is called)
@@ -421,7 +434,8 @@ def _template_citation(results: dict) -> str:
     """Generate fallback text for citation verification results."""
     stats = results.get("statistics", {})
     no_citation = bool(results.get("no_citation_found", False) or stats.get("no_citation_found", False))
-    return format_citation_summary(stats, no_citation_found=no_citation)
+    rows = results.get("results") if isinstance(results.get("results"), list) else None
+    return format_citation_summary(stats, no_citation_found=no_citation, results=rows)
 
 
 def _template_journal(results: dict) -> str:
@@ -515,6 +529,7 @@ def fallback_process_request(
     file_context: str | None,
     *,
     allowed_tool_names: set[str] | None = None,
+    user_ai_rule_phrases: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Attempt to process the user's request using heuristics + direct
     tool execution, bypassing Gemini entirely.
@@ -606,7 +621,10 @@ def fallback_process_request(
             if not _is_allowed(tool_name):
                 logger.info("Heuristic fallback skipped hidden tool: %s", tool_name)
                 return None
-            raw = detect_ai_writing(text=input_text)
+            raw = detect_ai_writing(
+                text=input_text,
+                user_ai_rule_phrases=user_ai_rule_phrases,
+            )
             text = _template_ai_detect(raw)
 
         elif intent == _Intent.GRAMMAR:

@@ -84,6 +84,7 @@ _TITLE_GENERATOR_SYSTEM_INSTRUCTION = (
     "Respond ONLY with the title itself, no quotes, no explanations. Language: Vietnamese."
 )
 _MODE_TITLE_LABELS: dict[str, str] = {
+    "auto": "auto-routed research chat",
     "general_qa": "general chat",
     "verification": "citation verification",
     "journal_match": "journal match",
@@ -337,10 +338,14 @@ except ImportError:
 # ── Tool singletons ─────────────────────────────────────────────────────
 from app.services.tools.retraction_scan import retraction_scanner, scan_verified_retractions
 from app.services.tools.citation_checker import citation_checker
-from app.services.tools.journal_finder import journal_finder
 from app.services.academic_policy import sanitize_user_text
 from app.services.tools.ai_writing_detector import ai_writing_detector
 from app.services.tools.grammar_checker import grammar_checker
+
+try:
+    from app.services.tools.journal_finder import journal_finder
+except Exception:  # pragma: no cover - optional heavy dependency path
+    journal_finder = None  # type: ignore[assignment]
 
 
 # =========================================================================
@@ -384,7 +389,8 @@ def _build_tool_guidance(
             + (". Ưu tiên document_id." if document_ids else ". Dùng inline text chứa DOI.")
         ),
         "verify_citation": (
-            "Xác minh trích dẫn/reference. DOI input phải resolve exact trước, không fuzzy thay thế"
+            "Xác minh trích dẫn/reference. DOI input phải resolve exact trước, không fuzzy thay thế. "
+            "PMID/PMCID và OpenAlex ID cũng phải resolve exact trước"
             + (". Ưu tiên document_id." if document_ids else ". Dùng inline text chứa citations.")
         ),
         "match_journal": (
@@ -541,6 +547,8 @@ def verify_citation(text: str) -> dict:
 
 def match_journal(abstract: str, title: str = "") -> dict:
     """Find suitable academic journals using SPECTER2 semantic matching."""
+    if journal_finder is None:
+        return {"error": "journal_finder_unavailable", "journals": []}
     try:
         journals = journal_finder.recommend(
             abstract=abstract, title=title or None, top_k=5,
@@ -551,7 +559,11 @@ def match_journal(abstract: str, title: str = "") -> dict:
         return {"error": str(exc), "journals": []}
 
 
-def detect_ai_writing(text: str) -> dict:
+def detect_ai_writing(
+    text: str,
+    *,
+    user_ai_rule_phrases: list[str] | None = None,
+) -> dict:
     """Execution-layer AI writing analysis.
 
     Router contract:
@@ -562,7 +574,10 @@ def detect_ai_writing(text: str) -> dict:
       then calls this wrapper with resolved `text`.
     """
     try:
-        result = ai_writing_detector.analyze(text)
+        result = ai_writing_detector.analyze(
+            text,
+            custom_rule_phrases=user_ai_rule_phrases,
+        )
         return _make_serializable(asdict(result))
     except Exception as exc:
         logger.error("detect_ai_writing failed: %s", exc, exc_info=True)
@@ -866,6 +881,7 @@ def _build_tool_state_text(tool_name: str, result: dict[str, Any]) -> str | None
         return format_citation_summary(
             stats,
             no_citation_found=bool(result.get("no_citation_found", False)),
+            results=result.get("results") if isinstance(result.get("results"), list) else None,
         )
 
     if tool_name == "match_journal":
@@ -960,6 +976,8 @@ def _compact_tool_result_for_model(tool_name: str, full_result: dict) -> dict:
             "valid": stats.get("valid", 0),
             "doi_verified": stats.get("doi_verified", 0),
             "doi_not_found": stats.get("doi_not_found", 0),
+            "identifier_verified": stats.get("identifier_verified", 0),
+            "identifier_not_found": stats.get("identifier_not_found", 0),
             "partial_match": stats.get("partial_match", 0),
             "hallucinated": stats.get("hallucinated", 0),
             "unverified": stats.get("unverified", 0),
@@ -1167,6 +1185,7 @@ def _detect_explicit_tool_requests(prepared_user_text: str) -> list[str]:
     has_citation = bool(citation_match)
     has_retraction = bool(retraction_match)
     has_doi = bool(citation_checker.extract_dois(signal))
+    has_exact_identifier = bool(citation_checker.extract_exact_identifiers(signal))
 
     if has_citation and has_retraction:
         if not _BOTH_ACTION_HINT_RE.search(low):
@@ -1183,8 +1202,8 @@ def _detect_explicit_tool_requests(prepared_user_text: str) -> list[str]:
         return ["verify_citation"]
     if has_retraction:
         return ["scan_retraction_and_pubpeer"]
-    if has_doi:
-        # Bare DOI / DOI URL / doi: prefix without explicit keywords
+    if has_doi or has_exact_identifier:
+        # Bare DOI / PMID / PMCID / OpenAlex ID without explicit keywords
         # → default to citation verification
         # But if the message contains analytical/journal intent keywords,
         # skip forced tool interception and let Groq decide.
@@ -1247,6 +1266,8 @@ def _execute_tool_call(
     fn_name: str,
     fn_args: dict[str, Any],
     allowed_document_ids: set[str],
+    *,
+    user_ai_rule_phrases: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute a single tool call, resolving document_id if needed."""
     fn = _TOOL_FUNCTIONS.get(fn_name)
@@ -1331,6 +1352,9 @@ def _execute_tool_call(
         len(exec_args.get(target_arg or "text", "")),
     )
 
+    if fn_name == "detect_ai_writing":
+        exec_args["user_ai_rule_phrases"] = user_ai_rule_phrases
+
     try:
         return fn(**exec_args)
     except Exception as exc:
@@ -1401,6 +1425,7 @@ class GroqLLMService:
         messages: list[dict[str, Any]],
         *,
         allowed_tool_names: set[str] | None = None,
+        user_ai_rule_phrases: list[str] | None = None,
     ) -> FunctionCallingResponse | None:
         """Attempt heuristic tool execution when Groq is unavailable.
 
@@ -1446,6 +1471,7 @@ class GroqLLMService:
                 user_text,
                 file_context,
                 allowed_tool_names=allowed_tool_names,
+                user_ai_rule_phrases=user_ai_rule_phrases,
             )
             if result is None:
                 return None
@@ -1510,6 +1536,8 @@ class GroqLLMService:
         messages: list[dict[str, str]],
         available_tools: list[dict[str, Any]],
         allowed_document_ids: set[str],
+        *,
+        user_ai_rule_phrases: list[str] | None = None,
     ) -> FunctionCallingResponse:
         """Run the function-calling loop."""
         all_tool_calls: list[dict[str, Any]] = []
@@ -1547,6 +1575,7 @@ class GroqLLMService:
                 fallback = self._try_heuristic_fallback(
                     messages,
                     allowed_tool_names=available_tool_names,
+                    user_ai_rule_phrases=user_ai_rule_phrases,
                 )
                 if fallback is not None:
                     return fallback
@@ -1566,6 +1595,7 @@ class GroqLLMService:
                 fallback = self._try_heuristic_fallback(
                     messages,
                     allowed_tool_names=available_tool_names,
+                    user_ai_rule_phrases=user_ai_rule_phrases,
                 )
                 if fallback is not None:
                     return fallback
@@ -1593,6 +1623,7 @@ class GroqLLMService:
                     fallback = self._try_heuristic_fallback(
                         messages,
                         allowed_tool_names=available_tool_names,
+                        user_ai_rule_phrases=user_ai_rule_phrases,
                     )
                     if fallback is not None:
                         return fallback
@@ -1671,7 +1702,10 @@ class GroqLLMService:
 
                 # Execute
                 result = _execute_tool_call(
-                    fn_name, fn_args, allowed_document_ids,
+                    fn_name,
+                    fn_args,
+                    allowed_document_ids,
+                    user_ai_rule_phrases=user_ai_rule_phrases,
                 )
 
                 # Store FULL result for UI/persistence
@@ -1741,6 +1775,7 @@ class GroqLLMService:
         user_text: str,
         system_prompt_override: str | None = None,
         expose_tools: bool = True,
+        user_ai_rule_phrases: list[str] | None = None,
     ) -> FunctionCallingResponse:
         """Generate a response with Function Calling support.
 
@@ -1812,7 +1847,10 @@ class GroqLLMService:
         # 6. Run FC loop
         try:
             response = self._generate_with_fc(
-                messages, available_tools, current_doc_ids,
+                messages,
+                available_tools,
+                current_doc_ids,
+                user_ai_rule_phrases=user_ai_rule_phrases,
             )
             response.text = _strip_pseudo_tool_syntax(response.text)
             if not response.text.strip():

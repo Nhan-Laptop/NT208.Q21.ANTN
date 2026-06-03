@@ -28,12 +28,31 @@ from app.services.academic_verification_formatter import (
     format_citation_summary,
     format_retraction_summary,
 )
+from app.services.ai_detection_rules import get_user_ai_detection_rule_phrases
+from app.services.auto_intent_router import (
+    FEATURE_AI_DETECTION,
+    FEATURE_DOI_METADATA,
+    FEATURE_GENERAL_QA,
+    FEATURE_GRAMMAR,
+    FEATURE_JOURNAL_MATCH,
+    FEATURE_LABELS,
+    FEATURE_RETRACTION,
+    FEATURE_VERIFICATION,
+    AutoIntentResult,
+    auto_intent_router,
+)
 from app.services.llm_service import gemini_service
-from app.services.journal_match.service import build_legacy_journal_payload, journal_match_service
 from app.services.journal_match.topic_profile import ManuscriptTopicProfile
 from app.services.tools.ai_writing_detector import ai_writing_detector
 from app.services.tools.citation_checker import citation_checker
+from app.services.tools.grammar_checker import grammar_checker
 from app.services.tools.retraction_scan import retraction_scanner, scan_verified_retractions
+
+try:
+    from app.services.journal_match.service import build_legacy_journal_payload, journal_match_service
+except Exception:  # pragma: no cover - optional heavy dependency path
+    build_legacy_journal_payload = None  # type: ignore[assignment]
+    journal_match_service = None  # type: ignore[assignment]
 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +62,7 @@ class ChatService:
     DEFAULT_SESSION_TITLE = "Trò chuyện mới"
     _LEGACY_DEFAULT_TITLES = {"new chat", "trò chuyện mới"}
     _MODE_DEFAULT_TITLES: dict[SessionMode, str] = {
+        SessionMode.AUTO: "Trò chuyện mới",
         SessionMode.GENERAL_QA: "Trò chuyện mới",
         SessionMode.VERIFICATION: "Xác minh trích dẫn",
         SessionMode.JOURNAL_MATCH: "Gợi ý tạp chí",
@@ -74,6 +94,15 @@ class ChatService:
         r")\b",
         re.IGNORECASE,
     )
+    DOI_METADATA_REQUEST_PATTERN = re.compile(
+        r"\b("
+        r"analyze|phân\s*tích|provide|show|extract|list|"
+        r"thông\s*tin\s+về|thong\s*tin\s+ve|information\s+about|"
+        r"doi\s+info|doi\s+metadata|metadata\s+doi|metadata|paper\s+info|"
+        r"abstract|summary"
+        r")\b",
+        re.IGNORECASE,
+    )
     DOI_INFO_PATTERN = re.compile(
         r"\b("
         r"thông\s*tin\s*về|thong\s*tin\s+ve|information\s+about|doi\s+info|"
@@ -83,6 +112,21 @@ class ChatService:
         r"main\s*topic|chủ\s*đề|abstract|summary"
         r")\b",
         re.IGNORECASE,
+    )
+    DOI_METADATA_FIELD_PATTERNS = (
+        re.compile(r"\btitle\b", re.IGNORECASE),
+        re.compile(r"\bjournal\b", re.IGNORECASE),
+        re.compile(r"\bpublisher\b", re.IGNORECASE),
+        re.compile(r"\bpublication\s*year\b", re.IGNORECASE),
+        re.compile(r"\bresearch\s*field\b", re.IGNORECASE),
+        re.compile(r"\bmain\s*topic\b", re.IGNORECASE),
+        re.compile(r"\bmetadata\b", re.IGNORECASE),
+        re.compile(r"\babstract\b", re.IGNORECASE),
+        re.compile(r"\bsummary\b", re.IGNORECASE),
+        re.compile(r"\blĩnh\s*vực\b", re.IGNORECASE),
+        re.compile(r"\bchủ\s*đề\b", re.IGNORECASE),
+        re.compile(r"\btạp\s*chí\b", re.IGNORECASE),
+        re.compile(r"\bnăm\s*xuất\s*bản\b", re.IGNORECASE),
     )
     _FILE_CONTEXT_MAX_CHARS = 15_000
 
@@ -287,6 +331,7 @@ class ChatService:
                 summary = format_citation_summary(
                     stats,
                     no_citation_found=bool(stats.get("no_citation_found", False)),
+                    results=citation_results,
                 )
                 return MessageType.CITATION_REPORT, summary, {"type": "citation_report", "data": data}
             except Exception as exc:
@@ -297,6 +342,11 @@ class ChatService:
                 ), {"type": "text", "error": str(exc)}
 
         if mode == SessionMode.JOURNAL_MATCH:
+            if journal_match_service is None or build_legacy_journal_payload is None:
+                return MessageType.TEXT, (
+                    "Tính năng gợi ý tạp chí hiện chưa sẵn sàng trong môi trường này. "
+                    "Bạn vui lòng thử lại sau."
+                ), {"type": "text", "error": "journal_match_service_unavailable"}
             try:
                 request = journal_match_service.create_match_request(
                     db,
@@ -348,7 +398,10 @@ class ChatService:
 
         if mode == SessionMode.AI_DETECTION:
             try:
-                result = ai_writing_detector.analyze(text)
+                result = ai_writing_detector.analyze(
+                    text,
+                    custom_rule_phrases=get_user_ai_detection_rule_phrases(current_user),
+                )
                 data = asdict(result)
                 summary = f"AI writing detection: score={data['score']}, verdict={data['verdict']}."
                 return MessageType.AI_WRITING_DETECTION, summary, {"type": "ai_writing_detection", "data": data}
@@ -367,6 +420,101 @@ class ChatService:
         except Exception as exc:
             logger.exception("Fallback mode failed for session %s", session_id)
             return MessageType.TEXT, "Mình chưa xử lý được yêu cầu này. Bạn vui lòng thử lại sau.", {"type": "text", "error": str(exc)}
+
+    def _run_grammar_tool(
+        self,
+        session_id: str,
+        text: str,
+    ) -> tuple[MessageType, str, dict[str, Any]]:
+        try:
+            raw = grammar_checker.check_grammar(text)
+            total = raw.get("total_errors", 0)
+            if total == 0:
+                summary = "✅ Không phát hiện lỗi ngữ pháp hay chính tả."
+            else:
+                summary = f"✍️ Phát hiện {total} lỗi ngữ pháp/chính tả. Văn bản đã được sửa tự động."
+            return MessageType.GRAMMAR_REPORT, summary, {"type": "grammar_report", "data": raw}
+        except Exception as exc:
+            logger.exception("GRAMMAR mode failed for session %s", session_id)
+            return MessageType.TEXT, (
+                "Mình chưa kiểm tra ngữ pháp được cho nội dung này. "
+                "Bạn vui lòng thử lại sau."
+            ), {"type": "text", "error": str(exc)}
+
+    @staticmethod
+    def _with_routing_meta(
+        tool_results: dict[str, Any] | list[Any] | None,
+        route: AutoIntentResult,
+    ) -> dict[str, Any]:
+        routing = route.to_routing_dict()
+        if isinstance(tool_results, dict):
+            payload = dict(tool_results)
+            meta = payload.get("meta")
+            payload["meta"] = {
+                **(meta if isinstance(meta, dict) else {}),
+                "routing": routing,
+            }
+            return payload
+        return {"meta": {"routing": routing}}
+
+    @staticmethod
+    def _feature_from_payload(
+        message_type: MessageType,
+        tool_results: dict[str, Any] | list[Any] | None,
+    ) -> str | None:
+        if message_type == MessageType.CITATION_REPORT:
+            return FEATURE_VERIFICATION
+        if message_type == MessageType.JOURNAL_LIST:
+            return FEATURE_JOURNAL_MATCH
+        if message_type == MessageType.RETRACTION_REPORT:
+            return FEATURE_RETRACTION
+        if message_type == MessageType.AI_WRITING_DETECTION:
+            return FEATURE_AI_DETECTION
+        if message_type == MessageType.GRAMMAR_REPORT:
+            return FEATURE_GRAMMAR
+        if isinstance(tool_results, dict) and tool_results.get("type") == "doi_metadata":
+            return FEATURE_DOI_METADATA
+        return None
+
+    def _finalize_auto_response(
+        self,
+        route: AutoIntentResult,
+        message_type: MessageType,
+        content: str,
+        tool_results: dict[str, Any] | list[Any] | None,
+    ) -> tuple[MessageType, str, dict[str, Any]]:
+        resolved_feature = self._feature_from_payload(message_type, tool_results)
+        if resolved_feature and resolved_feature != route.resolved_feature:
+            route = AutoIntentResult(
+                resolved_feature=resolved_feature,
+                resolved_label=FEATURE_LABELS.get(resolved_feature, resolved_feature),
+                confidence=route.confidence,
+                source=f"{route.source}+response_shape",
+                candidates=route.candidates,
+                is_ambiguous=route.is_ambiguous,
+            )
+        return message_type, content, self._with_routing_meta(tool_results, route)
+
+    @staticmethod
+    def _build_intent_disambiguation(route: AutoIntentResult) -> tuple[MessageType, str, dict[str, Any]]:
+        candidate_labels = [candidate.label for candidate in route.candidates[:3]]
+        if len(candidate_labels) == 1:
+            content = f"Mình chưa chắc bạn muốn dùng {candidate_labels[0]}. Bạn có thể nói rõ hơn yêu cầu không?"
+        else:
+            options = "; ".join(
+                f"{index + 1}. {label}" for index, label in enumerate(candidate_labels)
+            )
+            content = (
+                "Mình thấy prompt này có thể thuộc nhiều tính năng. "
+                f"Bạn muốn mình dùng lựa chọn nào: {options}?"
+            )
+        payload = {
+            "type": "intent_disambiguation",
+            "data": {
+                "candidates": [candidate.to_dict() for candidate in route.candidates],
+            },
+        }
+        return MessageType.TEXT, content, ChatService._with_routing_meta(payload, route)
 
     def _get_file_context(self, db: Session, session_id: str) -> str | None:
         """Retrieve extracted text from the most recent file in this session.
@@ -402,6 +550,217 @@ class ChatService:
             return None
         return citation_checker.normalize_doi(dois[0])
 
+    def _is_doi_metadata_request(self, text: str) -> bool:
+        normalized = (text or "").strip()
+        if not normalized or not self._extract_first_doi(normalized):
+            return False
+        field_hits = sum(1 for pattern in self.DOI_METADATA_FIELD_PATTERNS if pattern.search(normalized))
+        has_request_phrase = bool(self.DOI_METADATA_REQUEST_PATTERN.search(normalized))
+        has_info_phrase = bool(self.DOI_INFO_PATTERN.search(normalized))
+        return has_info_phrase and (has_request_phrase or field_hits >= 3)
+
+    @staticmethod
+    def _clean_metadata_text(value: str | None) -> str | None:
+        if not value:
+            return None
+        text = re.sub(r"<[^>]+>", " ", str(value))
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or None
+
+    @staticmethod
+    def _decode_openalex_abstract(payload: dict[str, Any]) -> str | None:
+        abstract = payload.get("abstract")
+        if isinstance(abstract, str) and abstract.strip():
+            return abstract.strip()
+
+        inverted = payload.get("abstract_inverted_index")
+        if not isinstance(inverted, dict) or not inverted:
+            return None
+
+        size = 0
+        for positions in inverted.values():
+            if not isinstance(positions, list):
+                continue
+            for pos in positions:
+                if isinstance(pos, int):
+                    size = max(size, pos + 1)
+        if size <= 0:
+            return None
+
+        tokens = [""] * size
+        for word, positions in inverted.items():
+            if not isinstance(word, str) or not isinstance(positions, list):
+                continue
+            for pos in positions:
+                if isinstance(pos, int) and 0 <= pos < size:
+                    tokens[pos] = word
+        text = " ".join(token for token in tokens if token).strip()
+        return text or None
+
+    @staticmethod
+    def _dedupe_text_list(values: list[Any] | None) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for value in values or []:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(text)
+        return deduped
+
+    @staticmethod
+    def _display_source_label(source: str | None) -> str | None:
+        normalized = (source or "").strip().lower()
+        if not normalized:
+            return None
+        if "crossref" in normalized:
+            return "Crossref"
+        if "openalex" in normalized or normalized == "pyalex":
+            return "OpenAlex"
+        if "semantic" in normalized:
+            return "Semantic Scholar"
+        return source
+
+    @classmethod
+    def _missing_metadata_note_prefix(cls, source_label: str | None) -> str:
+        normalized = (source_label or "").lower()
+        if "crossref" in normalized or "openalex" in normalized or "semantic" in normalized:
+            return "Not directly available from Crossref/OpenAlex metadata."
+        return "Not directly available from the verified metadata source."
+
+    @classmethod
+    def _derive_research_field(
+        cls,
+        *,
+        subjects: list[str],
+        keywords: list[str],
+        source_label: str | None,
+    ) -> tuple[str | None, str, str | None]:
+        if subjects:
+            return subjects[0], "source", None
+        if keywords:
+            return (
+                keywords[0],
+                "inferred",
+                f"{cls._missing_metadata_note_prefix(source_label)} Inferred from source keywords.",
+            )
+        return None, "unavailable", cls._missing_metadata_note_prefix(source_label)
+
+    @classmethod
+    def _derive_main_topic(
+        cls,
+        *,
+        title: str | None,
+        keywords: list[str],
+        subjects: list[str],
+        source_label: str | None,
+    ) -> tuple[str | None, str, str | None]:
+        keyword_topic = ", ".join(keywords[:3]).strip()
+        if keyword_topic:
+            return keyword_topic, "source", None
+        if title:
+            return (
+                title,
+                "inferred",
+                f"{cls._missing_metadata_note_prefix(source_label)} Inferred from the article title.",
+            )
+        if subjects:
+            return (
+                subjects[0],
+                "inferred",
+                f"{cls._missing_metadata_note_prefix(source_label)} Inferred from subject terms.",
+            )
+        return None, "unavailable", cls._missing_metadata_note_prefix(source_label)
+
+    @classmethod
+    def _build_doi_metadata_payload(
+        cls,
+        *,
+        doi: str,
+        status: str,
+        source: str | None,
+        confidence: float | None,
+        title: str | None,
+        abstract: str | None,
+        publication_year: int | None,
+        journal: str | None,
+        publisher: str | None,
+        authors: list[Any] | None,
+        subjects: list[Any] | None,
+        keywords: list[Any] | None,
+        url: str | None,
+    ) -> dict[str, Any]:
+        cleaned_title = cls._clean_metadata_text(title)
+        cleaned_abstract = cls._clean_metadata_text(abstract)
+        cleaned_journal = cls._clean_metadata_text(journal)
+        cleaned_publisher = cls._clean_metadata_text(publisher)
+        cleaned_authors = cls._dedupe_text_list(authors)
+        cleaned_subjects = cls._dedupe_text_list(subjects)
+        cleaned_keywords = cls._dedupe_text_list(keywords)
+        source_label = cls._display_source_label(source) or source
+
+        research_field, research_field_basis, research_field_note = cls._derive_research_field(
+            subjects=cleaned_subjects,
+            keywords=cleaned_keywords,
+            source_label=source_label,
+        )
+        main_topic, main_topic_basis, main_topic_note = cls._derive_main_topic(
+            title=cleaned_title,
+            keywords=cleaned_keywords,
+            subjects=cleaned_subjects,
+            source_label=source_label,
+        )
+
+        missing_fields: list[str] = []
+        if not cleaned_title:
+            missing_fields.append("title")
+        if not cleaned_journal:
+            missing_fields.append("journal")
+        if not cleaned_publisher:
+            missing_fields.append("publisher")
+        if publication_year is None:
+            missing_fields.append("publication_year")
+        if not research_field:
+            missing_fields.append("research_field")
+        if not main_topic:
+            missing_fields.append("main_topic")
+
+        notes: list[str] = []
+        for note in (research_field_note, main_topic_note):
+            if note and note not in notes:
+                notes.append(note)
+
+        return {
+            "status": status,
+            "doi": doi,
+            "title": cleaned_title,
+            "abstract": cleaned_abstract,
+            "year": publication_year,
+            "publication_year": publication_year,
+            "venue": cleaned_journal,
+            "journal": cleaned_journal,
+            "publisher": cleaned_publisher,
+            "authors": cleaned_authors,
+            "subjects": cleaned_subjects,
+            "keywords": cleaned_keywords,
+            "research_field": research_field,
+            "research_field_basis": research_field_basis,
+            "research_field_note": research_field_note,
+            "main_topic": main_topic,
+            "main_topic_basis": main_topic_basis,
+            "main_topic_note": main_topic_note,
+            "url": url,
+            "verification_status": "Valid DOI" if status == "verified" else "DOI not found",
+            "confidence": float(confidence or 0.0),
+            "source": source_label or source,
+            "missing_fields": missing_fields,
+            "notes": notes,
+        }
+
     def _resolve_doi_metadata(self, db: Session, doi: str) -> tuple[dict[str, Any], str]:
         normalized = citation_checker.normalize_doi(doi)
         article = (
@@ -420,38 +779,52 @@ class ChatService:
                 subjects = [subject.label for subject in article.venue.subjects if subject.label]
             keywords = [keyword.keyword for keyword in article.keywords if keyword.keyword]
             authors = [author.full_name for author in article.authors if author.full_name]
-            metadata = {
-                "status": "verified",
-                "source": USER_SAFE_CORPUS_LABEL,
-                "doi": normalized,
-                "title": article.title,
-                "abstract": article.abstract,
-                "year": article.publication_year,
-                "venue": article.venue.title if article.venue else None,
-                "authors": authors,
-                "subjects": subjects,
-                "keywords": keywords,
-                "url": article.url,
-            }
+            metadata = self._build_doi_metadata_payload(
+                doi=normalized,
+                status="verified",
+                source=USER_SAFE_CORPUS_LABEL,
+                confidence=1.0,
+                title=article.title,
+                abstract=article.abstract,
+                publication_year=article.publication_year,
+                journal=article.venue.title if article.venue else None,
+                publisher=article.publisher or (article.venue.publisher if article.venue else None),
+                authors=authors,
+                subjects=subjects,
+                keywords=keywords,
+                url=article.url,
+            )
             return metadata, "verified"
 
         result = citation_checker.verify_doi_exact(normalized)
         if result.status != "DOI_VERIFIED":
-            metadata = {
-                "status": "not_found",
-                "source": result.source,
-                "doi": normalized,
-            }
+            metadata = self._build_doi_metadata_payload(
+                doi=normalized,
+                status="not_found",
+                source=result.source,
+                confidence=result.confidence,
+                title=None,
+                abstract=None,
+                publication_year=None,
+                journal=None,
+                publisher=None,
+                authors=[],
+                subjects=[],
+                keywords=[],
+                url=None,
+            )
             return metadata, "not_found"
 
         meta = result.metadata or {}
         crossref = meta.get("crossref") or {}
         openalex = meta.get("openalex") or {}
-
-        def _strip_html(value: str | None) -> str | None:
-            if not value:
-                return value
-            return re.sub(r"<[^>]+>", " ", value).strip()
+        if not openalex:
+            try:
+                openalex_result = citation_checker._verify_doi_openalex_exact(normalized)
+                if openalex_result and isinstance(openalex_result.metadata, dict):
+                    openalex = openalex_result.metadata.get("openalex") or {}
+            except Exception:
+                logger.debug("OpenAlex enrichment failed for DOI metadata lookup %s", normalized, exc_info=True)
 
         subjects: list[str] = []
         if crossref.get("subject"):
@@ -463,25 +836,44 @@ class ChatService:
                 if item.get("display_name")
             ]
 
+        keywords: list[str] = []
+        if openalex.get("keywords"):
+            keywords = [
+                str(item.get("display_name") or item.get("keyword")).strip()
+                for item in openalex.get("keywords", [])
+                if item.get("display_name") or item.get("keyword")
+            ]
+
         venue = None
         if crossref.get("container-title"):
             venue = str(crossref.get("container-title", [""])[0]).strip() or None
+        elif isinstance(openalex.get("primary_location"), dict):
+            primary_source = openalex.get("primary_location", {}).get("source") or {}
+            venue = primary_source.get("display_name")
         elif openalex.get("host_venue"):
             venue = openalex.get("host_venue", {}).get("display_name")
 
-        metadata = {
-            "status": "verified",
-            "source": result.source,
-            "doi": normalized,
-            "title": result.title,
-            "abstract": _strip_html(crossref.get("abstract")) or _strip_html(openalex.get("abstract")),
-            "year": result.year,
-            "venue": venue,
-            "authors": result.authors or [],
-            "subjects": subjects,
-            "keywords": [],
-            "url": crossref.get("URL") or openalex.get("id"),
-        }
+        openalex_authors = [
+            str(item.get("author", {}).get("display_name")).strip()
+            for item in openalex.get("authorships", [])
+            if item.get("author", {}).get("display_name")
+        ]
+        metadata = self._build_doi_metadata_payload(
+            doi=normalized,
+            status="verified",
+            source=result.source,
+            confidence=result.confidence,
+            title=result.title,
+            abstract=self._clean_metadata_text(crossref.get("abstract"))
+            or self._decode_openalex_abstract(openalex),
+            publication_year=result.year,
+            journal=venue,
+            publisher=self._clean_metadata_text(crossref.get("publisher")),
+            authors=result.authors or openalex_authors,
+            subjects=subjects,
+            keywords=keywords,
+            url=crossref.get("URL") or openalex.get("id"),
+        )
         return metadata, "verified"
 
     def _build_manuscript_text(self, metadata: dict[str, Any]) -> str:
@@ -504,13 +896,14 @@ class ChatService:
         metadata, status = self._resolve_doi_metadata(db, doi)
         if status != "verified":
             text = (
+                "Mình chưa xác minh được DOI này nên không tạo metadata suy đoán. "
                 f"{EXACT_RECORD_NOT_FOUND_MESSAGE} "
                 f"Bạn có thể cung cấp thêm tiêu đề, tác giả, hoặc abstract để mình kiểm tra lại trong {USER_SAFE_DATA_LABEL}."
             )
         else:
             text = (
-                f"Mình đã tìm thấy thông tin bài báo trong {USER_SAFE_DATA_LABEL}. "
-                "Bạn có thể xem tóm tắt và metadata ở thẻ kết quả bên dưới."
+                "Mình đã xác minh DOI và trích xuất metadata chi tiết cho bài báo này. "
+                "Bạn có thể xem title, journal, publisher, publication year, research field, main topic, confidence và source ở thẻ kết quả bên dưới."
             )
         payload = {
             "type": "doi_metadata",
@@ -526,6 +919,12 @@ class ChatService:
         session_id: str,
         doi: str,
     ) -> tuple[MessageType, str, dict[str, Any]]:
+        if journal_match_service is None or build_legacy_journal_payload is None:
+            return MessageType.TEXT, (
+                "Tính năng gợi ý tạp chí hiện chưa sẵn sàng trong môi trường này. "
+                "Bạn vui lòng thử lại sau."
+            ), {"type": "text", "error": "journal_match_service_unavailable"}
+
         metadata, status = self._resolve_doi_metadata(db, doi)
         if status != "verified":
             summary = (
@@ -584,6 +983,164 @@ class ChatService:
             "doi_metadata": metadata,
         }
 
+    def _run_general_qa_flow(
+        self,
+        db: Session,
+        current_user: User,
+        session_id: str,
+        user_message: str,
+        pre_save_history: list[ChatMessage],
+        user_ai_rule_phrases: list[str],
+    ) -> tuple[MessageType, str, dict[str, Any] | None]:
+        user_message_with_context = self._build_file_context(db, session_id, user_message)
+
+        doi = self._extract_first_doi(user_message_with_context)
+        exact_identifiers = citation_checker.extract_exact_identifiers(user_message_with_context)
+        if doi:
+            if self.JOURNAL_INTENT_PATTERN.search(user_message or ""):
+                return self._run_journal_match_from_doi(
+                    db,
+                    current_user=current_user,
+                    session_id=session_id,
+                    doi=doi,
+                )
+
+            if self._is_doi_metadata_request(user_message):
+                return self._run_doi_metadata_lookup(db, doi)
+
+            if self.CITATION_VERIFY_PATTERN.search(user_message or ""):
+                return self._run_mode_tool(
+                    db,
+                    current_user,
+                    session_id,
+                    SessionMode.VERIFICATION,
+                    user_message_with_context,
+                )
+
+        if exact_identifiers:
+            return self._run_mode_tool(
+                db,
+                current_user,
+                session_id,
+                SessionMode.VERIFICATION,
+                user_message_with_context,
+            )
+
+        academic_query_result = None
+        if not self._get_file_context(db, session_id) and academic_query_service.should_handle(user_message):
+            academic_query_result = academic_query_service.answer(db, user_message)
+        if academic_query_result is not None:
+            return (
+                MessageType.TEXT,
+                academic_query_result.text,
+                {
+                    "type": "academic_lookup",
+                    "status": "no_data" if not academic_query_result.records else "found",
+                    "data": {
+                        "records": academic_query_result.records,
+                        "count": len(academic_query_result.records),
+                    },
+                },
+            )
+
+        if not academic_query_result:
+            intent = self._classify_academic_intent(user_message)
+            if intent == "general_academic_discussion":
+                fc_response = gemini_service.generate_response(
+                    history=pre_save_history,
+                    user_text=user_message_with_context,
+                    system_prompt_override=AIRA_GENERAL_ACADEMIC_PROMPT,
+                    expose_tools=False,
+                    user_ai_rule_phrases=user_ai_rule_phrases,
+                )
+                return MessageType.TEXT, fc_response.text, None
+
+        fc_response = gemini_service.generate_response(
+            history=pre_save_history,
+            user_text=user_message_with_context,
+            user_ai_rule_phrases=user_ai_rule_phrases,
+        )
+        try:
+            msg_type = MessageType(fc_response.message_type)
+        except (ValueError, KeyError):
+            msg_type = MessageType.TEXT
+        return msg_type, fc_response.text, fc_response.tool_results
+
+    def _run_auto_mode_flow(
+        self,
+        db: Session,
+        current_user: User,
+        session_id: str,
+        user_message: str,
+        pre_save_history: list[ChatMessage],
+        user_ai_rule_phrases: list[str],
+    ) -> tuple[MessageType, str, dict[str, Any]]:
+        file_context = self._get_file_context(db, session_id)
+        route = auto_intent_router.resolve(
+            user_message,
+            has_file_context=bool(file_context),
+        )
+        if route.is_ambiguous:
+            return self._build_intent_disambiguation(route)
+
+        tool_input = self._build_file_context(db, session_id, user_message)
+        raw_user_doi = self._extract_first_doi(user_message)
+
+        if route.resolved_feature == FEATURE_DOI_METADATA and raw_user_doi:
+            return self._finalize_auto_response(route, *self._run_doi_metadata_lookup(db, raw_user_doi))
+
+        if route.resolved_feature == FEATURE_JOURNAL_MATCH:
+            if raw_user_doi:
+                return self._finalize_auto_response(
+                    route,
+                    *self._run_journal_match_from_doi(
+                        db,
+                        current_user=current_user,
+                        session_id=session_id,
+                        doi=raw_user_doi,
+                    ),
+                )
+            return self._finalize_auto_response(
+                route,
+                *self._run_mode_tool(db, current_user, session_id, SessionMode.JOURNAL_MATCH, tool_input),
+            )
+
+        if route.resolved_feature == FEATURE_VERIFICATION:
+            return self._finalize_auto_response(
+                route,
+                *self._run_mode_tool(db, current_user, session_id, SessionMode.VERIFICATION, tool_input),
+            )
+
+        if route.resolved_feature == FEATURE_RETRACTION:
+            return self._finalize_auto_response(
+                route,
+                *self._run_mode_tool(db, current_user, session_id, SessionMode.RETRACTION, tool_input),
+            )
+
+        if route.resolved_feature == FEATURE_AI_DETECTION:
+            return self._finalize_auto_response(
+                route,
+                *self._run_mode_tool(db, current_user, session_id, SessionMode.AI_DETECTION, tool_input),
+            )
+
+        if route.resolved_feature == FEATURE_GRAMMAR:
+            return self._finalize_auto_response(route, *self._run_grammar_tool(session_id, tool_input))
+
+        general_msg_type, general_content, general_structured = self._run_general_qa_flow(
+            db,
+            current_user,
+            session_id,
+            user_message,
+            pre_save_history,
+            user_ai_rule_phrases,
+        )
+        return self._finalize_auto_response(
+            route,
+            general_msg_type,
+            general_content,
+            general_structured,
+        )
+
     def complete_chat(
         self,
         db: Session,
@@ -593,6 +1150,7 @@ class ChatService:
         mode_override: SessionMode | None = None,
     ) -> tuple[ChatMessage, ChatMessage, ChatSession]:
         session_obj = AccessGateway.assert_session_access(db, current_user, session_id)
+        user_ai_rule_phrases = get_user_ai_detection_rule_phrases(current_user)
 
         if mode_override and mode_override != session_obj.mode:
             session_obj.mode = mode_override
@@ -652,6 +1210,26 @@ class ChatService:
             return user_msg, assistant_msg, session_obj
 
         mode = session_obj.mode
+        if mode == SessionMode.AUTO:
+            msg_type, content, structured = self._run_auto_mode_flow(
+                db,
+                current_user,
+                session_id,
+                user_message,
+                pre_save_history,
+                user_ai_rule_phrases,
+            )
+            assistant_msg = self._save_message(
+                db=db,
+                session_id=session_id,
+                role=MessageRole.ASSISTANT,
+                content=content,
+                message_type=msg_type,
+                tool_results=structured,
+            )
+            db.refresh(session_obj)
+            return user_msg, assistant_msg, session_obj
+
         if mode in {
             SessionMode.VERIFICATION,
             SessionMode.JOURNAL_MATCH,
@@ -660,6 +1238,20 @@ class ChatService:
         }:
             # Inject file context so explicit tool modes also see the PDF text
             tool_input = self._build_file_context(db, session_id, user_message)
+            if mode == SessionMode.VERIFICATION and self._is_doi_metadata_request(user_message):
+                doi = self._extract_first_doi(tool_input)
+                if doi:
+                    msg_type, content, structured = self._run_doi_metadata_lookup(db, doi)
+                    assistant_msg = self._save_message(
+                        db=db,
+                        session_id=session_id,
+                        role=MessageRole.ASSISTANT,
+                        content=content,
+                        message_type=msg_type,
+                        tool_results=structured,
+                    )
+                    db.refresh(session_obj)
+                    return user_msg, assistant_msg, session_obj
             msg_type, content, structured = self._run_mode_tool(db, current_user, session_id, mode, tool_input)
             assistant_msg = self._save_message(
                 db=db,
@@ -672,121 +1264,21 @@ class ChatService:
             db.refresh(session_obj)
             return user_msg, assistant_msg, session_obj
 
-        # General Q&A mode — use pre_save_history (no current-msg duplication)
-        user_message_with_context = self._build_file_context(db, session_id, user_message)
-
-        doi = self._extract_first_doi(user_message_with_context)
-        if doi:
-            if self.JOURNAL_INTENT_PATTERN.search(user_message or ""):
-                msg_type, content, structured = self._run_journal_match_from_doi(
-                    db,
-                    current_user=current_user,
-                    session_id=session_id,
-                    doi=doi,
-                )
-                assistant_msg = self._save_message(
-                    db=db,
-                    session_id=session_id,
-                    role=MessageRole.ASSISTANT,
-                    content=content,
-                    message_type=msg_type,
-                    tool_results=structured,
-                )
-                db.refresh(session_obj)
-                return user_msg, assistant_msg, session_obj
-
-            if self.CITATION_VERIFY_PATTERN.search(user_message or ""):
-                msg_type, content, structured = self._run_mode_tool(
-                    db,
-                    current_user,
-                    session_id,
-                    SessionMode.VERIFICATION,
-                    user_message_with_context,
-                )
-                assistant_msg = self._save_message(
-                    db=db,
-                    session_id=session_id,
-                    role=MessageRole.ASSISTANT,
-                    content=content,
-                    message_type=msg_type,
-                    tool_results=structured,
-                )
-                db.refresh(session_obj)
-                return user_msg, assistant_msg, session_obj
-
-            if self.DOI_INFO_PATTERN.search(user_message or ""):
-                msg_type, content, structured = self._run_doi_metadata_lookup(db, doi)
-                assistant_msg = self._save_message(
-                    db=db,
-                    session_id=session_id,
-                    role=MessageRole.ASSISTANT,
-                    content=content,
-                    message_type=msg_type,
-                    tool_results=structured,
-                )
-                db.refresh(session_obj)
-                return user_msg, assistant_msg, session_obj
-
-        academic_query_result = None
-        if not self._get_file_context(db, session_id) and academic_query_service.should_handle(user_message):
-            academic_query_result = academic_query_service.answer(db, user_message)
-        if academic_query_result is not None:
-            assistant_msg = self._save_message(
-                db=db,
-                session_id=session_id,
-                role=MessageRole.ASSISTANT,
-                content=academic_query_result.text,
-                message_type=MessageType.TEXT,
-                tool_results={
-                    "type": "academic_lookup",
-                    "status": "no_data" if not academic_query_result.records else "found",
-                    "data": {
-                        "records": academic_query_result.records,
-                        "count": len(academic_query_result.records),
-                    },
-                },
-            )
-            db.refresh(session_obj)
-            return user_msg, assistant_msg, session_obj
-
-        # ── General academic discussion routing ──
-        if not academic_query_result:
-            intent = self._classify_academic_intent(user_message)
-            if intent == "general_academic_discussion":
-                fc_response = gemini_service.generate_response(
-                    history=pre_save_history,
-                    user_text=user_message_with_context,
-                    system_prompt_override=AIRA_GENERAL_ACADEMIC_PROMPT,
-                    expose_tools=False,
-                )
-                assistant_msg = self._save_message(
-                    db=db,
-                    session_id=session_id,
-                    role=MessageRole.ASSISTANT,
-                    content=fc_response.text,
-                    message_type=MessageType.TEXT,
-                    tool_results=None,
-                )
-                db.refresh(session_obj)
-                return user_msg, assistant_msg, session_obj
-
-        fc_response = gemini_service.generate_response(
-            history=pre_save_history, user_text=user_message_with_context,
+        msg_type, content, structured = self._run_general_qa_flow(
+            db,
+            current_user,
+            session_id,
+            user_message,
+            pre_save_history,
+            user_ai_rule_phrases,
         )
-
-        # Determine MessageType from function calling result
-        try:
-            msg_type = MessageType(fc_response.message_type)
-        except (ValueError, KeyError):
-            msg_type = MessageType.TEXT
-
         assistant_msg = self._save_message(
             db=db,
             session_id=session_id,
             role=MessageRole.ASSISTANT,
-            content=fc_response.text,
+            content=content,
             message_type=msg_type,
-            tool_results=fc_response.tool_results,
+            tool_results=structured,
         )
         db.refresh(session_obj)
         return user_msg, assistant_msg, session_obj

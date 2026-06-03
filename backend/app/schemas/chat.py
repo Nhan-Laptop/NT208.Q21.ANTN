@@ -9,7 +9,7 @@ from app.models.chat_session import SessionMode
 
 class SessionCreate(BaseModel):
     title: str = Field(default="Trò chuyện mới", max_length=255)
-    mode: SessionMode = SessionMode.GENERAL_QA
+    mode: SessionMode = SessionMode.AUTO
 
 
 class SessionUpdate(BaseModel):

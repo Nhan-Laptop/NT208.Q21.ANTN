@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
+from xml.etree import ElementTree as ET
 
 import httpx
 
@@ -146,25 +147,43 @@ def read_xlsx_rows(content: bytes) -> list[dict[str, str]]:
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         shared_strings: list[str] = []
         if "xl/sharedStrings.xml" in archive.namelist():
-            xml = archive.read("xl/sharedStrings.xml").decode("utf-8", errors="replace")
-            shared_strings = [clean_text(re.sub(r"<[^>]+>", "", item)) for item in re.findall(r"<si.*?</si>", xml, flags=re.S)]
+            shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            namespace = {"x": shared_root.tag.split("}")[0].lstrip("{")} if shared_root.tag.startswith("{") else {}
+            items = shared_root.findall(".//x:si", namespace) if namespace else shared_root.findall(".//si")
+            for item in items:
+                texts = item.findall(".//x:t", namespace) if namespace else item.findall(".//t")
+                shared_strings.append(clean_text("".join(text.text or "" for text in texts)))
         sheet_name = next((name for name in archive.namelist() if name.startswith("xl/worksheets/sheet")), None)
         if not sheet_name:
             return []
-        xml = archive.read(sheet_name).decode("utf-8", errors="replace")
+        sheet_root = ET.fromstring(archive.read(sheet_name))
 
+    namespace = {"x": sheet_root.tag.split("}")[0].lstrip("{")} if sheet_root.tag.startswith("{") else {}
+    row_nodes = sheet_root.findall(".//x:row", namespace) if namespace else sheet_root.findall(".//row")
     rows: list[list[str]] = []
-    for row_xml in re.findall(r"<row[^>]*>(.*?)</row>", xml, flags=re.S):
+    for row_node in row_nodes:
         row: list[str] = []
-        for cell_xml in re.findall(r"<c([^>]*)>(.*?)</c>", row_xml, flags=re.S):
-            attrs, body = cell_xml
-            value_match = re.search(r"<v[^>]*>(.*?)</v>", body, flags=re.S)
-            inline_match = re.search(r"<t[^>]*>(.*?)</t>", body, flags=re.S)
-            value = clean_text(inline_match.group(1) if inline_match else value_match.group(1) if value_match else "")
-            if 't="s"' in attrs and value.isdigit():
+        cell_nodes = row_node.findall("x:c", namespace) if namespace else row_node.findall("c")
+        for cell in cell_nodes:
+            ref = cell.attrib.get("r", "")
+            ref_match = re.match(r"([A-Z]+)\d+", ref)
+            value_node = cell.find("x:v", namespace) if namespace else cell.find("v")
+            inline_text_nodes = cell.findall(".//x:t", namespace) if namespace else cell.findall(".//t")
+            value = clean_text("".join(node.text or "" for node in inline_text_nodes)) if inline_text_nodes else clean_text(value_node.text if value_node is not None and value_node.text else "")
+            if cell.attrib.get("t") == "s" and value.isdigit():
                 index = int(value)
                 value = shared_strings[index] if index < len(shared_strings) else ""
-            row.append(value)
+            if ref_match:
+                column_letters = ref_match.group(1)
+                column_index = 0
+                for letter in column_letters:
+                    column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
+                column_index -= 1
+            else:
+                column_index = len(row)
+            if column_index >= len(row):
+                row.extend([""] * (column_index - len(row) + 1))
+            row[column_index] = value
         if any(row):
             rows.append(row)
     if not rows:

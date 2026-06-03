@@ -36,12 +36,18 @@ from app.services.academic_verification_formatter import (
     format_citation_summary,
     format_retraction_summary,
 )
-from app.services.journal_match.service import build_legacy_journal_payload, journal_match_service
 from app.services.llm_service import gemini_service
 from app.services.tools.ai_writing_detector import ai_writing_detector
+from app.services.ai_detection_rules import get_user_ai_detection_rule_phrases
 from app.services.tools.grammar_checker import grammar_checker
 from app.services.tools.citation_checker import citation_checker
 from app.services.tools.retraction_scan import retraction_scanner, scan_verified_retractions
+
+try:
+    from app.services.journal_match.service import build_legacy_journal_payload, journal_match_service
+except Exception:  # pragma: no cover - optional heavy dependency path
+    build_legacy_journal_payload = None  # type: ignore[assignment]
+    journal_match_service = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,7 @@ def verify_citation(
         summary = format_citation_summary(
             stats,
             no_citation_found=bool(stats.get("no_citation_found", False)),
+            results=raw_results,
         )
 
         chat_service.persist_tool_interaction(
@@ -78,7 +85,7 @@ def verify_citation(
         logger.exception("verify_citation endpoint failed")
         raise HTTPException(
             status_code=400,
-            detail="Mình chưa xác minh được trích dẫn cho nội dung này. Bạn có thể thử lại hoặc gửi DOI/trích dẫn cụ thể hơn.",
+            detail="Mình chưa xác minh được trích dẫn cho nội dung này. Bạn có thể thử lại hoặc gửi DOI, PMID, PMCID, OpenAlex ID hoặc trích dẫn cụ thể hơn.",
         )
 
 
@@ -88,6 +95,11 @@ def journal_match(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
 ) -> JournalMatchResponse:
+    if journal_match_service is None or build_legacy_journal_payload is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Tính năng gợi ý tạp chí hiện chưa sẵn sàng trong môi trường này.",
+        )
     try:
         request = journal_match_service.create_match_request(
             db,
@@ -214,7 +226,10 @@ def detect_ai_writing(
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
 ) -> AIWritingDetectResponse:
     try:
-        result = ai_writing_detector.analyze(payload.text)
+        result = ai_writing_detector.analyze(
+            payload.text,
+            custom_rule_phrases=get_user_ai_detection_rule_phrases(current_user),
+        )
 
         verdict_labels = {
             "LIKELY_HUMAN": "✅ Văn bản có vẻ được viết bởi con người",
@@ -228,6 +243,8 @@ def detect_ai_writing(
 
         if result.flags:
             summary += f" Các dấu hiệu: {'; '.join(result.flags[:3])}."
+        if result.rule_source == "user_custom_rules":
+            summary += " Rule source: custom user rules."
         if result.detectors_used:
             summary += f" Detectors: {', '.join(result.detectors_used)}."
         if result.skipped_detectors:
@@ -246,6 +263,8 @@ def detect_ai_writing(
             skipped_detectors=result.skipped_detectors,
             fallback_reason=result.fallback_reason,
             detectors_used=result.detectors_used,
+            rule_source=result.rule_source,
+            matched_rules=result.matched_rules,
         )
 
         chat_service.persist_tool_interaction(

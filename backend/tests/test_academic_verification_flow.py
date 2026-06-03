@@ -39,6 +39,23 @@ class AcademicVerificationFlowTest(unittest.TestCase):
         self.assertIn("tìm thấy bản ghi học thuật khớp rõ ràng", friendly)
         self.assertNotIn("Đã xác minh 1 citation", friendly)
 
+    def test_single_result_summary_prefers_reason_when_available(self) -> None:
+        result = CitationCheckResult(
+            citation="Attention is all you need. 2017.",
+            status="LIKELY_MATCH",
+            confidence=0.88,
+            reason="Title matches strongly and year matches exactly. The evidence supports a likely match, but not a verified one.",
+            warning="Candidate found, but confidence is not high enough to generate a verified formatted citation.",
+        )
+
+        summary = format_citation_summary(
+            {"total": 1, "likely_match": 1},
+            results=[result],
+        )
+
+        self.assertIn("Title matches strongly", summary)
+        self.assertIn("verified one", summary)
+
     def test_exact_doi_not_found_does_not_fall_back_to_fuzzy_partial_match(self) -> None:
         checker = CitationChecker()
 

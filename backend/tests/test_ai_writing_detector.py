@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.schemas.tools import AIWritingDetectResult
+from app.services.ai_detection_rules import DEFAULT_AI_RULE_SOURCE, USER_AI_RULE_SOURCE
 
 # Force import of the submodule so that ``sys.modules`` has the real module.
 # ``import app.services.tools.ai_writing_detector`` resolves to the singleton
@@ -90,16 +91,9 @@ class AIWritingDetectorTest(unittest.TestCase):
         )
 
         with (
-            patch(
-                "app.services.tools.ai_writing_detector._TRANSFORMERS_AVAILABLE",
-                True,
-            ),
-            patch(
-                "app.services.tools.ai_writing_detector.AutoTokenizer",
-            ) as mock_tok,
-            patch(
-                "app.services.tools.ai_writing_detector.AutoModelForSequenceClassification",
-            ) as mock_model,
+            patch.object(_det_module, "_TRANSFORMERS_AVAILABLE", True),
+            patch.object(_det_module, "AutoTokenizer") as mock_tok,
+            patch.object(_det_module, "AutoModelForSequenceClassification") as mock_model,
         ):
             mock_tok.from_pretrained.return_value = _make_mock_tokenizer()
             mock_model.from_pretrained.return_value = FakeRobertaModel()
@@ -154,10 +148,7 @@ class AIWritingDetectorTest(unittest.TestCase):
             DetectionMethod,
         )
 
-        with patch(
-            "app.services.tools.ai_writing_detector.settings.ai_detect_ml_enabled",
-            False,
-        ):
+        with patch.object(_det_module.settings, "ai_detect_ml_enabled", False):
             detector = AIWritingDetector(use_ml=True, device="cpu")
             result = detector.analyze(_AI_TEXT)
 
@@ -176,10 +167,7 @@ class AIWritingDetectorTest(unittest.TestCase):
             DetectionMethod,
         )
 
-        with patch(
-            "app.services.tools.ai_writing_detector._TRANSFORMERS_AVAILABLE",
-            False,
-        ):
+        with patch.object(_det_module, "_TRANSFORMERS_AVAILABLE", False):
             detector = AIWritingDetector(use_ml=True, device="cpu")
             result = detector.analyze(_AI_TEXT)
 
@@ -199,16 +187,9 @@ class AIWritingDetectorTest(unittest.TestCase):
         )
 
         with (
-            patch(
-                "app.services.tools.ai_writing_detector._TRANSFORMERS_AVAILABLE",
-                True,
-            ),
-            patch(
-                "app.services.tools.ai_writing_detector.AutoTokenizer",
-            ) as mock_tok,
-            patch(
-                "app.services.tools.ai_writing_detector.AutoModelForSequenceClassification",
-            ) as mock_model,
+            patch.object(_det_module, "_TRANSFORMERS_AVAILABLE", True),
+            patch.object(_det_module, "AutoTokenizer") as mock_tok,
+            patch.object(_det_module, "AutoModelForSequenceClassification") as mock_model,
         ):
             mock_tok.from_pretrained.return_value = _make_mock_tokenizer()
             mock_model.from_pretrained.return_value = FakeRobertaModel()
@@ -229,16 +210,9 @@ class AIWritingDetectorTest(unittest.TestCase):
         )
 
         with (
-            patch(
-                "app.services.tools.ai_writing_detector._TRANSFORMERS_AVAILABLE",
-                True,
-            ),
-            patch(
-                "app.services.tools.ai_writing_detector.AutoTokenizer",
-            ) as mock_tok,
-            patch(
-                "app.services.tools.ai_writing_detector.AutoModelForSequenceClassification",
-            ) as mock_model,
+            patch.object(_det_module, "_TRANSFORMERS_AVAILABLE", True),
+            patch.object(_det_module, "AutoTokenizer") as mock_tok,
+            patch.object(_det_module, "AutoModelForSequenceClassification") as mock_model,
         ):
             mock_tok.from_pretrained.return_value = _make_mock_tokenizer()
             mock_model.from_pretrained.return_value = FakeRobertaModel()
@@ -256,16 +230,9 @@ class AIWritingDetectorTest(unittest.TestCase):
         )
 
         with (
-            patch(
-                "app.services.tools.ai_writing_detector._TRANSFORMERS_AVAILABLE",
-                True,
-            ),
-            patch(
-                "app.services.tools.ai_writing_detector.AutoTokenizer",
-            ) as mock_tok,
-            patch(
-                "app.services.tools.ai_writing_detector.AutoModelForSequenceClassification",
-            ) as mock_model,
+            patch.object(_det_module, "_TRANSFORMERS_AVAILABLE", True),
+            patch.object(_det_module, "AutoTokenizer") as mock_tok,
+            patch.object(_det_module, "AutoModelForSequenceClassification") as mock_model,
         ):
             mock_tok.from_pretrained.return_value = _make_mock_tokenizer()
             mock_model.from_pretrained.return_value = FakeRobertaModel()
@@ -287,6 +254,8 @@ class AIWritingDetectorTest(unittest.TestCase):
                 skipped_detectors=result.skipped_detectors,
                 fallback_reason=result.fallback_reason,
                 detectors_used=result.detectors_used,
+                rule_source=result.rule_source,
+                matched_rules=result.matched_rules,
             )
 
             self.assertEqual(data.method, result.method)
@@ -294,6 +263,8 @@ class AIWritingDetectorTest(unittest.TestCase):
             self.assertEqual(data.rule_score, result.rule_score)
             self.assertIsInstance(data.skipped_detectors, list)
             self.assertIn("rule_based", data.detectors_used)
+            self.assertEqual(data.rule_source, DEFAULT_AI_RULE_SOURCE)
+            self.assertEqual(data.matched_rules, [])
 
     def test_specter2_not_in_pipeline_by_default(self):
         """SPECTER2 should not appear in detectors_used or skipped_detectors
@@ -351,10 +322,7 @@ class AIWritingDetectorTest(unittest.TestCase):
             DetectionMethod,
         )
 
-        with patch(
-            "app.services.tools.ai_writing_detector._TRANSFORMERS_AVAILABLE",
-            False,
-        ):
+        with patch.object(_det_module, "_TRANSFORMERS_AVAILABLE", False):
             detector = AIWritingDetector(use_ml=True, device="cpu")
             result = detector.analyze(_AI_TEXT)
 
@@ -389,6 +357,61 @@ class AIWritingDetectorTest(unittest.TestCase):
 
         long_ai = detector.analyze(_AI_TEXT)  # ~130 tokens
         self.assertIn(long_ai.confidence, {"LOW", "MEDIUM", "HIGH"})
+
+    def test_custom_rules_replace_default_rule_heuristics(self):
+        from app.services.tools.ai_writing_detector import AIWritingDetector
+
+        detector = AIWritingDetector(use_ml=False, device="cpu")
+        result = detector.analyze(
+            _AI_TEXT,
+            custom_rule_phrases=[
+                "as an AI language model",
+                "transformative impact",
+                "not present here",
+            ],
+        )
+
+        self.assertEqual(result.rule_source, USER_AI_RULE_SOURCE)
+        self.assertEqual(
+            result.matched_rules,
+            ["as an AI language model", "transformative impact"],
+        )
+        self.assertGreater(result.rule_score, 0.0)
+        self.assertNotIn("ai_patterns_found", result.details)
+        self.assertEqual(result.details["custom_rules_total"], 3)
+        self.assertEqual(result.details["custom_rules_matched"], 2)
+
+    def test_custom_rules_return_human_leaning_when_no_match(self):
+        from app.services.tools.ai_writing_detector import AIWritingDetector
+
+        detector = AIWritingDetector(use_ml=False, device="cpu")
+        result = detector.analyze(
+            "This paragraph is about empirical evaluation and grounded retrieval without the trigger phrases present.",
+            custom_rule_phrases=["as an AI language model", "delve deeper"],
+        )
+
+        self.assertEqual(result.rule_source, USER_AI_RULE_SOURCE)
+        self.assertEqual(result.matched_rules, [])
+        self.assertEqual(result.rule_score, 0.0)
+        self.assertEqual(result.verdict, "LIKELY_HUMAN")
+
+    def test_custom_rules_score_shorter_valid_text(self):
+        from app.services.tools.ai_writing_detector import AIWritingDetector
+
+        detector = AIWritingDetector(use_ml=False, device="cpu")
+        text = (
+            "It is important to note that the summary is concise. "
+            "It is important to note that the summary remains repetitive."
+        )
+        result = detector.analyze(
+            text,
+            custom_rule_phrases=["it is important to note that"],
+        )
+
+        self.assertEqual(result.rule_source, USER_AI_RULE_SOURCE)
+        self.assertEqual(result.matched_rules, ["it is important to note that"])
+        self.assertGreater(result.rule_score, 0.0)
+        self.assertIn("matched_rules", result.details)
 
     def test_get_verdict_consistency(self):
         """get_verdict should match the verdict returned by analyze()."""

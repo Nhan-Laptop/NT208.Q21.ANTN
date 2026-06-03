@@ -19,7 +19,7 @@ import {
   ChevronUp,
 } from "lucide-react";
 import clsx from "clsx";
-import { useState, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 
 /* ====================================================================
  * Shared helpers
@@ -344,25 +344,78 @@ interface DoiMetadataPayload {
     title?: string | null;
     abstract?: string | null;
     year?: number | null;
+    publication_year?: number | null;
     venue?: string | null;
+    journal?: string | null;
+    publisher?: string | null;
     authors?: string[] | null;
     subjects?: string[] | null;
     keywords?: string[] | null;
+    research_field?: string | null;
+    research_field_basis?: string | null;
+    research_field_note?: string | null;
+    main_topic?: string | null;
+    main_topic_basis?: string | null;
+    main_topic_note?: string | null;
     url?: string | null;
+    verification_status?: string | null;
+    confidence?: number | null;
+    source?: string | null;
+    missing_fields?: string[] | null;
+    notes?: string[] | null;
+  };
+}
+
+interface IntentCandidate {
+  feature?: string;
+  label?: string;
+  confidence?: number;
+  source?: string;
+}
+
+interface IntentDisambiguationPayload {
+  type?: string;
+  data?: {
+    candidates?: IntentCandidate[];
   };
 }
 
 export function DoiMetadataCard({ payload }: { payload: DoiMetadataPayload }) {
   const status = payload.status ?? "unknown";
   const data = payload.data ?? {};
-  const hasData = Boolean(data.title || data.abstract || data.venue || data.authors?.length);
+  const hasData = Boolean(
+    data.title
+    || data.journal
+    || data.venue
+    || data.publisher
+    || data.abstract
+    || data.authors?.length
+    || data.research_field
+    || data.main_topic,
+  );
+  const journal = data.journal ?? data.venue ?? null;
+  const publicationYear = data.publication_year ?? data.year ?? null;
+  const confidence = typeof data.confidence === "number" ? `${Math.round(data.confidence * 100)}%` : null;
+  const notes = (data.notes ?? []).filter(Boolean);
+  const missingFields = (data.missing_fields ?? []).filter(Boolean);
+
+  const renderField = (label: string, value?: string | number | null, fallback?: string | null) => (
+    <div className="rounded-lg border border-border/70 dark:border-dark-border/70 bg-bg-secondary/40 dark:bg-dark-bg-secondary/40 px-3 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary dark:text-dark-text-tertiary">
+        {label}
+      </div>
+      <div className="mt-1 text-sm text-text-primary dark:text-dark-text-primary break-words">
+        {value ?? fallback ?? "Not available"}
+      </div>
+    </div>
+  );
 
   return (
     <div className="mt-3 rounded-xl border border-border dark:border-dark-border bg-surface dark:bg-dark-surface p-4">
-      <div className="flex items-center gap-1.5 mb-2">
+      <div className="flex items-center gap-1.5 mb-2 flex-wrap">
         <BookOpen size={14} className="text-accent dark:text-dark-accent" />
         <span className="text-xs font-semibold text-text-primary dark:text-dark-text-primary">
-          Thông tin DOI
+          DOI Analysis
         </span>
         <span
           className={clsx(
@@ -374,6 +427,16 @@ export function DoiMetadataCard({ payload }: { payload: DoiMetadataPayload }) {
         >
           {status === "verified" ? "Đã xác minh" : "Chưa đủ dữ liệu"}
         </span>
+        {data.source && (
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 dark:bg-slate-800/50 dark:text-slate-300">
+            Source: {data.source}
+          </span>
+        )}
+        {confidence && (
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300">
+            Confidence: {confidence}
+          </span>
+        )}
       </div>
       {data.doi && (
         <p className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary mb-1">
@@ -387,9 +450,25 @@ export function DoiMetadataCard({ payload }: { payload: DoiMetadataPayload }) {
               {data.title}
             </p>
           )}
-          {data.venue && (
-            <p className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary mt-0.5">
-              {data.venue}
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {renderField("Verification status", data.verification_status ?? (status === "verified" ? "Valid DOI" : "DOI not found"))}
+            {renderField("Journal", journal)}
+            {renderField("Publisher", data.publisher)}
+            {renderField("Publication year", publicationYear)}
+            {renderField(
+              "Research field",
+              data.research_field,
+              data.research_field_note ?? "Not directly available from source metadata.",
+            )}
+            {renderField(
+              "Main topic",
+              data.main_topic,
+              data.main_topic_note ?? "Not directly available from source metadata.",
+            )}
+          </div>
+          {data.authors && data.authors.length > 0 && (
+            <p className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary mt-3">
+              Authors: {data.authors.join(", ")}
             </p>
           )}
           {data.abstract && (
@@ -397,21 +476,27 @@ export function DoiMetadataCard({ payload }: { payload: DoiMetadataPayload }) {
               {data.abstract}
             </p>
           )}
-          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-text-tertiary dark:text-dark-text-tertiary mt-2">
-            {data.year && <span>Năm: {data.year}</span>}
-            {data.authors && data.authors.length > 0 && (
-              <span>Tác giả: {data.authors.slice(0, 3).join(", ")}</span>
-            )}
-          </div>
           {data.subjects && data.subjects.length > 0 && (
             <p className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary mt-2">
-              Chủ đề: {data.subjects.slice(0, 6).join(", ")}
+              Subjects: {data.subjects.slice(0, 6).join(", ")}
             </p>
           )}
           {data.keywords && data.keywords.length > 0 && (
             <p className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary mt-1">
-              Từ khóa: {data.keywords.slice(0, 6).join(", ")}
+              Keywords: {data.keywords.slice(0, 6).join(", ")}
             </p>
+          )}
+          {missingFields.length > 0 && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-2">
+              Missing fields: {missingFields.join(", ")}
+            </p>
+          )}
+          {notes.length > 0 && (
+            <div className="mt-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-900/10 p-2.5 text-[11px] text-amber-800 dark:text-amber-300">
+              {notes.map((note, idx) => (
+                <p key={`${note}-${idx}`}>{note}</p>
+              ))}
+            </div>
           )}
           {data.url && (
             <a
@@ -434,6 +519,40 @@ export function DoiMetadataCard({ payload }: { payload: DoiMetadataPayload }) {
   );
 }
 
+export function IntentDisambiguationCard({ payload }: { payload: IntentDisambiguationPayload }) {
+  const candidates = payload.data?.candidates ?? [];
+  if (candidates.length === 0) return null;
+
+  return (
+    <div className="mt-3 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-900/10 p-4">
+      <div className="flex items-center gap-1.5 mb-2">
+        <HelpCircle size={14} className="text-amber-600 dark:text-amber-400" />
+        <span className="text-xs font-semibold text-text-primary dark:text-dark-text-primary">
+          Cần làm rõ tính năng
+        </span>
+      </div>
+      <p className="text-xs leading-5 text-amber-700 dark:text-amber-300">
+        Prompt này có thể thuộc nhiều hướng xử lý. Hãy nói rõ bạn muốn AIRA dùng tính năng nào.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {candidates.map((candidate, index) => (
+          <span
+            key={`${candidate.feature ?? "candidate"}-${index}`}
+            className="inline-flex items-center gap-1 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-medium text-amber-700 dark:bg-black/10 dark:text-amber-300"
+          >
+            {candidate.label ?? candidate.feature ?? `Lựa chọn ${index + 1}`}
+            {typeof candidate.confidence === "number" && (
+              <span className="text-[10px] opacity-80">
+                {Math.round(candidate.confidence * 100)}%
+              </span>
+            )}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ====================================================================
  * CitationReportCard — for citation_report results
  * ==================================================================== */
@@ -448,6 +567,8 @@ interface CitationCandidate {
   url?: string | null;
   external_id?: string | null;
   external_id_type?: string | null;
+  score?: number | null;
+  missing_fields?: string[];
 }
 
 interface CompletedCitationMetadata {
@@ -463,6 +584,22 @@ interface CompletedCitationMetadata {
   volume?: string | null;
   issue?: string | null;
   pages?: string | null;
+  external_id?: string | null;
+  external_id_type?: string | null;
+}
+
+interface CitationFieldEvidenceItem {
+  input?: unknown;
+  candidate?: unknown;
+  similarity?: number | null;
+  verdict?: string | null;
+  notes?: string | null;
+}
+
+interface CitationSourceDiagnostic {
+  state?: string | null;
+  candidate_count?: number | null;
+  detail?: string | null;
 }
 
 interface CitationItem {
@@ -479,6 +616,10 @@ interface CitationItem {
   verification_mode?: string | null;
   input_doi?: string | null;
   matched_doi?: string | null;
+  input_identifier?: string | null;
+  input_identifier_type?: string | null;
+  matched_identifier?: string | null;
+  matched_identifier_type?: string | null;
   matched_title?: string | null;
   matched_year?: number | null;
   matched_authors?: string[];
@@ -486,6 +627,13 @@ interface CitationItem {
   candidates?: CitationCandidate[];
   warning?: string | null;
   evidence_breakdown?: Record<string, number> | null;
+  reason?: string | null;
+  field_evidence?: Record<string, CitationFieldEvidenceItem> | null;
+  source_diagnostics?: Record<string, CitationSourceDiagnostic> | null;
+  parse_status?: string | null;
+  search_attempted?: boolean;
+  search_strategy?: string | null;
+  metadata_consistency?: string | null;
   completed_metadata?: CompletedCitationMetadata | null;
   formatted_apa?: string | null;
   formatted_bibtex?: string | null;
@@ -493,10 +641,10 @@ interface CitationItem {
 }
 
 const GREEN_STATUSES = new Set([
-  "VERIFIED", "FOUND", "DOI_VERIFIED", "VALID", "METADATA_VERIFIED",
+  "VERIFIED", "FOUND", "DOI_VERIFIED", "IDENTIFIER_VERIFIED", "VALID", "METADATA_VERIFIED",
 ]);
 const RED_STATUSES = new Set([
-  "HALLUCINATED", "NOT_FOUND", "DOI_NOT_FOUND", "NO_MATCH_FOUND", "PARSE_FAILED",
+  "HALLUCINATED", "NOT_FOUND", "DOI_NOT_FOUND", "IDENTIFIER_NOT_FOUND", "NO_MATCH_FOUND", "PARSE_FAILED",
 ]);
 
 function statusIcon(status: string) {
@@ -511,9 +659,11 @@ function statusIcon(status: string) {
 function citationStatusLabel(status: string) {
   const s = status.toUpperCase();
   if (s === "DOI_VERIFIED") return "Đã xác minh DOI";
+  if (s === "IDENTIFIER_VERIFIED") return "Đã xác minh định danh";
   if (s === "VALID" || s === "VERIFIED" || s === "FOUND") return "Khớp rõ ràng";
   if (s === "PARTIAL_MATCH") return "Khớp một phần";
   if (s === "DOI_NOT_FOUND") return "Chưa tìm thấy DOI";
+  if (s === "IDENTIFIER_NOT_FOUND") return "Chưa tìm thấy định danh";
   if (s === "HALLUCINATED" || s === "NOT_FOUND") return "Chưa tìm thấy nguồn";
   if (s === "UNVERIFIED") return "Chưa xác minh được";
   if (s === "NO_CITATION_FOUND") return "Thiếu thông tin";
@@ -554,6 +704,73 @@ function citationSourceLabel(source?: string | null) {
   return source || "Nguồn";
 }
 
+function citationIdentifierLabel(identifierType?: string | null) {
+  const normalized = (identifierType ?? "").toLowerCase();
+  if (normalized === "pmid") return "PMID";
+  if (normalized === "pmcid") return "PMCID";
+  if (normalized === "openalex") return "OpenAlex ID";
+  return "Identifier";
+}
+
+function citationFieldLabel(field: string) {
+  if (field === "title") return "Title";
+  if (field === "authors") return "Authors";
+  if (field === "year") return "Year";
+  if (field === "venue") return "Venue";
+  if (field === "volume_issue_pages") return "Volume / issue / pages";
+  if (field === "doi") return "DOI";
+  if (field === "exact_identifier") return "Exact identifier";
+  return field;
+}
+
+function citationVerdictLabel(verdict?: string | null) {
+  const normalized = (verdict ?? "").toLowerCase();
+  if (normalized === "exact") return "Exact";
+  if (normalized === "match") return "Match";
+  if (normalized === "partial_match") return "Partial match";
+  if (normalized === "near_match") return "Near match";
+  if (normalized === "mismatch") return "Mismatch";
+  if (normalized === "missing_candidate") return "Missing from source";
+  if (normalized === "source_backed") return "Source-backed";
+  if (normalized === "not_provided") return "Not provided";
+  return verdict || "—";
+}
+
+function citationSourceStateLabel(state?: string | null) {
+  const normalized = (state ?? "").toLowerCase();
+  if (normalized === "matched") return "Matched";
+  if (normalized === "no_match") return "No match";
+  if (normalized === "timeout") return "Timeout";
+  if (normalized === "http_error") return "HTTP error";
+  if (normalized === "disabled") return "Disabled";
+  if (normalized === "skipped") return "Skipped";
+  if (normalized === "error") return "Error";
+  return state || "Unknown";
+}
+
+function citationMetadataConsistencyLabel(consistency?: string | null) {
+  const normalized = (consistency ?? "").toLowerCase();
+  if (normalized === "consistent") return "Consistent";
+  if (normalized === "partial_mismatch") return "Partial mismatch";
+  if (normalized === "mismatch") return "Mismatch";
+  if (normalized === "not_provided") return "Not provided";
+  return consistency || "Unknown";
+}
+
+function renderCitationEvidenceValue(value: unknown) {
+  if (value == null) return "—";
+  if (typeof value === "string") return value || "—";
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "—";
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item != null && `${item}`.trim() !== "");
+    if (!entries.length) return "—";
+    return entries.map(([key, item]) => `${key}: ${item}`).join(" · ");
+  }
+  return String(value);
+}
+
 function CitationSourceBadge({ source }: { source?: string | null }) {
   if (!source) return null;
   return (
@@ -563,11 +780,36 @@ function CitationSourceBadge({ source }: { source?: string | null }) {
   );
 }
 
-function MetadataMatchDetails({ c }: { c: CitationItem }) {
+function CitationVerificationDetails({ c }: { c: CitationItem }) {
   const [copiedKind, setCopiedKind] = useState<"apa" | "bibtex" | "csl" | null>(null);
+  const isMetadataMatch = c.verification_mode === "metadata_match";
+  const isExactMatch = c.verification_mode === "doi" || c.verification_mode === "identifier_exact";
   const ev = c.evidence_breakdown ?? null;
+  const fieldEvidence = c.field_evidence ?? null;
+  const fieldEvidenceEntries = [
+    "title",
+    "authors",
+    "year",
+    "venue",
+    "volume_issue_pages",
+    "doi",
+    "exact_identifier",
+  ]
+    .map((key) => [key, fieldEvidence?.[key]] as const)
+    .filter(([, value]) => Boolean(value));
+  const sourceDiagnostics = c.source_diagnostics
+    ? Object.entries(c.source_diagnostics).filter(([, value]) => Boolean(value))
+    : [];
   const cands = c.candidates ?? [];
-  const hasMatched = c.matched_title || c.matched_doi || c.matched_year || c.matched_venue;
+  const inputIdentifier = c.input_identifier
+    ? `${citationIdentifierLabel(c.input_identifier_type)} ${c.input_identifier}`
+    : null;
+  const matchedIdentifier = c.matched_identifier
+    ? `${citationIdentifierLabel(c.matched_identifier_type)} ${c.matched_identifier}`
+    : null;
+  const hasMatched = Boolean(
+    c.matched_title || c.matched_doi || c.matched_year || c.matched_venue || inputIdentifier || matchedIdentifier,
+  );
   const cslText = c.csl_json ? JSON.stringify(c.csl_json, null, 2) : "";
   const hasFormatted = Boolean(c.formatted_apa || c.formatted_bibtex || cslText);
 
@@ -584,8 +826,20 @@ function MetadataMatchDetails({ c }: { c: CitationItem }) {
 
   return (
     <div className="mt-2 space-y-2">
+      {c.reason && (
+        <p className="text-[11px] leading-relaxed text-text-secondary dark:text-dark-text-secondary">
+          {c.reason}
+        </p>
+      )}
+
       {hasMatched && (
         <div className="text-[11px] text-text-secondary dark:text-dark-text-secondary space-y-0.5">
+          {inputIdentifier && (
+            <div>
+              <span className="text-text-tertiary dark:text-dark-text-tertiary">Input:</span>{" "}
+              <span className="text-text-primary dark:text-dark-text-primary">{inputIdentifier}</span>
+            </div>
+          )}
           {c.matched_title && (
             <div>
               <span className="text-text-tertiary dark:text-dark-text-tertiary">Matched:</span>{" "}
@@ -593,6 +847,7 @@ function MetadataMatchDetails({ c }: { c: CitationItem }) {
             </div>
           )}
           <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+            {matchedIdentifier && <span>{matchedIdentifier}</span>}
             {c.matched_doi && <span>DOI: {c.matched_doi}</span>}
             {c.matched_year != null && <span>Năm: {c.matched_year}</span>}
             {c.matched_venue && <span>Tạp chí: {c.matched_venue}</span>}
@@ -600,7 +855,51 @@ function MetadataMatchDetails({ c }: { c: CitationItem }) {
         </div>
       )}
 
-      {ev && (
+      {isExactMatch && c.metadata_consistency && c.metadata_consistency !== "not_provided" && (
+        <div className="inline-flex items-center gap-1.5 rounded-md bg-blue-50 px-2 py-1 text-[10px] font-medium text-blue-700 dark:bg-blue-900/20 dark:text-blue-300">
+          <span>Metadata consistency:</span>
+          <span>{citationMetadataConsistencyLabel(c.metadata_consistency)}</span>
+        </div>
+      )}
+
+      {fieldEvidenceEntries.length > 0 && (
+        <details className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary" open={isExactMatch}>
+          <summary className="cursor-pointer select-none">Field evidence</summary>
+          <div className="mt-1 overflow-x-auto rounded-md border border-border/70 dark:border-dark-border/70">
+            <table className="min-w-full text-left text-[10px]">
+              <thead className="bg-bg-secondary/70 dark:bg-dark-bg-secondary/70 text-text-tertiary dark:text-dark-text-tertiary">
+                <tr>
+                  <th className="px-2 py-1.5 font-medium">Field</th>
+                  <th className="px-2 py-1.5 font-medium">Input</th>
+                  <th className="px-2 py-1.5 font-medium">Source</th>
+                  <th className="px-2 py-1.5 font-medium">Verdict</th>
+                  <th className="px-2 py-1.5 font-medium text-right">Score</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fieldEvidenceEntries.map(([field, evidence]) => {
+                  const similarity = typeof evidence?.similarity === "number" ? evidence.similarity : null;
+                  return (
+                    <tr key={field} className="border-t border-border/70 dark:border-dark-border/70">
+                      <td className="px-2 py-1.5 align-top text-text-primary dark:text-dark-text-primary">
+                        {citationFieldLabel(field)}
+                      </td>
+                      <td className="px-2 py-1.5 align-top">{renderCitationEvidenceValue(evidence?.input)}</td>
+                      <td className="px-2 py-1.5 align-top">{renderCitationEvidenceValue(evidence?.candidate)}</td>
+                      <td className="px-2 py-1.5 align-top">{citationVerdictLabel(evidence?.verdict)}</td>
+                      <td className="px-2 py-1.5 align-top text-right">
+                        {similarity == null ? "—" : `${(similarity * 100).toFixed(0)}%`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+
+      {isMetadataMatch && ev && (
         <details className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
           <summary className="cursor-pointer select-none">Chi tiết điểm khớp</summary>
           <div className="mt-1 space-y-0.5">
@@ -630,7 +929,32 @@ function MetadataMatchDetails({ c }: { c: CitationItem }) {
         </details>
       )}
 
-      {cands.length > 0 && (
+      {sourceDiagnostics.length > 0 && (
+        <details className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
+          <summary className="cursor-pointer select-none">Source checks</summary>
+          <div className="mt-1 space-y-1">
+            {sourceDiagnostics.map(([source, diagnostic]) => (
+              <div
+                key={source}
+                className="rounded-md border border-border/70 dark:border-dark-border/70 bg-bg-secondary/40 dark:bg-dark-bg-secondary/40 px-2 py-1.5"
+              >
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-medium text-text-primary dark:text-dark-text-primary">
+                    {citationSourceLabel(source)}
+                  </span>
+                  <span>{citationSourceStateLabel(diagnostic?.state)}</span>
+                  {typeof diagnostic?.candidate_count === "number" && (
+                    <span>Candidates: {diagnostic.candidate_count}</span>
+                  )}
+                </div>
+                {diagnostic?.detail && <div className="mt-0.5">{diagnostic.detail}</div>}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      {isMetadataMatch && cands.length > 0 && (
         <details className="text-[11px] text-text-tertiary dark:text-dark-text-tertiary">
           <summary className="cursor-pointer select-none">Ứng viên khác (top {cands.length})</summary>
           <ol className="mt-1 space-y-1 list-decimal pl-4">
@@ -654,6 +978,10 @@ function MetadataMatchDetails({ c }: { c: CitationItem }) {
                 <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px]">
                   {cand.year != null && <span>Năm: {cand.year}</span>}
                   {cand.doi && <span>DOI: {cand.doi}</span>}
+                  {typeof cand.score === "number" && <span>Score: {(cand.score * 100).toFixed(0)}%</span>}
+                  {cand.missing_fields && cand.missing_fields.length > 0 && (
+                    <span>Thiếu: {cand.missing_fields.join(", ")}</span>
+                  )}
                   {cand.source && <CitationSourceBadge source={cand.source} />}
                 </div>
               </li>
@@ -767,6 +1095,15 @@ export function CitationReportCard({ citations }: { citations: CitationItem[] })
       </div>
       {citations.map((c, i) => {
         const isMetadataMatch = c.verification_mode === "metadata_match";
+        const isDoiExact = c.verification_mode === "doi";
+        const isIdentifierExact = c.verification_mode === "identifier_exact";
+        const verificationHint = isMetadataMatch
+          ? "No DOI · Metadata match"
+          : isDoiExact
+            ? "Exact DOI"
+          : isIdentifierExact
+            ? `Exact ${citationIdentifierLabel(c.input_identifier_type)}`
+            : null;
         return (
           <div
             key={i}
@@ -777,9 +1114,9 @@ export function CitationReportCard({ citations }: { citations: CitationItem[] })
                 {c.raw_text || c.citation_text || c.citation || "Trích dẫn"}
               </p>
               <div className="flex items-center gap-1 shrink-0">
-                {isMetadataMatch && (
+                {verificationHint && (
                   <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400">
-                    No DOI · Metadata match
+                    {verificationHint}
                   </span>
                 )}
                 {statusBadge(c.status ?? "UNKNOWN")}
@@ -790,7 +1127,7 @@ export function CitationReportCard({ citations }: { citations: CitationItem[] })
               {c.confidence != null && <span>Độ tin cậy: {(c.confidence * 100).toFixed(0)}%</span>}
               {c.source && <span>Nguồn: {citationSourceLabel(c.source)}</span>}
             </div>
-            {isMetadataMatch && <MetadataMatchDetails c={c} />}
+            {(isMetadataMatch || isDoiExact || isIdentifierExact) && <CitationVerificationDetails c={c} />}
           </div>
         );
       })}
@@ -1002,6 +1339,8 @@ interface AIDetectionData {
   skipped_detectors?: string[];
   fallback_reason?: string | null;
   detectors_used?: string[];
+  rule_source?: "default_app_rules" | "user_custom_rules";
+  matched_rules?: string[];
   details?: Record<string, unknown>;
 }
 
@@ -1076,6 +1415,11 @@ export function AIDetectionCard({ data }: { data: AIDetectionData }) {
         {data.ml_score != null && <span>ML: {(data.ml_score * 100).toFixed(1)}%</span>}
         {data.rule_score != null && <span>Rules: {(data.rule_score * 100).toFixed(1)}%</span>}
         {data.specter2_score != null && <span>SPECTER2: {(data.specter2_score * 100).toFixed(1)}%</span>}
+        {data.rule_source && (
+          <span>
+            Rule source: {data.rule_source === "user_custom_rules" ? "User custom rules" : "App rules"}
+          </span>
+        )}
       </div>
 
       {/* Skipped detectors warning */}
@@ -1111,6 +1455,24 @@ export function AIDetectionCard({ data }: { data: AIDetectionData }) {
               {f}
             </span>
           ))}
+        </div>
+      )}
+
+      {data.matched_rules && data.matched_rules.length > 0 && (
+        <div className="mt-3">
+          <div className="text-[10px] font-medium uppercase tracking-wide text-text-tertiary dark:text-dark-text-tertiary">
+            Matched rules
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {data.matched_rules.map((rule, i) => (
+              <span
+                key={i}
+                className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400"
+              >
+                {rule}
+              </span>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -1431,9 +1793,23 @@ export function ToolResultsRenderer({
     return <DoiMetadataCard payload={toolResults as DoiMetadataPayload} />;
   }
 
+  // --- Intent disambiguation ---
+  if (type === "intent_disambiguation" && toolResults && !Array.isArray(toolResults)) {
+    return <IntentDisambiguationCard payload={toolResults as IntentDisambiguationPayload} />;
+  }
+
   // --- PDF summary (usually just content text, but handle if in tool_results) ---
   if (messageType === "pdf_summary") {
     if (content) return <PdfSummaryCard text={content} />;
+  }
+
+  // --- Routing metadata only ---
+  if (toolResults && !Array.isArray(toolResults)) {
+    const meta = (toolResults as Record<string, unknown>).meta;
+    const keys = Object.keys(toolResults as Record<string, unknown>);
+    if (keys.length === 1 && meta && typeof meta === "object") {
+      return null;
+    }
   }
 
   // --- Fallback: avoid exposing raw backend payloads to normal users ---

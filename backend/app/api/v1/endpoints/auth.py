@@ -15,7 +15,23 @@ from app.core.security import (
     get_password_hash,
 )
 from app.models.user import User
-from app.schemas.auth import PromoteUserRequest, Token, UserCreate, UserOut
+from app.schemas.auth import (
+    AIDetectionRulePreferencesOut,
+    AIDetectionRulePreferencesUpdate,
+    PromoteUserRequest,
+    Token,
+    UserCreate,
+    UserOut,
+)
+from app.services.ai_detection_rules import (
+    AIDetectionRuleValidationError,
+    DEFAULT_AI_RULE_SOURCE,
+    USER_AI_RULE_SOURCE,
+    build_user_ai_detection_rule_prefs,
+    clear_user_ai_detection_rule_prefs,
+    get_user_ai_detection_rule_phrases,
+    get_user_ai_detection_rule_updated_at,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -81,6 +97,52 @@ def login(
 @router.get("/me", response_model=UserOut)
 def me(current_user: Annotated[User, Depends(get_current_user)]) -> UserOut:
     return current_user
+
+
+def _build_ai_rule_preferences_response(user: User) -> AIDetectionRulePreferencesOut:
+    phrases = get_user_ai_detection_rule_phrases(user) or []
+    return AIDetectionRulePreferencesOut(
+        phrases=phrases,
+        phrase_count=len(phrases),
+        rule_source=USER_AI_RULE_SOURCE if phrases else DEFAULT_AI_RULE_SOURCE,
+        updated_at=get_user_ai_detection_rule_updated_at(user),
+    )
+
+
+@router.get("/me/ai-detection-rules", response_model=AIDetectionRulePreferencesOut)
+def get_ai_detection_rules(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AIDetectionRulePreferencesOut:
+    return _build_ai_rule_preferences_response(current_user)
+
+
+@router.put("/me/ai-detection-rules", response_model=AIDetectionRulePreferencesOut)
+def update_ai_detection_rules(
+    payload: AIDetectionRulePreferencesUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AIDetectionRulePreferencesOut:
+    try:
+        current_user.ai_detection_rule_prefs = build_user_ai_detection_rule_prefs(payload.phrases)
+    except AIDetectionRuleValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+    return _build_ai_rule_preferences_response(current_user)
+
+
+@router.delete("/me/ai-detection-rules", response_model=AIDetectionRulePreferencesOut)
+def delete_ai_detection_rules(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AIDetectionRulePreferencesOut:
+    clear_user_ai_detection_rule_prefs(current_user)
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+    return _build_ai_rule_preferences_response(current_user)
 
 
 @router.post("/admin/promote", response_model=UserOut)

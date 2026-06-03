@@ -1,11 +1,13 @@
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 
 from sqlalchemy import DateTime, Enum as SqlEnum, String
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
+from app.core.encrypted_types import EncryptedJSON
 from app.core.sa_compat import Mapped, mapped_column
 from app.models.academic_common import enum_values
 
@@ -27,6 +29,7 @@ class User(Base):
         default=UserRole.RESEARCHER,
         nullable=False,
     )
+    ai_detection_rule_prefs: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")

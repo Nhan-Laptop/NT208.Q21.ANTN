@@ -2,7 +2,7 @@
 
 import { api, showApiError } from "@/lib/api";
 import { Message, Session } from "@/lib/types";
-import { createContext, ReactNode, useCallback, useContext, useMemo, useReducer } from "react";
+import React, { createContext, ReactNode, useCallback, useContext, useMemo, useReducer } from "react";
 import { toast } from "sonner";
 
 /* ── State ── */
@@ -36,13 +36,13 @@ const initialState: ChatState = {
   isLoadingSessions: false,
   isLoadingMessages: false,
   isSending: false,
-  mode: "general_qa",
+  mode: "auto",
 };
 
 /* ── Actions ── */
 type Action =
   | { type: "SET_SESSIONS"; sessions: Session[] }
-  | { type: "SET_ACTIVE_SESSION"; sessionId: string | null }
+  | { type: "SET_ACTIVE_SESSION"; sessionId: string | null; mode?: Session["mode"] }
   | { type: "SET_MESSAGES"; messages: Message[] }
   | { type: "ADD_MESSAGES"; messages: Message[] }
   | { type: "SET_LOADING_SESSIONS"; loading: boolean }
@@ -56,10 +56,23 @@ type Action =
 
 function reducer(state: ChatState, action: Action): ChatState {
   switch (action.type) {
-    case "SET_SESSIONS":
-      return { ...state, sessions: action.sessions, isLoadingSessions: false };
+    case "SET_SESSIONS": {
+      const activeSessionMode = state.activeSessionId
+        ? action.sessions.find((session) => session.id === state.activeSessionId)?.mode
+        : undefined;
+      return {
+        ...state,
+        sessions: action.sessions,
+        isLoadingSessions: false,
+        mode: activeSessionMode ?? state.mode,
+      };
+    }
     case "SET_ACTIVE_SESSION":
-      return { ...state, activeSessionId: action.sessionId };
+      return {
+        ...state,
+        activeSessionId: action.sessionId,
+        mode: action.mode ?? state.mode,
+      };
     case "SET_MESSAGES":
       return { ...state, messages: action.messages, isLoadingMessages: false };
     case "ADD_MESSAGES":
@@ -73,17 +86,19 @@ function reducer(state: ChatState, action: Action): ChatState {
     case "SET_MODE":
       return { ...state, mode: action.mode };
     case "NEW_CHAT":
-      return { ...state, activeSessionId: null, messages: [], mode: "general_qa" };
+      return { ...state, activeSessionId: null, messages: [], mode: "auto" };
     case "ADD_SESSION":
       return {
         ...state,
         sessions: [action.session, ...state.sessions],
         activeSessionId: action.session.id,
+        mode: action.session.mode,
       };
     case "UPSERT_SESSION":
       return {
         ...state,
         sessions: upsertSession(state.sessions, action.session),
+        mode: state.activeSessionId === action.session.id ? action.session.mode : state.mode,
       };
     case "REMOVE_SESSION": {
       const sessions = state.sessions.filter((s) => s.id !== action.sessionId);
@@ -141,8 +156,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const selectSession = useCallback((sessionId: string) => {
-    dispatch({ type: "SET_ACTIVE_SESSION", sessionId });
-  }, []);
+    const session = state.sessions.find((item) => item.id === sessionId);
+    dispatch({ type: "SET_ACTIVE_SESSION", sessionId, mode: session?.mode });
+  }, [state.sessions]);
 
   const startNewChat = useCallback(() => {
     dispatch({ type: "NEW_CHAT" });

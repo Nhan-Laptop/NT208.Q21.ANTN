@@ -25,8 +25,6 @@ from app.core.database import Base, get_db
 from app.core.security import get_current_user
 from app.models.chat_session import ChatSession, SessionMode
 from app.models.user import User, UserRole
-from app.services.embeddings.specter2_service import specter2_service
-from app.services.ingestion.index_service import academic_index_service
 
 
 class SyncASGIClient:
@@ -42,6 +40,12 @@ class SyncASGIClient:
 
     def post(self, url: str, **kwargs):
         return self.request("POST", url, **kwargs)
+
+    def put(self, url: str, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
 
     def close(self) -> None:
         asyncio.run(self._client.aclose())
@@ -77,8 +81,12 @@ class BackendTestCase(unittest.TestCase):
         self.addCleanup(object.__setattr__, settings, "local_storage_path", self._orig_local_storage_path)
         self.addCleanup(object.__setattr__, settings, "academic_seed_path", self._orig_academic_seed_path)
 
-        academic_index_service._client = None
-        self.addCleanup(setattr, academic_index_service, "_client", None)
+        try:
+            from app.services.ingestion.index_service import academic_index_service
+            academic_index_service._client = None
+            self.addCleanup(setattr, academic_index_service, "_client", None)
+        except Exception:
+            pass
 
     def db(self):
         return self.SessionLocal()
@@ -143,9 +151,13 @@ class BackendTestCase(unittest.TestCase):
             db.close()
 
     def reset_embedding_service(self) -> None:
-        specter2_service._model = None
-        specter2_service._tokenizer = None
-        specter2_service._backend = None
-        specter2_service._loaded_model_name = None
-        specter2_service._adapter_label = None
-        specter2_service._load_attempted = False
+        try:
+            from app.services.embeddings.specter2_service import specter2_service
+            specter2_service._model = None
+            specter2_service._tokenizer = None
+            specter2_service._backend = None
+            specter2_service._loaded_model_name = None
+            specter2_service._adapter_label = None
+            specter2_service._load_attempted = False
+        except Exception:
+            pass

@@ -83,6 +83,40 @@ _NUMBERED_REF_LINE_RE = re.compile(
     r"^\s*(?:\[\d{1,3}\]|\(\d{1,3}\)|\d{1,3}[.)])\s+"
 )
 _DOI_NORMALIZE_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi\s*:\s*)", re.IGNORECASE)
+_PMID_URL_RE = re.compile(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/(\d{4,10})/?$", re.IGNORECASE)
+_PMCID_URL_RE = re.compile(
+    r"^https?://(?:www\.)?ncbi\.nlm\.nih\.gov/pmc/articles/(PMC\d+)/?$",
+    re.IGNORECASE,
+)
+_OPENALEX_URL_RE = re.compile(
+    r"^https?://(?:api\.)?openalex\.org/(?:works/)?(W\d{6,})/?$",
+    re.IGNORECASE,
+)
+_OPENALEX_PREFIX_RE = re.compile(r"^openalex\s*:\s*(W\d{6,})$", re.IGNORECASE)
+_OPENALEX_ID_RE = re.compile(r"^W\d{6,}$", re.IGNORECASE)
+_EXACT_IDENTIFIER_PATTERNS: dict[str, list[re.Pattern[str]]] = {
+    "pmid": [
+        re.compile(r"https?://pubmed\.ncbi\.nlm\.nih\.gov/\d{4,10}/?", re.IGNORECASE),
+        re.compile(r"\bPMID\s*[:=]?\s*\d{4,10}\b", re.IGNORECASE),
+    ],
+    "pmcid": [
+        re.compile(
+            r"https?://(?:www\.)?ncbi\.nlm\.nih\.gov/pmc/articles/PMC\d+/?",
+            re.IGNORECASE,
+        ),
+        re.compile(r"\bPMCID\s*[:=]?\s*PMC\d+\b", re.IGNORECASE),
+    ],
+    "openalex": [
+        re.compile(r"https?://(?:api\.)?openalex\.org/(?:works/)?W\d{6,}/?", re.IGNORECASE),
+        re.compile(r"\bopenalex\s*:\s*W\d{6,}\b", re.IGNORECASE),
+        re.compile(r"\bW\d{6,}\b"),
+    ],
+}
+_IDENTIFIER_DISPLAY_LABELS = {
+    "pmid": "PMID",
+    "pmcid": "PMCID",
+    "openalex": "OpenAlex ID",
+}
 
 # ---------------------------------------------------------------------------
 # Helpers for citation dedup
@@ -90,8 +124,7 @@ _DOI_NORMALIZE_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi\s*:\s*)", r
 
 
 def _inside_doi_block(pos: int, doi_blocks: set[int], block_starts: list[int], blocks: list[str]) -> bool:
-    """Return True if *pos* (character offset in normalized text) falls inside
-    any block that is known to contain a DOI."""
+    """Return True if *pos* falls inside a block containing an exact identifier."""
     for i in doi_blocks:
         if i < len(block_starts) and i < len(blocks):
             start = block_starts[i]
@@ -111,6 +144,7 @@ class CitationCheckResult:
 
     Status values:
       DOI path:        DOI_VERIFIED | DOI_NOT_FOUND
+      Identifier path: IDENTIFIER_VERIFIED | IDENTIFIER_NOT_FOUND
       Metadata path:   METADATA_VERIFIED | LIKELY_MATCH | POSSIBLE_MATCH
                        | AMBIGUOUS_MATCH | UNVERIFIED_NO_DOI | NO_MATCH_FOUND | PARSE_FAILED
       Legacy:          VALID | HALLUCINATED | UNVERIFIED | PARTIAL_MATCH | NO_CITATION_FOUND
@@ -126,9 +160,13 @@ class CitationCheckResult:
     confidence: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     # No-DOI metadata-matching fields (all optional, backward compatible)
-    verification_mode: str | None = None  # "doi" | "metadata_match" | "none"
+    verification_mode: str | None = None  # "doi" | "identifier_exact" | "metadata_match" | "none"
     input_doi: str | None = None
     matched_doi: str | None = None
+    input_identifier: str | None = None
+    input_identifier_type: str | None = None
+    matched_identifier: str | None = None
+    matched_identifier_type: str | None = None
     matched_title: str | None = None
     matched_year: int | None = None
     matched_authors: list[str] = field(default_factory=list)
@@ -136,6 +174,13 @@ class CitationCheckResult:
     candidates: list[dict[str, Any]] = field(default_factory=list)
     warning: str | None = None
     evidence_breakdown: dict[str, float] | None = None
+    reason: str | None = None
+    field_evidence: dict[str, Any] | None = None
+    source_diagnostics: dict[str, Any] = field(default_factory=dict)
+    parse_status: str | None = None
+    search_attempted: bool = False
+    search_strategy: str | None = None
+    metadata_consistency: str | None = None
     completed_metadata: dict[str, Any] | None = None
     formatted_apa: str | None = None
     formatted_bibtex: str | None = None
@@ -187,8 +232,15 @@ class MetadataMatchResult:
     confidence: float
     best_candidate: CandidateWork | None = None
     candidates: list[CandidateWork] = field(default_factory=list)
+    candidate_details: list[dict[str, Any]] = field(default_factory=list)
     evidence: dict[str, Any] = field(default_factory=dict)
     warning: str | None = None
+    reason: str | None = None
+    field_evidence: dict[str, Any] | None = None
+    source_diagnostics: dict[str, Any] = field(default_factory=dict)
+    parse_status: str | None = None
+    search_attempted: bool = False
+    search_strategy: str | None = None
 
 
 
@@ -520,6 +572,473 @@ def normalize_venue(venue: str) -> str:
     v = re.sub(r'^(the\s+)?proceedings\s+of\s+', '', v, flags=re.IGNORECASE)
     v = re.sub(r'\s+', ' ', v).strip().lower()
     return v
+
+
+_MATCH_WEIGHTS = {
+    "title": 0.45,
+    "authors": 0.25,
+    "year": 0.15,
+    "venue": 0.10,
+    "volume_issue_pages": 0.05,
+}
+_SOURCE_ERROR_STATES = {"timeout", "http_error", "error"}
+_TITLE_MATCH_THRESHOLD = 0.75
+_TITLE_STRONG_THRESHOLD = 0.90
+_AUTHOR_MATCH_THRESHOLD = 0.80
+_AUTHOR_PARTIAL_THRESHOLD = 0.50
+_VENUE_MATCH_THRESHOLD = 0.80
+_VENUE_PARTIAL_THRESHOLD = 0.50
+_LOW_PARSE_CONFIDENCE = 0.40
+
+
+def _safe_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _safe_float(value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 3)
+
+
+def _empty_source_diagnostic(state: str = "skipped", detail: str | None = None) -> dict[str, Any]:
+    return {
+        "state": state,
+        "candidate_count": 0,
+        "detail": detail,
+    }
+
+
+def _classify_source_exception(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout", "Request timed out."
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code is not None:
+            return "http_error", f"HTTP {status_code}"
+        return "http_error", "HTTP error."
+    if isinstance(exc, httpx.RequestError):
+        return "error", str(exc)
+    return "error", str(exc)
+
+
+def _candidate_missing_fields(ref: ReferenceMetadata, candidate: CandidateWork) -> list[str]:
+    missing: list[str] = []
+    if ref.authors and not candidate.authors:
+        missing.append("authors")
+    if ref.year is not None and candidate.year is None:
+        missing.append("year")
+    if ref.venue and not candidate.venue:
+        missing.append("venue")
+    if (ref.volume or ref.issue or ref.pages) and not (candidate.volume or candidate.issue or candidate.pages):
+        missing.append("volume_issue_pages")
+    if not candidate.doi:
+        missing.append("doi")
+    return missing
+
+
+def _join_reasons(parts: list[str]) -> str | None:
+    cleaned = [part.strip() for part in parts if part and part.strip()]
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+
+def _build_match_reason(
+    status: str,
+    field_evidence: dict[str, Any] | None,
+    *,
+    source_diagnostics: dict[str, Any] | None = None,
+    parse_status: str | None = None,
+    metadata_consistency: str | None = None,
+    exact_label: str | None = None,
+) -> str:
+    if status == "PARSE_FAILED":
+        return "Could not extract enough structured or title-like metadata to search scholarly sources."
+
+    if status == "UNVERIFIED":
+        degraded = [
+            f"{source}: {diag.get('state')}"
+            for source, diag in (source_diagnostics or {}).items()
+            if isinstance(diag, dict) and diag.get("state") in _SOURCE_ERROR_STATES
+        ]
+        detail = f" Sources degraded: {', '.join(degraded)}." if degraded else ""
+        return f"Could not verify this reference because scholarly source lookups were degraded.{detail}"
+
+    if status == "NO_MATCH_FOUND":
+        if parse_status == "LOW_CONFIDENCE_FALLBACK_USED":
+            return "Low-confidence parsing triggered a fallback search, but no scholarly source produced a plausible candidate."
+        return "No scholarly source produced a plausible metadata candidate for this reference."
+
+    if exact_label:
+        prefix = f"{exact_label} resolved exactly to a scholarly record."
+        if metadata_consistency == "not_provided":
+            return prefix
+        if metadata_consistency == "consistent":
+            return f"{prefix} The supplied metadata matches the resolved record."
+        if metadata_consistency == "partial_mismatch":
+            return f"{prefix} Some supplied metadata matches, but other fields differ from the resolved record."
+        if metadata_consistency == "mismatch":
+            return f"{prefix} The supplied metadata conflicts with the resolved record."
+        return prefix
+
+    evidence = field_evidence or {}
+    positive: list[str] = []
+    caution: list[str] = []
+    title_ev = evidence.get("title") or {}
+    title_verdict = title_ev.get("verdict")
+    if title_verdict == "match":
+        positive.append("title matches strongly")
+    elif title_verdict == "partial_match":
+        caution.append("title is only partially similar")
+    elif title_verdict == "mismatch":
+        caution.append("title differs")
+
+    author_ev = evidence.get("authors") or {}
+    author_verdict = author_ev.get("verdict")
+    if author_verdict == "match":
+        positive.append("authors align well")
+    elif author_verdict == "partial_match":
+        positive.append("authors partially align")
+    elif author_verdict == "mismatch":
+        caution.append("authors differ")
+
+    year_ev = evidence.get("year") or {}
+    year_verdict = year_ev.get("verdict")
+    if year_verdict == "exact":
+        positive.append("year matches exactly")
+    elif year_verdict == "near_match":
+        positive.append("year is close")
+    elif year_verdict == "mismatch":
+        caution.append("year differs")
+
+    venue_ev = evidence.get("venue") or {}
+    venue_verdict = venue_ev.get("verdict")
+    if venue_verdict == "match":
+        positive.append("venue matches")
+    elif venue_verdict == "partial_match":
+        positive.append("venue is partially aligned")
+    elif venue_verdict == "mismatch":
+        caution.append("venue differs")
+
+    vol_ev = evidence.get("volume_issue_pages") or {}
+    vol_verdict = vol_ev.get("verdict")
+    if vol_verdict == "exact":
+        positive.append("volume/pages align")
+    elif vol_verdict == "partial_match":
+        positive.append("volume/pages partially align")
+    elif vol_verdict == "mismatch":
+        caution.append("volume/pages differ")
+
+    pieces: list[str] = []
+    positive_text = _join_reasons(positive)
+    caution_text = _join_reasons(caution)
+    if positive_text:
+        pieces.append(positive_text[:1].upper() + positive_text[1:] + ".")
+    if caution_text:
+        pieces.append(caution_text[:1].upper() + caution_text[1:] + ".")
+
+    if not pieces:
+        if status == "AMBIGUOUS_MATCH":
+            return "Multiple candidates scored similarly, so the match remains ambiguous."
+        if status == "UNVERIFIED_NO_DOI":
+            return "A candidate exists, but the supporting metadata is too weak to verify this reference."
+        return "Metadata evidence was evaluated against scholarly candidates."
+
+    if status == "AMBIGUOUS_MATCH":
+        pieces.append("Multiple candidates scored too closely to auto-select one confidently.")
+    elif status == "POSSIBLE_MATCH":
+        pieces.append("The evidence is limited, so this remains only a possible match.")
+    elif status == "LIKELY_MATCH":
+        pieces.append("The evidence supports a likely match, but not a verified one.")
+    elif status == "METADATA_VERIFIED":
+        pieces.append("The combined evidence is strong enough to verify this metadata match.")
+    elif status == "UNVERIFIED_NO_DOI":
+        pieces.append("The candidate evidence is too weak to verify the match.")
+    return " ".join(pieces)
+
+
+def _build_fallback_title_query(raw: str, parsed: ReferenceMetadata) -> str | None:
+    if parsed.title:
+        significant_words = re.findall(r"[A-Za-z]{4,}", parsed.title)
+        if len(significant_words) >= 4:
+            return parsed.title.strip()
+
+    cleaned = raw or ""
+    cleaned = CITATION_PATTERNS["doi"].sub(" ", cleaned)
+    for patterns in _EXACT_IDENTIFIER_PATTERNS.values():
+        for pattern in patterns:
+            cleaned = pattern.sub(" ", cleaned)
+    cleaned = re.sub(r"\b(19\d{2}|20[0-2]\d)\b", " ", cleaned)
+    cleaned = re.sub(r"[^A-Za-z\s]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+
+    tokens = [tok for tok in cleaned.split() if len(tok) >= 4]
+    if len(tokens) < 4:
+        return None
+    return " ".join(tokens[:18]).strip()
+
+
+def _compare_reference_to_candidate(
+    ref: ReferenceMetadata,
+    candidate: CandidateWork,
+) -> dict[str, Any]:
+    title_similarity = None
+    title_verdict = "not_provided"
+    if ref.title:
+        if candidate.title:
+            ref_title_norm = normalize_title(ref.title)
+            cand_title_norm = normalize_title(candidate.title)
+            title_similarity = SequenceMatcher(None, ref_title_norm, cand_title_norm).ratio()
+            if title_similarity >= _TITLE_STRONG_THRESHOLD:
+                title_verdict = "match"
+            elif title_similarity >= _TITLE_MATCH_THRESHOLD:
+                title_verdict = "partial_match"
+            else:
+                title_verdict = "mismatch"
+        else:
+            title_verdict = "missing_candidate"
+
+    author_overlap = None
+    author_verdict = "not_provided"
+    ref_authors_norm = [normalize_author_name(a) for a in ref.authors if a]
+    cand_authors_norm = [normalize_author_name(a) for a in candidate.authors if a]
+    if ref_authors_norm:
+        if cand_authors_norm:
+            matches = 0
+            for ref_author in ref_authors_norm:
+                if any(
+                    ref_author == cand_author
+                    or ref_author in cand_author.split()
+                    or cand_author in ref_author.split()
+                    or SequenceMatcher(None, ref_author, cand_author).ratio() > 0.85
+                    for cand_author in cand_authors_norm
+                ):
+                    matches += 1
+            author_overlap = matches / len(ref_authors_norm)
+            if author_overlap >= _AUTHOR_MATCH_THRESHOLD:
+                author_verdict = "match"
+            elif author_overlap >= _AUTHOR_PARTIAL_THRESHOLD:
+                author_verdict = "partial_match"
+            else:
+                author_verdict = "mismatch"
+        else:
+            author_verdict = "missing_candidate"
+
+    year_score = None
+    year_verdict = "not_provided"
+    if ref.year is not None:
+        if candidate.year is not None:
+            diff = abs(ref.year - candidate.year)
+            if diff == 0:
+                year_score = 1.0
+                year_verdict = "exact"
+            elif diff == 1:
+                year_score = 0.5
+                year_verdict = "near_match"
+            else:
+                year_score = 0.0
+                year_verdict = "mismatch"
+        else:
+            year_verdict = "missing_candidate"
+
+    venue_similarity = None
+    venue_verdict = "not_provided"
+    if ref.venue:
+        if candidate.venue:
+            ref_venue_norm = normalize_venue(ref.venue)
+            cand_venue_norm = normalize_venue(candidate.venue)
+            venue_similarity = SequenceMatcher(None, ref_venue_norm, cand_venue_norm).ratio()
+            if venue_similarity >= _VENUE_MATCH_THRESHOLD:
+                venue_verdict = "match"
+            elif venue_similarity >= _VENUE_PARTIAL_THRESHOLD:
+                venue_verdict = "partial_match"
+            else:
+                venue_verdict = "mismatch"
+        else:
+            venue_verdict = "missing_candidate"
+
+    volume_matches = 0
+    volume_comparable = 0
+    if ref.volume and candidate.volume:
+        volume_comparable += 1
+        if ref.volume.strip() == candidate.volume.strip():
+            volume_matches += 1
+    if ref.issue and candidate.issue:
+        volume_comparable += 1
+        if ref.issue.strip() == candidate.issue.strip():
+            volume_matches += 1
+    if ref.pages and candidate.pages:
+        volume_comparable += 1
+        if ref.pages.strip().replace("–", "-") == candidate.pages.strip().replace("–", "-"):
+            volume_matches += 1
+    volume_issue_pages_score = None
+    volume_issue_pages_verdict = "not_provided"
+    if ref.volume or ref.issue or ref.pages:
+        if volume_comparable > 0:
+            volume_issue_pages_score = volume_matches / volume_comparable
+            if volume_issue_pages_score == 1.0:
+                volume_issue_pages_verdict = "exact"
+            elif volume_issue_pages_score > 0.0:
+                volume_issue_pages_verdict = "partial_match"
+            else:
+                volume_issue_pages_verdict = "mismatch"
+        else:
+            volume_issue_pages_verdict = "missing_candidate"
+
+    field_evidence = {
+        "title": {
+            "input": ref.title,
+            "candidate": candidate.title,
+            "similarity": _safe_float(title_similarity),
+            "verdict": title_verdict,
+        },
+        "authors": {
+            "input": list(ref.authors or []),
+            "candidate": list(candidate.authors or []),
+            "similarity": _safe_float(author_overlap),
+            "verdict": author_verdict,
+        },
+        "year": {
+            "input": ref.year,
+            "candidate": candidate.year,
+            "similarity": _safe_float(year_score),
+            "verdict": year_verdict,
+        },
+        "venue": {
+            "input": ref.venue,
+            "candidate": candidate.venue,
+            "similarity": _safe_float(venue_similarity),
+            "verdict": venue_verdict,
+        },
+        "volume_issue_pages": {
+            "input": {
+                "volume": ref.volume,
+                "issue": ref.issue,
+                "pages": ref.pages,
+            },
+            "candidate": {
+                "volume": candidate.volume,
+                "issue": candidate.issue,
+                "pages": candidate.pages,
+            },
+            "similarity": _safe_float(volume_issue_pages_score),
+            "verdict": volume_issue_pages_verdict,
+        },
+        "doi": {
+            "input": ref.doi,
+            "candidate": candidate.doi,
+            "similarity": None,
+            "verdict": "exact" if ref.doi and candidate.doi and ref.doi == candidate.doi else (
+                "source_backed" if candidate.doi else "missing_candidate"
+            ),
+        },
+    }
+
+    available_weight = 0.0
+    weighted_score = 0.0
+    corroborating_comparable = 0
+    corroborating_strong = 0
+
+    for field_name, similarity in (
+        ("title", title_similarity),
+        ("authors", author_overlap),
+        ("year", year_score),
+        ("venue", venue_similarity),
+        ("volume_issue_pages", volume_issue_pages_score),
+    ):
+        if similarity is None:
+            continue
+        weight = _MATCH_WEIGHTS[field_name]
+        available_weight += weight
+        weighted_score += weight * similarity
+        if field_name != "title":
+            corroborating_comparable += 1
+            if similarity >= 0.5:
+                corroborating_strong += 1
+
+    final_score = (weighted_score / available_weight) if available_weight > 0 else 0.0
+    missing_fields = _candidate_missing_fields(ref, candidate)
+
+    return {
+        "title_similarity": round(title_similarity or 0.0, 3),
+        "author_overlap": round(author_overlap or 0.0, 3),
+        "year_score": round(year_score or 0.0, 3),
+        "venue_similarity": round(venue_similarity or 0.0, 3),
+        "page_volume_bonus": round(volume_issue_pages_score or 0.0, 3),
+        "final_score": round(final_score, 3),
+        "available_weight": round(available_weight, 3),
+        "weighted_score": round(weighted_score, 3),
+        "corroborating_comparable": corroborating_comparable,
+        "corroborating_strong": corroborating_strong,
+        "field_evidence": field_evidence,
+        "candidate_missing_fields": missing_fields,
+    }
+
+
+def _candidate_has_incomplete_metadata(ref: ReferenceMetadata, candidate: CandidateWork) -> bool:
+    missing = _candidate_missing_fields(ref, candidate)
+    critical_missing = {"authors", "year"}
+    return any(field in critical_missing for field in missing) or len(missing) >= 3
+
+
+def _top_source_candidate(candidates: list[CandidateWork], source: str) -> CandidateWork | None:
+    for candidate in candidates:
+        if candidate.source == source:
+            return candidate
+    return None
+
+
+def _has_source_conflict(ref: ReferenceMetadata, candidates: list[CandidateWork]) -> bool:
+    crossref_candidate = _top_source_candidate(candidates, "crossref")
+    openalex_candidate = _top_source_candidate(candidates, "openalex")
+    if not crossref_candidate or not openalex_candidate:
+        return False
+    if crossref_candidate.title and openalex_candidate.title:
+        if normalize_title(crossref_candidate.title) != normalize_title(openalex_candidate.title):
+            return False
+    if ref.year is not None and crossref_candidate.year and openalex_candidate.year:
+        if crossref_candidate.year != openalex_candidate.year:
+            return True
+    if ref.venue and crossref_candidate.venue and openalex_candidate.venue:
+        if normalize_venue(crossref_candidate.venue) != normalize_venue(openalex_candidate.venue):
+            return True
+    return False
+
+
+def _metadata_consistency_from_field_evidence(field_evidence: dict[str, Any] | None) -> str:
+    evidence = field_evidence or {}
+    comparable_verdicts: list[str] = []
+    for field_name in ("title", "authors", "year", "venue", "volume_issue_pages"):
+        field = evidence.get(field_name) or {}
+        input_value = field.get("input")
+        if input_value in (None, "", [], {}):
+            continue
+        verdict = field.get("verdict")
+        if verdict in {"not_provided", "missing_candidate"}:
+            continue
+        if verdict:
+            comparable_verdicts.append(str(verdict))
+    if not comparable_verdicts:
+        return "not_provided"
+    if all(verdict in {"match", "exact"} for verdict in comparable_verdicts):
+        return "consistent"
+    if any(verdict == "mismatch" for verdict in comparable_verdicts):
+        if any(verdict in {"match", "exact", "partial_match", "near_match"} for verdict in comparable_verdicts):
+            return "partial_mismatch"
+        return "mismatch"
+    if any(verdict in {"partial_match", "near_match"} for verdict in comparable_verdicts):
+        return "partial_mismatch"
+    return "consistent"
 
 
 def extract_authors(author_part: str) -> list[str]:
@@ -1147,92 +1666,19 @@ def _merge_candidates(*candidate_groups: list[CandidateWork]) -> list[CandidateW
 
 def score_candidate(ref: ReferenceMetadata, candidate: CandidateWork) -> dict[str, Any]:
     """Calculate similarity scores and final matching score between reference and candidate work."""
-    # 1. Title similarity
-    title_similarity = 0.0
-    if ref.title and candidate.title:
-        ref_title_norm = normalize_title(ref.title)
-        cand_title_norm = normalize_title(candidate.title)
-        title_similarity = SequenceMatcher(None, ref_title_norm, cand_title_norm).ratio()
-
-    # 2. Author overlap
-    author_overlap = 0.0
-    if ref.authors and candidate.authors:
-        ref_authors_norm = [normalize_author_name(a) for a in ref.authors if a]
-        cand_authors_norm = [normalize_author_name(a) for a in candidate.authors if a]
-        
-        if ref_authors_norm:
-            matches = 0
-            for ra in ref_authors_norm:
-                if any(
-                    ra == ca
-                    or ra in ca.split()
-                    or ca in ra.split()
-                    or SequenceMatcher(None, ra, ca).ratio() > 0.85
-                    for ca in cand_authors_norm
-                ):
-                    matches += 1
-            author_overlap = matches / len(ref_authors_norm)
-
-    # 3. Year score
-    year_score = 0.0
-    if ref.year is not None and candidate.year is not None:
-        diff = abs(ref.year - candidate.year)
-        if diff == 0:
-            year_score = 1.0
-        elif diff == 1:
-            year_score = 0.5
-        else:
-            year_score = 0.0
-
-    # 4. Venue similarity
-    venue_similarity = 0.0
-    if ref.venue and candidate.venue:
-        ref_venue_norm = normalize_venue(ref.venue)
-        cand_venue_norm = normalize_venue(candidate.venue)
-        venue_similarity = SequenceMatcher(None, ref_venue_norm, cand_venue_norm).ratio()
-
-    # 5. Page/Volume bonus (1.0 if at least 2 match, 0.0 otherwise)
-    page_volume_bonus = 0.0
-    matches_count = 0
-    if ref.volume and candidate.volume and ref.volume.strip() == candidate.volume.strip():
-        matches_count += 1
-    if ref.issue and candidate.issue and ref.issue.strip() == candidate.issue.strip():
-        matches_count += 1
-    if ref.pages and candidate.pages:
-        p1 = ref.pages.strip().replace("–", "-")
-        p2 = candidate.pages.strip().replace("–", "-")
-        if p1 == p2:
-            matches_count += 1
-    if matches_count >= 2:
-        page_volume_bonus = 1.0
-
-    # 6. Final Score formula
-    final_score = (
-        0.45 * title_similarity +
-        0.25 * author_overlap +
-        0.15 * year_score +
-        0.10 * venue_similarity +
-        0.05 * page_volume_bonus
-    )
-
-    return {
-        "title_similarity": round(title_similarity, 3),
-        "author_overlap": round(author_overlap, 3),
-        "year_score": round(year_score, 3),
-        "venue_similarity": round(venue_similarity, 3),
-        "page_volume_bonus": round(page_volume_bonus, 3),
-        "final_score": round(final_score, 3)
-    }
+    return _compare_reference_to_candidate(ref, candidate)
 
 
 def choose_best_match(ref: ReferenceMetadata, candidates: list[CandidateWork]) -> MetadataMatchResult:
     """Evaluate and select the best candidate match, assigning matching status based on safety rules."""
-    if not ref or ref.confidence <= 0.4 or not ref.title:
+    if not ref or ref.confidence <= _LOW_PARSE_CONFIDENCE or not ref.title:
         return MetadataMatchResult(
             reference=ref,
             status="PARSE_FAILED",
             confidence=0.0,
-            warning="Parsing failed or title is missing in reference metadata."
+            warning="Parsing failed or title is missing in reference metadata.",
+            reason="Could not extract enough structured or title-like metadata to search scholarly sources.",
+            parse_status="UNPARSABLE",
         )
 
     if not candidates:
@@ -1243,7 +1689,8 @@ def choose_best_match(ref: ReferenceMetadata, candidates: list[CandidateWork]) -
             reference=ref,
             status="NO_MATCH_FOUND",
             confidence=0.0,
-            warning=warning
+            warning=warning,
+            reason="No scholarly source produced a plausible metadata candidate for this reference.",
         )
 
     # Calculate scores for all candidates and sort them
@@ -1257,6 +1704,22 @@ def choose_best_match(ref: ReferenceMetadata, candidates: list[CandidateWork]) -
 
     # Top candidates to store (up to 3)
     top_3 = [item[0] for item in scored_candidates[:3]]
+    top_3_details = [
+        {
+            "source": item[0].source,
+            "title": item[0].title,
+            "authors": list(item[0].authors or []),
+            "year": item[0].year,
+            "venue": item[0].venue,
+            "doi": item[0].doi,
+            "url": item[0].url,
+            "external_id": item[0].external_id,
+            "external_id_type": item[0].external_id_type,
+            "score": item[1]["final_score"],
+            "missing_fields": list(item[1].get("candidate_missing_fields") or []),
+        }
+        for item in scored_candidates[:3]
+    ]
     best_cand, best_evidence = scored_candidates[0]
     top1_score = best_evidence["final_score"]
 
@@ -1271,16 +1734,25 @@ def choose_best_match(ref: ReferenceMetadata, candidates: list[CandidateWork]) -
     else:
         status = "UNVERIFIED_NO_DOI"
 
-    # Safety Caps Rules:
-    # Rule 1: title_similarity < 0.75 -> max POSSIBLE_MATCH
-    if best_evidence["title_similarity"] < 0.75:
+    title_similarity = best_evidence.get("title_similarity", 0.0)
+    title_verdict = ((best_evidence.get("field_evidence") or {}).get("title") or {}).get("verdict")
+
+    # Safety caps
+    if title_similarity < _TITLE_MATCH_THRESHOLD or title_verdict == "mismatch":
         if status in ("METADATA_VERIFIED", "LIKELY_MATCH"):
             status = "POSSIBLE_MATCH"
 
-    # Rule 2: author_overlap == 0 and year_score < 1 -> max POSSIBLE_MATCH
-    if best_evidence["author_overlap"] == 0.0 and best_evidence["year_score"] < 1.0:
-        if status in ("METADATA_VERIFIED", "LIKELY_MATCH"):
-            status = "POSSIBLE_MATCH"
+    comparable_support = int(best_evidence.get("corroborating_comparable", 0))
+    corroborating_support = int(best_evidence.get("corroborating_strong", 0))
+    if comparable_support == 0 and status in {"METADATA_VERIFIED", "LIKELY_MATCH"}:
+        status = "POSSIBLE_MATCH"
+    elif corroborating_support == 0 and status in {"METADATA_VERIFIED", "LIKELY_MATCH"}:
+        status = "POSSIBLE_MATCH"
+    elif comparable_support == 1 and status == "METADATA_VERIFIED":
+        status = "LIKELY_MATCH"
+
+    if not (ref.authors and ref.year is not None) and status == "METADATA_VERIFIED":
+        status = "LIKELY_MATCH"
 
     # Ambiguity check: top1_score - top2_score < 0.05 and top1_score >= 0.65
     if len(scored_candidates) > 1 and top1_score >= 0.65:
@@ -1292,6 +1764,10 @@ def choose_best_match(ref: ReferenceMetadata, candidates: list[CandidateWork]) -
     warning = None
     if not ref.doi:
         warning = "Warning: Citation does not contain DOI, matched via metadata search."
+    if status in {"LIKELY_MATCH", "POSSIBLE_MATCH", "AMBIGUOUS_MATCH", "UNVERIFIED_NO_DOI"}:
+        warning = (
+            "Candidate found, but confidence is not high enough to generate a verified formatted citation."
+        )
 
     return MetadataMatchResult(
         reference=ref,
@@ -1299,8 +1775,11 @@ def choose_best_match(ref: ReferenceMetadata, candidates: list[CandidateWork]) -
         confidence=top1_score,
         best_candidate=best_cand,
         candidates=top_3,
+        candidate_details=top_3_details,
         evidence=best_evidence,
-        warning=warning
+        warning=warning,
+        reason=_build_match_reason(status, best_evidence.get("field_evidence")),
+        field_evidence=best_evidence.get("field_evidence"),
     )
 
 
@@ -1349,6 +1828,226 @@ class CitationChecker:
     def normalize_doi(cls, raw: str) -> str:
         return cls._normalize_doi(raw)
 
+    @classmethod
+    def normalize_exact_identifier(cls, raw: str, identifier_type: str) -> str | None:
+        value = (raw or "").strip()
+        if not value:
+            return None
+
+        normalized_type = (identifier_type or "").strip().lower()
+        if normalized_type == "pmid":
+            url_match = _PMID_URL_RE.match(value)
+            if url_match:
+                return url_match.group(1)
+            inline = re.search(r"(\d{4,10})", value)
+            return inline.group(1) if inline else None
+
+        if normalized_type == "pmcid":
+            url_match = _PMCID_URL_RE.match(value)
+            if url_match:
+                return url_match.group(1).upper()
+            inline = re.search(r"(PMC\d+)", value, re.IGNORECASE)
+            return inline.group(1).upper() if inline else None
+
+        if normalized_type == "openalex":
+            url_match = _OPENALEX_URL_RE.match(value)
+            if url_match:
+                return url_match.group(1).upper()
+            prefix_match = _OPENALEX_PREFIX_RE.match(value)
+            if prefix_match:
+                return prefix_match.group(1).upper()
+            if _OPENALEX_ID_RE.match(value):
+                return value.upper()
+            inline = re.search(r"\b(W\d{6,})\b", value, re.IGNORECASE)
+            return inline.group(1).upper() if inline else None
+
+        return None
+
+    @staticmethod
+    def _identifier_lookup_value(identifier: str, identifier_type: str) -> str:
+        normalized_type = (identifier_type or "").lower()
+        if normalized_type in {"pmid", "pmcid"}:
+            return f"{normalized_type}:{identifier}"
+        return identifier
+
+    @classmethod
+    def _extract_identifier_from_openalex_work(
+        cls,
+        work: dict[str, Any],
+        identifier_type: str,
+    ) -> str | None:
+        ids = work.get("ids") or {}
+        if not isinstance(ids, dict):
+            ids = {}
+
+        normalized_type = (identifier_type or "").lower()
+        raw_value: str | None = None
+        if normalized_type == "openalex":
+            for candidate in (work.get("id"), ids.get("openalex")):
+                if isinstance(candidate, str) and candidate.strip():
+                    raw_value = candidate
+                    break
+        else:
+            candidate = ids.get(normalized_type)
+            if isinstance(candidate, str) and candidate.strip():
+                raw_value = candidate
+
+        if not raw_value:
+            return None
+        return cls.normalize_exact_identifier(raw_value, normalized_type)
+
+    @staticmethod
+    def _source_diagnostics_for_exact(
+        *,
+        source: str | None,
+        verification_mode: str,
+        resolved: bool,
+    ) -> dict[str, Any]:
+        if verification_mode == "doi":
+            diagnostics = {
+                "crossref": _empty_source_diagnostic("skipped"),
+                "openalex": _empty_source_diagnostic("skipped"),
+            }
+            if resolved:
+                if source and "crossref" in source:
+                    diagnostics["crossref"] = _empty_source_diagnostic("matched")
+                    diagnostics["crossref"]["candidate_count"] = 1
+                elif source and "openalex" in source:
+                    diagnostics["crossref"] = _empty_source_diagnostic("no_match")
+                    diagnostics["openalex"] = _empty_source_diagnostic("matched")
+                    diagnostics["openalex"]["candidate_count"] = 1
+            else:
+                diagnostics["crossref"] = _empty_source_diagnostic("no_match")
+                diagnostics["openalex"] = _empty_source_diagnostic("no_match")
+            return diagnostics
+
+        diagnostics = {
+            "openalex": _empty_source_diagnostic("matched" if resolved else "no_match"),
+        }
+        if resolved:
+            diagnostics["openalex"]["candidate_count"] = 1
+        return diagnostics
+
+    @staticmethod
+    def _reference_has_user_metadata(ref: ReferenceMetadata | None) -> bool:
+        if ref is None:
+            return False
+        return bool(
+            ref.title
+            or ref.authors
+            or ref.year is not None
+            or ref.venue
+            or ref.volume
+            or ref.issue
+            or ref.pages
+        )
+
+    def _reference_from_exact_context(self, citation_context: dict[str, Any] | None) -> ReferenceMetadata | None:
+        if not citation_context:
+            return None
+        raw_reference = _safe_text(citation_context.get("raw") or citation_context.get("context_block"))
+        if not raw_reference:
+            return None
+        ref = parse_reference_metadata(raw_reference)
+        if not self._reference_has_user_metadata(ref):
+            return None
+        if not (
+            ref.authors
+            or ref.year is not None
+            or ref.venue
+            or ref.volume
+            or ref.issue
+            or ref.pages
+        ):
+            title_like_query = _build_fallback_title_query(raw_reference, ref)
+            if not title_like_query:
+                return None
+        return ref
+
+    @staticmethod
+    def _candidate_from_exact_result(result: CitationCheckResult) -> CandidateWork:
+        metadata = result.metadata or {}
+        if isinstance(metadata.get("crossref"), dict):
+            return _normalize_crossref_work(metadata["crossref"])
+        if isinstance(metadata.get("openalex"), dict):
+            return _normalize_openalex_work(metadata["openalex"])
+        return CandidateWork(
+            source=result.source or "exact",
+            title=result.title,
+            authors=list(result.authors or []),
+            year=result.year,
+            venue=result.matched_venue,
+            doi=result.doi,
+        )
+
+    def _annotate_exact_result(
+        self,
+        result: CitationCheckResult,
+        *,
+        citation_context: dict[str, Any] | None,
+        exact_label: str,
+        exact_value: str | None,
+        verification_mode: str,
+    ) -> CitationCheckResult:
+        candidate = self._candidate_from_exact_result(result)
+        result.matched_doi = result.matched_doi or candidate.doi
+        result.matched_title = result.matched_title or candidate.title
+        result.matched_year = result.matched_year if result.matched_year is not None else candidate.year
+        result.matched_authors = list(result.matched_authors or candidate.authors or [])
+        result.matched_venue = result.matched_venue or candidate.venue
+        completed_metadata = build_completed_metadata(candidate, result.confidence or 1.0, source=result.source)
+        result.completed_metadata = completed_metadata or None
+        result.formatted_apa = format_apa_reference(completed_metadata) or None if completed_metadata else None
+        result.formatted_bibtex = format_bibtex(completed_metadata) or None if completed_metadata else None
+        result.csl_json = build_csl_json(completed_metadata) or None if completed_metadata else None
+        result.source_diagnostics = self._source_diagnostics_for_exact(
+            source=result.source,
+            verification_mode=verification_mode,
+            resolved=result.status in {"DOI_VERIFIED", "IDENTIFIER_VERIFIED"},
+        )
+        result.search_attempted = True
+        result.search_strategy = "exact_lookup"
+        result.parse_status = "NOT_PROVIDED"
+
+        ref = self._reference_from_exact_context(citation_context)
+        if ref is not None:
+            comparison = _compare_reference_to_candidate(ref, candidate)
+            field_evidence = comparison.get("field_evidence") or {}
+            result.field_evidence = field_evidence
+            result.metadata_consistency = _metadata_consistency_from_field_evidence(field_evidence)
+            result.parse_status = "HIGH_CONFIDENCE" if ref.confidence > _LOW_PARSE_CONFIDENCE else "LOW_CONFIDENCE"
+        else:
+            result.field_evidence = {}
+            result.metadata_consistency = "not_provided"
+
+        if verification_mode == "doi":
+            result.field_evidence["doi"] = {
+                "input": exact_value,
+                "candidate": result.doi,
+                "similarity": None,
+                "verdict": "exact" if result.doi else "missing_candidate",
+            }
+        else:
+            result.field_evidence["exact_identifier"] = {
+                "input": exact_value,
+                "candidate": result.matched_identifier or exact_value,
+                "similarity": None,
+                "verdict": "exact" if result.status == "IDENTIFIER_VERIFIED" else "missing_candidate",
+            }
+
+        result.reason = _build_match_reason(
+            result.status,
+            result.field_evidence,
+            source_diagnostics=result.source_diagnostics,
+            metadata_consistency=result.metadata_consistency,
+            exact_label=exact_label,
+        )
+        if result.metadata_consistency in {"partial_mismatch", "mismatch"}:
+            result.warning = (
+                f"{exact_label} is valid, but the supplied metadata differs from the resolved scholarly record."
+            )
+        return result
+
     def extract_dois(self, text: str) -> list[str]:
         normalized_text = self._normalize_input_text(text)
         dois: set[str] = set()
@@ -1357,6 +2056,33 @@ class CitationChecker:
             if doi:
                 dois.add(doi)
         return sorted(dois)
+
+    def extract_exact_identifiers(self, text: str) -> list[dict[str, str]]:
+        normalized_text = self._normalize_input_text(text)
+        extracted: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for identifier_type, patterns in _EXACT_IDENTIFIER_PATTERNS.items():
+            for pattern in patterns:
+                for match in pattern.finditer(normalized_text):
+                    raw = match.group(0).strip()
+                    normalized = self.normalize_exact_identifier(raw, identifier_type)
+                    if not normalized:
+                        continue
+                    key = (identifier_type, normalized.lower())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    extracted.append(
+                        {
+                            "raw": raw,
+                            "identifier": normalized,
+                            "identifier_type": identifier_type,
+                        }
+                    )
+
+        extracted.sort(key=lambda item: normalized_text.find(item["raw"]))
+        return extracted
 
     @staticmethod
     def _extract_references_section(text: str) -> str | None:
@@ -1454,14 +2180,74 @@ class CitationChecker:
             pos = normalized_text.find(blk, block_starts[-1] if block_starts else 0)
             block_starts.append(pos if pos >= 0 else 0)
 
-        # Identify blocks that contain a DOI.
+        # Identify blocks that contain an exact identifier.
         doi_blocks: set[int] = set()
         for i, blk in enumerate(blocks):
-            if CITATION_PATTERNS["doi"].search(blk):
+            if CITATION_PATTERNS["doi"].search(blk) or self.extract_exact_identifiers(blk):
                 doi_blocks.add(i)
 
-        # DOI extraction from whole text and extracted blocks.
-        for segment in [normalized_text, *blocks]:
+        # Exact identifier extraction from structured blocks first so the full
+        # citation context is preserved for metadata-consistency comparison.
+        for block in blocks:
+            for identifier in self.extract_exact_identifiers(block):
+                identifier_type = identifier["identifier_type"]
+                normalized = identifier["identifier"]
+                _add_citation(
+                    {
+                        "raw": block,
+                        "exact_raw": identifier["raw"],
+                        "type": identifier_type,
+                        "identifier": normalized,
+                        "identifier_type": identifier_type,
+                        "doi": None,
+                        "authors": None,
+                        "year": None,
+                        "context_block": block,
+                    },
+                    key=f"{identifier_type}:{normalized.lower()}",
+                )
+
+        # Exact identifier extraction from whole text as a fallback.
+        for segment in [normalized_text]:
+            for identifier in self.extract_exact_identifiers(segment):
+                identifier_type = identifier["identifier_type"]
+                normalized = identifier["identifier"]
+                _add_citation(
+                    {
+                        "raw": identifier["raw"],
+                        "exact_raw": identifier["raw"],
+                        "type": identifier_type,
+                        "identifier": normalized,
+                        "identifier_type": identifier_type,
+                        "doi": None,
+                        "authors": None,
+                        "year": None,
+                        "context_block": None,
+                    },
+                    key=f"{identifier_type}:{normalized.lower()}",
+                )
+
+        # DOI extraction from blocks first so metadata around the DOI is kept.
+        for block in blocks:
+            for doi_m in CITATION_PATTERNS["doi"].finditer(block):
+                doi = self._normalize_doi(doi_m.group(1))
+                if not doi:
+                    continue
+                _add_citation(
+                    {
+                        "raw": block,
+                        "exact_raw": doi_m.group(1),
+                        "type": "doi",
+                        "doi": doi,
+                        "authors": None,
+                        "year": None,
+                        "context_block": block,
+                    },
+                    key=f"doi:{doi.lower()}",
+                )
+
+        # DOI extraction from whole text as a fallback.
+        for segment in [normalized_text]:
             for doi_m in CITATION_PATTERNS["doi"].finditer(segment):
                 doi = self._normalize_doi(doi_m.group(1))
                 if not doi:
@@ -1469,16 +2255,18 @@ class CitationChecker:
                 _add_citation(
                     {
                         "raw": doi,
+                        "exact_raw": doi_m.group(1),
                         "type": "doi",
                         "doi": doi,
                         "authors": None,
                         "year": None,
+                        "context_block": None,
                     },
                     key=f"doi:{doi.lower()}",
                 )
 
         # Structured extraction from blocks (multiline references, numbered lists).
-        # Skip blocks that already have a DOI — the DOI entry is authoritative
+        # Skip blocks that already have an exact identifier — the exact entry is authoritative
         # and any partial regex match from the same block is a fragment.
         for i, block in enumerate(blocks):
             if i in doi_blocks:
@@ -1533,7 +2321,7 @@ class CitationChecker:
                 )
 
         # Inline extraction from full text (author-year forms).
-        # Skip matches that fall within a DOI block.
+        # Skip matches that fall within a block already claimed by an exact identifier.
         for match in CITATION_PATTERNS["apa_inline"].finditer(normalized_text):
             if _inside_doi_block(match.start(), doi_blocks, block_starts, blocks):
                 continue
@@ -1648,7 +2436,11 @@ class CitationChecker:
                 logger.debug("OpenAlex exact DOI lookup failed for %s: %s", doi, e)
         return None
 
-    def verify_doi_exact(self, raw_doi: str) -> CitationCheckResult:
+    def verify_doi_exact(
+        self,
+        raw_doi: str,
+        citation_context: dict[str, Any] | None = None,
+    ) -> CitationCheckResult:
         doi = self._normalize_doi(raw_doi)
         if not doi:
             return CitationCheckResult(
@@ -1660,13 +2452,25 @@ class CitationChecker:
 
         crossref_result = self._verify_doi_crossref(doi)
         if crossref_result:
-            return crossref_result
+            return self._annotate_exact_result(
+                crossref_result,
+                citation_context=citation_context,
+                exact_label="DOI",
+                exact_value=doi,
+                verification_mode="doi",
+            )
 
         openalex_result = self._verify_doi_openalex_exact(doi)
         if openalex_result:
-            return openalex_result
+            return self._annotate_exact_result(
+                openalex_result,
+                citation_context=citation_context,
+                exact_label="DOI",
+                exact_value=doi,
+                verification_mode="doi",
+            )
 
-        return CitationCheckResult(
+        result = CitationCheckResult(
             citation=doi,
             status="DOI_NOT_FOUND",
             evidence=(
@@ -1676,6 +2480,127 @@ class CitationChecker:
             doi=doi,
             source="doi_exact_lookup",
             confidence=0.0,
+        )
+        result.source_diagnostics = self._source_diagnostics_for_exact(
+            source=None,
+            verification_mode="doi",
+            resolved=False,
+        )
+        result.search_attempted = True
+        result.search_strategy = "exact_lookup"
+        result.parse_status = "NOT_PROVIDED"
+        result.metadata_consistency = "not_provided"
+        result.reason = "The DOI did not resolve to an exact scholarly record in Crossref or OpenAlex."
+        return result
+
+    def verify_identifier_exact(
+        self,
+        raw_identifier: str,
+        identifier_type: str,
+        citation_context: dict[str, Any] | None = None,
+    ) -> CitationCheckResult:
+        normalized_type = (identifier_type or "").lower()
+        normalized_identifier = self.normalize_exact_identifier(raw_identifier, normalized_type)
+        label = _IDENTIFIER_DISPLAY_LABELS.get(normalized_type, "identifier")
+        if not normalized_identifier:
+            return CitationCheckResult(
+                citation=raw_identifier,
+                status="NO_CITATION_FOUND",
+                evidence=f"Không nhận ra {label} hợp lệ trong input.",
+                verification_mode="identifier_exact",
+                input_identifier_type=normalized_type or None,
+                confidence=0.0,
+                reason=f"Could not recognize a valid {label} in the supplied input.",
+                source_diagnostics={"openalex": _empty_source_diagnostic("skipped")},
+                parse_status="NOT_PROVIDED",
+                search_attempted=False,
+                search_strategy="exact_lookup",
+            )
+
+        lookup_value = self._identifier_lookup_value(normalized_identifier, normalized_type)
+        try:
+            resp = self._get_client().get(f"{OPENALEX_SEARCH_URL}/{lookup_value}")
+            if resp.status_code == 404:
+                result = CitationCheckResult(
+                    citation=raw_identifier,
+                    status="IDENTIFIER_NOT_FOUND",
+                    evidence=(
+                        f"Tra cứu {label} chính xác chưa tìm thấy bản ghi tương ứng trong OpenAlex. "
+                        "Hệ thống không dùng fuzzy match để thay thế cho exact identifier này."
+                    ),
+                    verification_mode="identifier_exact",
+                    input_identifier=normalized_identifier,
+                    input_identifier_type=normalized_type,
+                    source="identifier_exact_lookup",
+                    confidence=0.0,
+                )
+                result.source_diagnostics = {
+                    "openalex": _empty_source_diagnostic("no_match"),
+                }
+                result.search_attempted = True
+                result.search_strategy = "exact_lookup"
+                result.parse_status = "NOT_PROVIDED"
+                result.metadata_consistency = "not_provided"
+                result.reason = f"{label} did not resolve to an exact scholarly record in OpenAlex."
+                return result
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as e:
+            logger.debug("OpenAlex exact identifier lookup failed for %s=%s: %s", normalized_type, normalized_identifier, e)
+            result = CitationCheckResult(
+                citation=raw_identifier,
+                status="IDENTIFIER_NOT_FOUND",
+                evidence=(
+                    f"Tra cứu {label} chính xác chưa tìm thấy bản ghi tương ứng trong OpenAlex. "
+                    "Hệ thống không dùng fuzzy match để thay thế cho exact identifier này."
+                ),
+                verification_mode="identifier_exact",
+                input_identifier=normalized_identifier,
+                input_identifier_type=normalized_type,
+                source="identifier_exact_lookup",
+                confidence=0.0,
+            )
+            state, detail = _classify_source_exception(e)
+            result.source_diagnostics = {
+                "openalex": _empty_source_diagnostic(state, detail),
+            }
+            result.search_attempted = True
+            result.search_strategy = "exact_lookup"
+            result.parse_status = "NOT_PROVIDED"
+            result.metadata_consistency = "not_provided"
+            result.reason = f"{label} could not be resolved exactly via OpenAlex."
+            return result
+
+        candidate = _normalize_openalex_work(payload)
+        matched_identifier = self._extract_identifier_from_openalex_work(payload, normalized_type) or normalized_identifier
+        result = CitationCheckResult(
+            citation=raw_identifier,
+            status="IDENTIFIER_VERIFIED",
+            evidence=f"Verified via OpenAlex exact {label} lookup: {candidate.title}",
+            doi=candidate.doi,
+            title=candidate.title,
+            authors=list(candidate.authors or []),
+            year=candidate.year,
+            source="openalex_exact",
+            confidence=1.0,
+            metadata={"openalex": payload},
+            verification_mode="identifier_exact",
+            input_identifier=normalized_identifier,
+            input_identifier_type=normalized_type,
+            matched_identifier=matched_identifier,
+            matched_identifier_type=normalized_type,
+            matched_doi=candidate.doi,
+            matched_title=candidate.title,
+            matched_year=candidate.year,
+            matched_authors=list(candidate.authors or []),
+            matched_venue=candidate.venue,
+        )
+        return self._annotate_exact_result(
+            result,
+            citation_context=citation_context,
+            exact_label=label,
+            exact_value=normalized_identifier,
+            verification_mode="identifier_exact",
         )
 
     # -- OpenAlex verification ---------------------------------------------
@@ -1781,6 +2706,47 @@ class CitationChecker:
                 score += best
         return score / factors if factors > 0 else 0.0
 
+    @staticmethod
+    def _run_candidate_search(
+        source_name: str,
+        search_fn: Any,
+        ref: ReferenceMetadata,
+        *,
+        limit: int = 5,
+    ) -> tuple[list[CandidateWork], dict[str, Any]]:
+        try:
+            hits = search_fn(ref, limit=limit)
+            diagnostic = _empty_source_diagnostic("matched" if hits else "no_match")
+            diagnostic["candidate_count"] = len(hits)
+            return hits, diagnostic
+        except Exception as exc:
+            state, detail = _classify_source_exception(exc)
+            logger.warning("%s candidate search raised unexpectedly: %s", source_name, exc)
+            return [], _empty_source_diagnostic(state, detail)
+
+    @staticmethod
+    def _should_use_semantic_cross_check(
+        ref: ReferenceMetadata,
+        candidates: list[CandidateWork],
+        *,
+        threshold: float,
+    ) -> bool:
+        if not candidates:
+            return True
+
+        preliminary = choose_best_match(ref, candidates)
+        if preliminary.confidence < threshold:
+            return True
+
+        best_candidate = preliminary.best_candidate
+        if best_candidate and _candidate_has_incomplete_metadata(ref, best_candidate):
+            return True
+
+        if _has_source_conflict(ref, candidates):
+            return True
+
+        return False
+
     # -- public API --------------------------------------------------------
 
     def _metadata_match_to_result(
@@ -1791,18 +2757,22 @@ class CitationChecker:
         """Map a MetadataMatchResult into a CitationCheckResult."""
         best = match.best_candidate
         cand_dicts: list[dict[str, Any]] = []
-        for c in match.candidates[:3]:
-            cand_dicts.append({
-                "source": c.source,
-                "title": c.title,
-                "authors": list(c.authors or []),
-                "year": c.year,
-                "venue": c.venue,
-                "doi": c.doi,
-                "url": c.url,
-                "external_id": c.external_id,
-                "external_id_type": c.external_id_type,
-            })
+        if match.candidate_details:
+            for detail in match.candidate_details[:3]:
+                cand_dicts.append(dict(detail))
+        else:
+            for c in match.candidates[:3]:
+                cand_dicts.append({
+                    "source": c.source,
+                    "title": c.title,
+                    "authors": list(c.authors or []),
+                    "year": c.year,
+                    "venue": c.venue,
+                    "doi": c.doi,
+                    "url": c.url,
+                    "external_id": c.external_id,
+                    "external_id_type": c.external_id_type,
+                })
 
         evidence_summary = None
         if match.evidence:
@@ -1823,7 +2793,7 @@ class CitationChecker:
         formatted_apa = None
         formatted_bibtex = None
         csl_json = None
-        if best and match.status not in {"PARSE_FAILED", "NO_MATCH_FOUND"}:
+        if best and match.status == "METADATA_VERIFIED":
             completed_metadata = build_completed_metadata(best, match.confidence, source=best.source)
             if completed_metadata:
                 formatted_apa = format_apa_reference(completed_metadata) or None
@@ -1850,6 +2820,13 @@ class CitationChecker:
             candidates=cand_dicts,
             warning=match.warning,
             evidence_breakdown=match.evidence or None,
+            reason=match.reason,
+            field_evidence=match.field_evidence,
+            source_diagnostics=match.source_diagnostics,
+            parse_status=match.parse_status,
+            search_attempted=match.search_attempted,
+            search_strategy=match.search_strategy,
+            metadata_consistency=None,
             completed_metadata=completed_metadata,
             formatted_apa=formatted_apa,
             formatted_bibtex=formatted_bibtex,
@@ -1860,6 +2837,14 @@ class CitationChecker:
         """Verify a non-DOI citation via Crossref+OpenAlex metadata matching."""
         raw = citation.get("raw", "") or ""
         ref = parse_reference_metadata(raw)
+        settings = get_settings()
+        source_diagnostics: dict[str, Any] = {
+            "crossref": _empty_source_diagnostic("skipped"),
+            "openalex": _empty_source_diagnostic("skipped"),
+            "semantic_scholar": _empty_source_diagnostic(
+                "disabled" if not settings.semantic_scholar_enabled else "skipped"
+            ),
+        }
 
         # Pre-fill missing fields from the extracted citation dict.
         if not ref.authors and citation.get("authors"):
@@ -1870,48 +2855,185 @@ class CitationChecker:
             except (ValueError, TypeError):
                 pass
 
-        # If parsing failed or no title, abort before any network call.
-        if not ref.title or ref.confidence <= 0.4:
+        search_ref = ref
+        search_strategy = "parsed_metadata"
+        parse_status = "HIGH_CONFIDENCE" if ref.confidence >= 0.70 else "LOW_CONFIDENCE"
+
+        if not ref.title or ref.confidence <= _LOW_PARSE_CONFIDENCE:
+            fallback_title = _build_fallback_title_query(raw, ref)
+            if fallback_title:
+                search_ref = ReferenceMetadata(
+                    raw=raw,
+                    title=fallback_title,
+                    authors=list(ref.authors or []),
+                    year=ref.year,
+                    venue=ref.venue,
+                    volume=ref.volume,
+                    issue=ref.issue,
+                    pages=ref.pages,
+                    doi=ref.doi,
+                    confidence=max(ref.confidence, _LOW_PARSE_CONFIDENCE + 0.05),
+                )
+                parse_status = "LOW_CONFIDENCE_FALLBACK_USED"
+                search_strategy = "raw_title_fallback"
+            else:
+                reason = _build_match_reason(
+                    "PARSE_FAILED",
+                    None,
+                    source_diagnostics=source_diagnostics,
+                    parse_status="UNPARSABLE",
+                )
+                warning = "Could not extract enough metadata or a title-like phrase to search scholarly sources."
+                return CitationCheckResult(
+                    citation=raw,
+                    status="PARSE_FAILED",
+                    evidence="Reference parsing failed (no title or low confidence).",
+                    verification_mode="metadata_match",
+                    warning=warning,
+                    reason=reason,
+                    source_diagnostics=source_diagnostics,
+                    parse_status="UNPARSABLE",
+                    search_attempted=False,
+                    search_strategy=None,
+                )
+
+        if not search_ref.title:
+            reason = _build_match_reason(
+                "PARSE_FAILED",
+                None,
+                source_diagnostics=source_diagnostics,
+                parse_status="UNPARSABLE",
+            )
             return CitationCheckResult(
                 citation=raw,
                 status="PARSE_FAILED",
                 evidence="Reference parsing failed (no title or low confidence).",
                 verification_mode="metadata_match",
                 warning="Could not extract enough metadata (title) to attempt matching.",
+                reason=reason,
+                source_diagnostics=source_diagnostics,
+                parse_status="UNPARSABLE",
+                search_attempted=False,
+                search_strategy=None,
             )
 
-        # Independent try/except so one API failure doesn't kill the other.
-        crossref_hits: list[CandidateWork] = []
-        openalex_hits: list[CandidateWork] = []
-        try:
-            crossref_hits = search_crossref_candidates(ref, limit=5)
-        except Exception as e:  # defensive — searcher already swallows, but be safe.
-            logger.warning("search_crossref_candidates raised unexpectedly: %s", e)
-        try:
-            openalex_hits = search_openalex_candidates(ref, limit=5)
-        except Exception as e:
-            logger.warning("search_openalex_candidates raised unexpectedly: %s", e)
-
+        crossref_hits, source_diagnostics["crossref"] = self._run_candidate_search(
+            "crossref",
+            search_crossref_candidates,
+            search_ref,
+            limit=5,
+        )
+        openalex_hits, source_diagnostics["openalex"] = self._run_candidate_search(
+            "openalex",
+            search_openalex_candidates,
+            search_ref,
+            limit=5,
+        )
         candidates = _merge_candidates(crossref_hits, openalex_hits)
-        try:
-            settings = get_settings()
-            if settings.semantic_scholar_enabled and ref.title:
-                should_search_semantic = False
-                if not candidates:
-                    should_search_semantic = True
-                else:
-                    preliminary = choose_best_match(ref, candidates)
-                    should_search_semantic = (
-                        preliminary.confidence < settings.semantic_scholar_fallback_threshold
-                    )
-                if should_search_semantic:
-                    semantic_hits = search_semantic_scholar_candidates(ref, limit=5)
-                    candidates = _merge_candidates(candidates, semantic_hits)
-        except Exception as e:
-            logger.warning("Semantic Scholar fallback failed unexpectedly: %s", e)
+        if settings.semantic_scholar_enabled and search_ref.title:
+            if self._should_use_semantic_cross_check(
+                search_ref,
+                candidates,
+                threshold=settings.semantic_scholar_fallback_threshold,
+            ):
+                semantic_hits, source_diagnostics["semantic_scholar"] = self._run_candidate_search(
+                    "semantic_scholar",
+                    search_semantic_scholar_candidates,
+                    search_ref,
+                    limit=5,
+                )
+                candidates = _merge_candidates(candidates, semantic_hits)
 
-        match = choose_best_match(ref, candidates)
+        match = choose_best_match(search_ref, candidates)
+        match.source_diagnostics = source_diagnostics
+        match.parse_status = parse_status
+        match.search_attempted = True
+        match.search_strategy = search_strategy
+
+        degraded_sources = [
+            source
+            for source, diagnostic in source_diagnostics.items()
+            if isinstance(diagnostic, dict) and diagnostic.get("state") in _SOURCE_ERROR_STATES
+        ]
+        if not candidates and degraded_sources:
+            match.status = "UNVERIFIED"
+            match.confidence = 0.0
+            match.warning = (
+                "Could not complete verification because one or more scholarly sources were unavailable."
+            )
+            match.best_candidate = None
+            match.candidates = []
+            match.candidate_details = []
+            match.evidence = {}
+            match.field_evidence = None
+
+        match.reason = _build_match_reason(
+            match.status,
+            match.field_evidence,
+            source_diagnostics=source_diagnostics,
+            parse_status=parse_status,
+        )
         return self._metadata_match_to_result(match, raw_citation=raw)
+
+    @staticmethod
+    def _exact_result_priority(result: CitationCheckResult) -> int:
+        if result.status == "DOI_VERIFIED":
+            return 300
+        if result.status != "IDENTIFIER_VERIFIED":
+            return 0
+        identifier_type = (result.input_identifier_type or result.matched_identifier_type or "").lower()
+        if identifier_type in {"pmid", "pmcid"}:
+            return 200
+        if identifier_type == "openalex":
+            return 150
+        return 100
+
+    @staticmethod
+    def _result_work_key(result: CitationCheckResult) -> tuple[str, str] | None:
+        doi = CitationChecker.normalize_doi(result.matched_doi or result.doi or "")
+        if doi:
+            return ("doi", doi)
+
+        completed = result.completed_metadata or {}
+        if isinstance(completed, dict):
+            external_id = completed.get("external_id")
+            external_type = completed.get("external_id_type")
+            if isinstance(external_id, str) and external_id.strip():
+                key_type = str(external_type or "external").lower()
+                return (key_type, external_id.strip().lower())
+
+        title = result.matched_title or result.title
+        year = result.matched_year if result.matched_year is not None else result.year
+        if title and year is not None:
+            return ("title_year", f"{normalize_title(title)}::{year}")
+        return None
+
+    def _dedupe_exact_verified_results(self, results: list[CitationCheckResult]) -> list[CitationCheckResult]:
+        deduped: list[CitationCheckResult] = []
+        seen_exact: dict[tuple[str, str], tuple[int, int]] = {}
+        for result in results:
+            priority = self._exact_result_priority(result)
+            if priority <= 0:
+                deduped.append(result)
+                continue
+
+            key = self._result_work_key(result)
+            if key is None:
+                deduped.append(result)
+                continue
+
+            current = seen_exact.get(key)
+            if current is None:
+                seen_exact[key] = (len(deduped), priority)
+                deduped.append(result)
+                continue
+
+            idx, previous_priority = current
+            if priority > previous_priority:
+                deduped[idx] = result
+                seen_exact[key] = (idx, priority)
+
+        return deduped
 
     def verify(self, text: str) -> list[CitationCheckResult]:
         """Verify all citations found in *text*."""
@@ -1921,7 +3043,8 @@ class CitationChecker:
                 citation="N/A",
                 status="NO_CITATION_FOUND",
                 evidence=(
-                    "Mình chưa thấy DOI hoặc citation đủ rõ. Các định dạng hỗ trợ gồm DOI, APA/reference, hoặc Author-Year."
+                    "Mình chưa thấy DOI, exact identifier hoặc citation đủ rõ. "
+                    "Các định dạng hỗ trợ gồm DOI, PMID/PMCID, OpenAlex ID, APA/reference, hoặc Author-Year."
                 ),
                 verification_mode="none",
             )]
@@ -1930,7 +3053,7 @@ class CitationChecker:
         for c in citations:
             if c["type"] == "doi":
                 doi_in = c["doi"]
-                result = self.verify_doi_exact(doi_in)
+                result = self.verify_doi_exact(doi_in, citation_context=c)
                 result.verification_mode = "doi"
                 result.input_doi = doi_in
                 if result.status == "DOI_VERIFIED":
@@ -1939,17 +3062,25 @@ class CitationChecker:
                     result.matched_year = result.year
                     result.matched_authors = list(result.authors or [])
                 results.append(result)
+            elif c["type"] in {"pmid", "pmcid", "openalex"}:
+                identifier_value = c.get("identifier") or c.get("exact_raw") or c["raw"]
+                results.append(self.verify_identifier_exact(identifier_value, c["type"], citation_context=c))
             else:
                 results.append(self._verify_metadata_match(c))
 
-        # Safety-net post-processing: suppress fragmentary non-DOI results that
-        # overlap with a DOI_VERIFIED entry (same year + title contained within
+        results = self._dedupe_exact_verified_results(results)
+
+        # Safety-net post-processing: suppress fragmentary non-exact results that
+        # overlap with an exact-verified entry (same year + title contained within
         # the fragment's raw text).
-        doi_verified = [r for r in results if r.status == "DOI_VERIFIED" and r.year and r.title]
-        if doi_verified:
+        exact_verified = [
+            r for r in results
+            if r.status in {"DOI_VERIFIED", "IDENTIFIER_VERIFIED"} and r.year and r.title
+        ]
+        if exact_verified:
             merged: list[CitationCheckResult] = []
             for r in results:
-                if r.status == "DOI_VERIFIED":
+                if r.status in {"DOI_VERIFIED", "IDENTIFIER_VERIFIED"}:
                     merged.append(r)
                     continue
                 fragment_statuses = (
@@ -1960,7 +3091,7 @@ class CitationChecker:
                 if r.status in fragment_statuses and r.year:
                     overlapped = any(
                         dv.year == r.year and dv.title and r.citation and dv.title in r.citation
-                        for dv in doi_verified
+                        for dv in exact_verified
                     )
                     if overlapped:
                         continue
@@ -1985,6 +3116,8 @@ class CitationChecker:
                 "valid": 0,
                 "doi_verified": 0,
                 "doi_not_found": 0,
+                "identifier_verified": 0,
+                "identifier_not_found": 0,
                 "partial_match": 0,
                 "hallucinated": 0,
                 "unverified": 0,
@@ -2005,6 +3138,8 @@ class CitationChecker:
             "valid": sum(1 for r in checked if r.status == "VALID"),
             "doi_verified": sum(1 for r in checked if r.status == "DOI_VERIFIED"),
             "doi_not_found": sum(1 for r in checked if r.status == "DOI_NOT_FOUND"),
+            "identifier_verified": sum(1 for r in checked if r.status == "IDENTIFIER_VERIFIED"),
+            "identifier_not_found": sum(1 for r in checked if r.status == "IDENTIFIER_NOT_FOUND"),
             "partial_match": sum(1 for r in checked if r.status == "PARTIAL_MATCH"),
             "hallucinated": sum(1 for r in checked if r.status == "HALLUCINATED"),
             "unverified": sum(1 for r in checked if r.status == "UNVERIFIED"),
@@ -2019,10 +3154,12 @@ class CitationChecker:
         }
         stats["verified_rate"] = (
             stats["valid"] + stats["doi_verified"]
+            + stats["identifier_verified"]
             + stats["metadata_verified"] + stats["likely_match"]
         ) / total
         stats["risk_rate"] = (
             stats["hallucinated"] + stats["doi_not_found"]
+            + stats["identifier_not_found"]
             + stats["no_match_found"] + stats["parse_failed"]
         ) / total
         return stats

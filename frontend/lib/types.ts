@@ -8,10 +8,17 @@ export interface User {
   created_at: string;
 }
 
+export interface AIDetectionRulePreferences {
+  phrases: string[];
+  phrase_count: number;
+  rule_source: "default_app_rules" | "user_custom_rules";
+  updated_at: string | null;
+}
+
 export interface Session {
   id: string;
   title: string;
-  mode: "general_qa" | "verification" | "journal_match" | "retraction" | "ai_detection";
+  mode: "auto" | "general_qa" | "verification" | "journal_match" | "retraction" | "ai_detection";
   created_at: string;
   updated_at: string;
 }
@@ -27,6 +34,7 @@ export interface Message {
     | "retraction_report"
     | "pdf_summary"
     | "ai_writing_detection"
+    | "grammar_report"
     | "file_upload";
   content: string | null;
   tool_results: Record<string, unknown> | unknown[] | null;

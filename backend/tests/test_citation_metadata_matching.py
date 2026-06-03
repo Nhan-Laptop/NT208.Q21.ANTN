@@ -19,6 +19,7 @@ from app.services.tools.citation_checker import (
     CandidateWork,
     CitationChecker,
     CitationCheckResult,
+    ReferenceMetadata,
     _normalize_semantic_scholar_paper,
     build_csl_json,
     build_completed_metadata,
@@ -284,7 +285,7 @@ class CitationMetadataMatchingTest(unittest.TestCase):
         self.assertEqual(r.matched_doi, "10.5555/attention")
 
     # ------------------------------------------------------------------ #
-    # 8. Both APIs fail → NO_MATCH_FOUND with warning, no fake data       #
+    # 8. Both APIs fail → UNVERIFIED with diagnostics, no fake data       #
     # ------------------------------------------------------------------ #
     def test_both_apis_fail_returns_warning_no_fake_data(self) -> None:
         checker = CitationChecker()
@@ -307,11 +308,14 @@ class CitationMetadataMatchingTest(unittest.TestCase):
         meta = [r for r in results if r.verification_mode == "metadata_match"]
         self.assertTrue(meta)
         r = meta[0]
-        self.assertEqual(r.status, "NO_MATCH_FOUND")
+        self.assertEqual(r.status, "UNVERIFIED")
         self.assertIsNotNone(r.warning)
         self.assertIsNone(r.matched_doi)
         self.assertIsNone(r.matched_title)
         self.assertEqual(r.candidates, [])
+        self.assertEqual(r.source_diagnostics["crossref"]["state"], "error")
+        self.assertEqual(r.source_diagnostics["openalex"]["state"], "error")
+        self.assertTrue(r.search_attempted)
 
     # ------------------------------------------------------------------ #
     # 9. Candidate without DOI must not synthesize DOI or DOI URL         #
@@ -506,7 +510,85 @@ class CitationMetadataMatchingTest(unittest.TestCase):
         self.assertEqual(r.matched_doi, "10.5555/attention")
 
     # ------------------------------------------------------------------ #
-    # 17. Semantic Scholar 429/timeout returns [] without crashing        #
+    # 17. Low-confidence parse uses raw-title fallback search             #
+    # ------------------------------------------------------------------ #
+    def test_low_confidence_parse_uses_raw_title_fallback(self) -> None:
+        checker = CitationChecker()
+        weak_raw = "Siemens 2005 Connectivism Learning Theory Digital Age"
+        weak_ref = ReferenceMetadata(raw=weak_raw, title=None, authors=["siemens"], year=2005, confidence=0.2)
+        fallback_candidate = CandidateWork(
+            source="crossref",
+            title="Connectivism Learning Theory Digital Age",
+            authors=["siemens"],
+            year=2005,
+            venue="Learning Journal",
+        )
+
+        with (
+            patch("app.services.tools.citation_checker.parse_reference_metadata", return_value=weak_ref),
+            patch(
+                "app.services.tools.citation_checker.search_crossref_candidates",
+                return_value=[fallback_candidate],
+            ) as crossref_search,
+            patch("app.services.tools.citation_checker.search_openalex_candidates", return_value=[]),
+        ):
+            r = checker._verify_metadata_match({
+                "raw": weak_raw,
+                "type": "apa_reference",
+                "authors": ["siemens"],
+                "year": 2005,
+                "doi": None,
+            })
+
+        self.assertTrue(crossref_search.called)
+        self.assertEqual(r.parse_status, "LOW_CONFIDENCE_FALLBACK_USED")
+        self.assertEqual(r.search_strategy, "raw_title_fallback")
+        self.assertTrue(r.search_attempted)
+        self.assertIn(r.status, {"LIKELY_MATCH", "POSSIBLE_MATCH", "METADATA_VERIFIED"})
+
+    # ------------------------------------------------------------------ #
+    # 18. Likely match does not expose formatted citation exports         #
+    # ------------------------------------------------------------------ #
+    def test_likely_match_hides_formatted_outputs(self) -> None:
+        checker = CitationChecker()
+        title_year_ref = ReferenceMetadata(
+            raw="Attention is all you need. 2017.",
+            title="Attention is all you need",
+            authors=[],
+            year=2017,
+            confidence=0.65,
+        )
+        title_year_candidate = CandidateWork(
+            source="crossref",
+            title="Attention is all you need",
+            authors=[],
+            year=2017,
+        )
+
+        with (
+            patch("app.services.tools.citation_checker.parse_reference_metadata", return_value=title_year_ref),
+            patch(
+                "app.services.tools.citation_checker.search_crossref_candidates",
+                return_value=[title_year_candidate],
+            ),
+            patch("app.services.tools.citation_checker.search_openalex_candidates", return_value=[]),
+        ):
+            r = checker._verify_metadata_match({
+                "raw": "Attention is all you need. 2017.",
+                "type": "apa_reference",
+                "authors": [],
+                "year": 2017,
+                "doi": None,
+            })
+
+        self.assertEqual(r.status, "LIKELY_MATCH")
+        self.assertIsNone(r.completed_metadata)
+        self.assertIsNone(r.formatted_apa)
+        self.assertIsNone(r.formatted_bibtex)
+        self.assertIsNone(r.csl_json)
+
+    # ------------------------------------------------------------------ #
+    # 19. Semantic Scholar 429/timeout returns [] without crashing        #
     # ------------------------------------------------------------------ #
     def test_semantic_scholar_429_and_timeout_do_not_crash(self) -> None:
         parsed = parse_reference_metadata(APA_NO_DOI_REAL)

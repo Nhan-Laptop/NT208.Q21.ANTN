@@ -307,16 +307,39 @@ class CrawlAndIndexPipeline:
             db.add(venue)
             db.flush()
 
-        existing_subjects = {subject.label.lower(): subject for subject in venue.subjects}
+        persisted_subjects = {
+            str(row[0] or "").strip().lower()
+            for row in db.query(VenueSubject.label).filter(VenueSubject.venue_id == venue.id).all()
+        }
+        pending_subjects = {
+            str(subject.label or "").strip().lower()
+            for subject in db.new
+            if isinstance(subject, VenueSubject) and subject.venue_id == venue.id
+        }
+        existing_subjects = persisted_subjects | pending_subjects
         for label in normalized["subjects"]:
-            if label.lower() not in existing_subjects:
+            normalized_label = label.strip().lower()
+            if normalized_label not in existing_subjects:
                 db.add(VenueSubject(venue_id=venue.id, label=label, source=source.slug, scheme="keyword"))
+                existing_subjects.add(normalized_label)
 
-        alias_keys = {alias.alias_normalized for alias in venue.aliases}
+        persisted_alias_keys = {
+            str(row[0] or "")
+            for row in db.query(VenueAlias.alias_normalized).filter(VenueAlias.venue_id == venue.id).all()
+        }
+        pending_alias_keys = {
+            str(alias.alias_normalized or "")
+            for alias in db.new
+            if isinstance(alias, VenueAlias) and alias.venue_id == venue.id
+        }
+        alias_keys = persisted_alias_keys | pending_alias_keys
         for alias in normalized["aliases"]:
             normalized_alias = normalizer_service.normalize_text(alias).lower()
+            if not normalized_alias or normalized_alias == normalized["canonical_title"].lower():
+                continue
             if normalized_alias not in alias_keys:
                 db.add(VenueAlias(venue_id=venue.id, alias=alias, alias_normalized=normalized_alias))
+                alias_keys.add(normalized_alias)
 
         metric_payload = normalized["metric"]
         if any(value is not None for value in metric_payload.values()):

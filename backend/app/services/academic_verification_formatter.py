@@ -7,16 +7,40 @@ def _count(mapping: dict[str, Any], key: str) -> int:
     return int(mapping.get(key, 0) or 0)
 
 
-def format_citation_summary(stats: dict[str, Any], *, no_citation_found: bool = False) -> str:
+def _result_value(result: Any, key: str, default: Any = None) -> Any:
+    if isinstance(result, dict):
+        return result.get(key, default)
+    return getattr(result, key, default)
+
+
+def format_citation_summary(
+    stats: dict[str, Any],
+    *,
+    no_citation_found: bool = False,
+    results: list[Any] | None = None,
+) -> str:
     total = _count(stats, "total")
     if no_citation_found or total == 0:
         return (
-            "Mình chưa thấy citation hoặc DOI đủ rõ để xác minh. "
-            "Bạn có thể gửi DOI đầy đủ, tiêu đề bài báo, tác giả hoặc một dòng reference đầy đủ để mình kiểm tra chính xác hơn."
+            "Mình chưa thấy citation hoặc exact identifier đủ rõ để xác minh. "
+            "Bạn có thể gửi DOI, PMID, PMCID, OpenAlex ID, tiêu đề bài báo, tác giả hoặc một dòng reference đầy đủ để mình kiểm tra chính xác hơn."
         )
+
+    checked_results = [
+        result for result in (results or [])
+        if str(_result_value(result, "status", "") or "").upper() != "NO_CITATION_FOUND"
+    ]
+    if len(checked_results) == 1:
+        reason = str(_result_value(checked_results[0], "reason", "") or "").strip()
+        warning = str(_result_value(checked_results[0], "warning", "") or "").strip()
+        if reason:
+            if warning and warning.lower() not in reason.lower():
+                return f"{reason} {warning}"
+            return reason
 
     valid = _count(stats, "valid")
     doi_verified = _count(stats, "doi_verified")
+    identifier_verified = _count(stats, "identifier_verified")
     metadata_verified = _count(stats, "metadata_verified")
     likely_match = _count(stats, "likely_match")
     possible_match = _count(stats, "possible_match")
@@ -24,11 +48,12 @@ def format_citation_summary(stats: dict[str, Any], *, no_citation_found: bool = 
     unverified_no_doi = _count(stats, "unverified_no_doi")
     no_match_found = _count(stats, "no_match_found")
     parse_failed = _count(stats, "parse_failed")
-    verified = valid + doi_verified + metadata_verified + likely_match
+    verified = valid + doi_verified + identifier_verified + metadata_verified + likely_match
     partial = _count(stats, "partial_match") + possible_match + ambiguous_match
     hallucinated = _count(stats, "hallucinated") + no_match_found
     unverified = _count(stats, "unverified") + unverified_no_doi + parse_failed
     doi_not_found = _count(stats, "doi_not_found")
+    identifier_not_found = _count(stats, "identifier_not_found")
     metadata_match_total = (
         metadata_verified + likely_match + possible_match + ambiguous_match
         + unverified_no_doi + no_match_found + parse_failed
@@ -42,15 +67,26 @@ def format_citation_summary(stats: dict[str, Any], *, no_citation_found: bool = 
             f"NO_MATCH={no_match_found}, PARSE_FAILED={parse_failed})."
         )
 
-    if doi_not_found > 0 and verified == 0 and partial == 0:
+    if doi_not_found > 0 and verified == 0 and partial == 0 and identifier_not_found == 0:
         return (
             "Mình đã thử xác minh DOI bạn cung cấp, nhưng hiện chưa tìm thấy bản ghi học thuật khớp hoàn toàn. "
             "Mình không dùng kết quả gần giống để thay thế cho DOI này, vì DOI là định danh cần khớp chính xác. "
             "Bạn nên đối chiếu lại DOI trên trang DOI, trang nhà xuất bản, hoặc gửi thêm tiêu đề bài báo để kiểm tra tiếp."
         )
 
+    if identifier_not_found > 0 and verified == 0 and partial == 0 and doi_not_found == 0:
+        return (
+            "Mình đã thử xác minh exact identifier bạn cung cấp, nhưng hiện chưa tìm thấy bản ghi học thuật khớp hoàn toàn. "
+            "Mình không dùng kết quả gần giống để thay thế cho định danh này. "
+            "Bạn nên đối chiếu lại PMID, PMCID, OpenAlex ID hoặc gửi thêm tiêu đề bài báo để kiểm tra tiếp."
+        )
+
     if verified > 0 and partial == 0 and hallucinated == 0 and unverified == 0 and doi_not_found == 0:
-        noun = "DOI" if doi_verified > 0 and valid == 0 else "trích dẫn"
+        noun = "DOI" if doi_verified > 0 and valid == 0 and identifier_verified == 0 else (
+            "định danh học thuật"
+            if identifier_verified > 0 and doi_verified == 0 and valid == 0
+            else "trích dẫn"
+        )
         return (
             f"Mình đã kiểm tra {noun} này và tìm thấy bản ghi học thuật khớp rõ ràng. "
             "Bạn vẫn nên giữ DOI hoặc đường dẫn nhà xuất bản trong danh mục tài liệu để người đọc dễ đối chiếu."
@@ -176,7 +212,7 @@ def format_academic_tool_error(tool_name: str, error: str) -> str:
     if tool_name in {"scan_retraction_and_pubpeer", "verify_citation"}:
         return (
             "Mình chưa truy vấn được nguồn dữ liệu học thuật ở thời điểm này. "
-            "Bạn có thể thử lại sau hoặc gửi thêm thông tin như DOI, tiêu đề và tên tác giả để kiểm tra lại."
+            "Bạn có thể thử lại sau hoặc gửi thêm thông tin như DOI, PMID, PMCID, OpenAlex ID, tiêu đề và tên tác giả để kiểm tra lại."
         )
 
     return "Mình chưa xử lý được yêu cầu này. Bạn vui lòng thử lại hoặc gửi thêm ngữ cảnh cụ thể hơn."

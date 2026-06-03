@@ -1,4 +1,5 @@
 import {
+  AIDetectionRulePreferences,
   AdminOverview,
   ChatCompletionResponse,
   FileAttachment,
@@ -115,6 +116,29 @@ export const api = {
 
   async me(token: string): Promise<User> {
     return request<User>("/api/v1/auth/me", {}, token);
+  },
+
+  async getAiDetectionRules(token: string): Promise<AIDetectionRulePreferences> {
+    return request<AIDetectionRulePreferences>("/api/v1/auth/me/ai-detection-rules", {}, token);
+  },
+
+  async updateAiDetectionRules(token: string, phrases: string[]): Promise<AIDetectionRulePreferences> {
+    return request<AIDetectionRulePreferences>(
+      "/api/v1/auth/me/ai-detection-rules",
+      {
+        method: "PUT",
+        body: JSON.stringify({ phrases }),
+      },
+      token,
+    );
+  },
+
+  async clearAiDetectionRules(token: string): Promise<AIDetectionRulePreferences> {
+    return request<AIDetectionRulePreferences>(
+      "/api/v1/auth/me/ai-detection-rules",
+      { method: "DELETE" },
+      token,
+    );
   },
 
   async listSessions(token: string): Promise<Session[]> {

@@ -19,14 +19,11 @@ import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.v1.endpoints import chat, crawl_admin, journal_match, manuscripts, tools, venues
 from app.core.config import settings
 from app.core.database import Base, get_db
 from app.core.security import get_current_user
 from app.models.chat_session import ChatSession, SessionMode
 from app.models.user import User, UserRole
-from app.services.embeddings.specter2_service import specter2_service
-from app.services.ingestion.index_service import academic_index_service
 
 DEFAULT_SEED_PATH = (BACKEND_ROOT / "tests" / "fixtures" / "academic_seed.json").resolve()
 
@@ -69,6 +66,12 @@ class SyncASGIClient:
     def post(self, url: str, **kwargs):
         return self.request("POST", url, **kwargs)
 
+    def put(self, url: str, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
+
     def close(self) -> None:
         asyncio.run(self._client.aclose())
 
@@ -108,7 +111,11 @@ class TestEnvironment:
         Base.metadata.create_all(self.engine)
 
     def close(self) -> None:
-        academic_index_service._client = None
+        try:
+            from app.services.ingestion.index_service import academic_index_service
+            academic_index_service._client = None
+        except Exception:
+            pass
         self.engine.dispose()
         for key, value in self._settings_backup.items():
             object.__setattr__(settings, key, value)
@@ -116,13 +123,21 @@ class TestEnvironment:
         self._tmp.cleanup()
 
     def _reset_services(self) -> None:
-        academic_index_service._client = None
-        specter2_service._model = None
-        specter2_service._tokenizer = None
-        specter2_service._backend = None
-        specter2_service._loaded_model_name = None
-        specter2_service._adapter_label = None
-        specter2_service._load_attempted = False
+        try:
+            from app.services.ingestion.index_service import academic_index_service
+            academic_index_service._client = None
+        except Exception:
+            pass
+        try:
+            from app.services.embeddings.specter2_service import specter2_service
+            specter2_service._model = None
+            specter2_service._tokenizer = None
+            specter2_service._backend = None
+            specter2_service._loaded_model_name = None
+            specter2_service._adapter_label = None
+            specter2_service._load_attempted = False
+        except Exception:
+            pass
 
     def session(self) -> Session:
         return self.SessionLocal()
@@ -152,6 +167,8 @@ class TestEnvironment:
             return session_obj
 
     def api_client(self, *, current_user: User) -> SyncASGIClient:
+        from app.api.v1.endpoints import chat, crawl_admin, journal_match, manuscripts, tools, venues
+
         app = FastAPI()
         app.include_router(chat.router, prefix="/api/v1")
         app.include_router(crawl_admin.router, prefix="/api/v1")

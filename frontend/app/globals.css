@@ -76,3 +76,25 @@ body {
 .dark ::-webkit-scrollbar-thumb:hover {
   background: var(--color-dark-border-hover);
 }
+
+.ai-rules-panel {
+  max-height: min(60vh, 560px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-rules-body {
+  overflow-y: auto;
+}
+
+.ai-rules-compact-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.rules-close-button {
+  cursor: pointer;
+}

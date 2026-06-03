@@ -20,6 +20,10 @@ from typing import Any
 from enum import Enum
 
 from app.core.config import settings
+from app.services.ai_detection_rules import (
+    DEFAULT_AI_RULE_SOURCE,
+    USER_AI_RULE_SOURCE,
+)
 
 logger = logging.getLogger(__name__)
 _backend_root = Path(__file__).resolve().parents[3]
@@ -161,6 +165,8 @@ class DetectionResult:
     skipped_detectors: list[str] = field(default_factory=list)
     fallback_reason: str | None = None
     detectors_used: list[str] = field(default_factory=list)
+    rule_source: str = DEFAULT_AI_RULE_SOURCE
+    matched_rules: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -482,9 +488,52 @@ class AIWritingDetector:
         }
         return final, flags, details
 
+    def _analyze_custom_rules(
+        self,
+        text: str,
+        custom_rule_phrases: list[str],
+    ) -> tuple[float, list[str], dict[str, Any], list[str]]:
+        tokens = self._tokenize(text)
+        total_matches = 0
+        matched_rules: list[str] = []
+
+        for phrase in custom_rule_phrases:
+            pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+            matches = pattern.findall(text)
+            if not matches:
+                continue
+            total_matches += len(matches)
+            matched_rules.append(phrase)
+
+        rule_count = len(custom_rule_phrases)
+        distinct_matches = len(matched_rules)
+        distinct_score = min(
+            distinct_matches / max(min(rule_count, 3), 1),
+            1.0,
+        )
+        density_score = min(
+            total_matches / max(len(tokens) / 120, 1),
+            3.0,
+        ) / 3.0
+        final = max(0.0, min(1.0, 0.7 * distinct_score + 0.3 * density_score))
+
+        details = {
+            "word_count": len(tokens),
+            "custom_rules_total": rule_count,
+            "custom_rules_matched": distinct_matches,
+            "custom_match_count": total_matches,
+            "matched_rules": matched_rules,
+        }
+        return final, matched_rules[:3], details, matched_rules
+
     # -- public API --------------------------------------------------------
 
-    def analyze(self, text: str) -> DetectionResult:
+    def analyze(
+        self,
+        text: str,
+        *,
+        custom_rule_phrases: list[str] | None = None,
+    ) -> DetectionResult:
         """Analyze text for AI writing indicators using ensemble detection."""
         if len(text) < 50:
             return DetectionResult(
@@ -493,10 +542,22 @@ class AIWritingDetector:
                 details={"reason": "insufficient_text"},
                 verdict=Verdict.UNCERTAIN.value,
                 method=DetectionMethod.RULE_BASED.value,
+                rule_source=(
+                    USER_AI_RULE_SOURCE if custom_rule_phrases else DEFAULT_AI_RULE_SOURCE
+                ),
             )
 
         # Run all available detectors
-        rule_score, flags, details = self._analyze_rules(text)
+        matched_rules: list[str] = []
+        if custom_rule_phrases:
+            rule_score, flags, details, matched_rules = self._analyze_custom_rules(
+                text,
+                custom_rule_phrases,
+            )
+            rule_source = USER_AI_RULE_SOURCE
+        else:
+            rule_score, flags, details = self._analyze_rules(text)
+            rule_source = DEFAULT_AI_RULE_SOURCE
         ml_score = self._analyze_ml(text)
         specter2_score, specter2_skip_reason = self._analyze_academic(text)
 
@@ -582,6 +643,8 @@ class AIWritingDetector:
             skipped_detectors=skipped_detectors,
             fallback_reason=fallback_reason,
             detectors_used=detectors_used,
+            rule_source=rule_source,
+            matched_rules=matched_rules,
         )
 
     def get_verdict(self, score: float) -> str:

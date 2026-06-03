@@ -5,7 +5,7 @@ import { useChat } from "@/lib/chat-store";
 import { useAutoScroll } from "@/lib/useAutoScroll";
 import { useFileUpload } from "@/lib/useFileUpload";
 import { Message } from "@/lib/types";
-import { ModeSelector } from "@/components/topbar";
+import { AIDetectionRulesPanel, ModeSelector } from "@/components/topbar";
 import { ToolResultsRenderer } from "@/components/tool-results";
 import {
   ArrowUp,
@@ -36,6 +36,21 @@ const MESSAGE_TYPE_LABELS: Record<string, string> = {
   ai_writing_detection: "Nhận diện văn bản AI",
   grammar_report: "Rà soát ngữ pháp",
 };
+
+interface RoutingMeta {
+  requested_mode?: string;
+  resolved_label?: string;
+  is_ambiguous?: boolean;
+}
+
+function extractRoutingMeta(toolResults: Message["tool_results"]): RoutingMeta | null {
+  if (!toolResults || Array.isArray(toolResults)) return null;
+  const meta = (toolResults as Record<string, unknown>).meta;
+  if (!meta || typeof meta !== "object") return null;
+  const routing = (meta as Record<string, unknown>).routing;
+  if (!routing || typeof routing !== "object") return null;
+  return routing as RoutingMeta;
+}
 
 /* ====================================================================
  * ChatView — main exported component
@@ -93,88 +108,105 @@ export function ChatView() {
     }
   };
 
-  /* ── Empty state ── */
-  if (!activeSessionId && messages.length === 0) {
-    return (
-      <div className="flex flex-col h-full">
-        {/* Mode selector visible even before session is created */}
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border dark:border-dark-border bg-surface/80 dark:bg-dark-surface/80 backdrop-blur-sm">
-          <div className="flex items-center gap-2">
-            <ModeSelector />
-          </div>
-        </div>
-        <div className="flex-1 flex flex-col items-center justify-center px-4">
-          <div className="w-14 h-14 rounded-2xl bg-accent/10 dark:bg-dark-accent/10 flex items-center justify-center mb-5">
-            <Sparkles className="w-7 h-7 text-accent dark:text-dark-accent" />
-          </div>
-          <h1 className="text-2xl font-semibold text-text-primary dark:text-dark-text-primary mb-2">
-            Mình có thể hỗ trợ gì cho nghiên cứu của bạn?
-          </h1>
-          <p className="text-text-secondary dark:text-dark-text-secondary text-sm max-w-md text-center mb-6">
-            Hỏi đáp từ dữ liệu học thuật đã lưu, xác minh trích dẫn, gợi ý tạp chí, hoặc rà soát tín hiệu rút bài.
-          </p>
-          <div className="flex flex-wrap gap-2 justify-center max-w-lg">
-            {[
-              "Xác minh một reference APA",
-              "Gợi ý tạp chí cho manuscript",
-              "Kiểm tra DOI có tín hiệu rút bài",
-              "Nhận diện văn bản AI",
-            ].map((s) => (
-              <button
-                key={s}
-                onClick={() => {
-                  setInput(s);
-                  textareaRef.current?.focus();
-                }}
-                className="px-3 py-2 rounded-xl border border-border bg-surface text-sm text-text-secondary hover:bg-bg-secondary hover:text-text-primary dark:border-dark-border dark:bg-dark-surface dark:text-dark-text-secondary dark:hover:bg-dark-surface-hover dark:hover:text-dark-text-primary transition-colors"
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        </div>
-        <InputArea
-          input={input}
-          setInput={setInput}
-          isSending={isSending}
-          textareaRef={textareaRef}
-          onSubmit={handleSubmit}
-          onKeyDown={handleKeyDown}
-          fileUpload={fileUpload}
-          showAttach={false}
-        />
-      </div>
-    );
-  }
+  const isEmptyState = !activeSessionId && messages.length === 0;
+  const isAutoMode = state.mode === "auto";
+  const showAiRulesPanel = state.mode === "ai_detection";
+  const emptyStateDescription = showAiRulesPanel
+    ? "Dán đoạn văn, abstract hoặc tải tài liệu lên để AIRA rà soát tín hiệu do AI tạo theo bộ quy tắc bạn đã chọn."
+    : isAutoMode
+      ? "Mô tả nhu cầu của bạn, AIRA sẽ tự nhận diện nên dùng hỏi đáp, xác minh trích dẫn, gợi ý tạp chí, rà soát rút bài, kiểm tra AI hay ngữ pháp."
+      : "Hỏi đáp từ dữ liệu học thuật đã lưu, xác minh trích dẫn, gợi ý tạp chí, hoặc rà soát tín hiệu rút bài.";
+  const suggestionPrompts = showAiRulesPanel
+    ? [
+        "Kiểm tra đoạn abstract này có tín hiệu AI không?",
+        "Rà soát văn phong AI trong phần mở đầu",
+        "Đánh dấu các câu lặp cấu trúc trong đoạn này",
+        "Phân tích văn bản AI từ tài liệu tải lên",
+      ]
+    : isAutoMode
+      ? [
+          "Verify DOI 10.1111/gcb.17128",
+          "Gợi ý tạp chí cho manuscript này",
+          "Kiểm tra DOI này có bị retract không",
+          "Proofread đoạn abstract tiếng Anh này",
+        ]
+      : [
+          "Xác minh một reference APA",
+          "Gợi ý tạp chí cho manuscript",
+          "Kiểm tra DOI có tín hiệu rút bài",
+          "Nhận diện văn bản AI",
+        ];
 
-  /* ── Active session ── */
   return (
-    <div className="flex flex-col h-full">
-      {activeSessionId && (
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border dark:border-dark-border bg-surface/80 dark:bg-dark-surface/80 backdrop-blur-sm">
-          <div className="flex items-center gap-2">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0 border-b border-border bg-surface/80 backdrop-blur-sm dark:border-dark-border dark:bg-dark-surface/80">
+        <div className="mx-auto flex w-full max-w-3xl items-center px-4 py-3">
+          <div className="flex w-full items-center gap-2">
             <ModeSelector />
+          </div>
+        </div>
+      </div>
+
+      {showAiRulesPanel && (
+        <div className="shrink-0 border-b border-border/80 bg-surface/55 dark:border-white/8 dark:bg-[#121212]/85">
+          <div className="mx-auto w-full max-w-3xl px-4 py-4">
+            <AIDetectionRulesPanel chatInputRef={textareaRef} />
           </div>
         </div>
       )}
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl mx-auto px-4 py-6 space-y-1">
-          {isLoadingMessages && (
-            <div className="flex justify-center py-8">
-              <Loader2 className="w-5 h-5 animate-spin text-text-tertiary dark:text-dark-text-tertiary" />
+      <div className="min-h-0 flex-1">
+        {isEmptyState ? (
+          <div className="h-full overflow-y-auto">
+            <div
+              className={clsx(
+                "mx-auto flex min-h-full max-w-3xl flex-col items-center justify-center px-4",
+                showAiRulesPanel ? "py-8" : "py-6",
+              )}
+            >
+              <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/10 dark:bg-dark-accent/10">
+                <Sparkles className="h-7 w-7 text-accent dark:text-dark-accent" />
+              </div>
+              <h1 className="mb-2 text-center text-2xl font-semibold text-text-primary dark:text-dark-text-primary">
+                Mình có thể hỗ trợ gì cho nghiên cứu của bạn?
+              </h1>
+              <p className="mb-6 max-w-xl text-center text-sm leading-6 text-text-secondary dark:text-dark-text-secondary">
+                {emptyStateDescription}
+              </p>
+              <div className="flex max-w-2xl flex-wrap justify-center gap-2">
+                {suggestionPrompts.map((prompt) => (
+                  <button
+                    key={prompt}
+                    onClick={() => {
+                      setInput(prompt);
+                      textareaRef.current?.focus();
+                    }}
+                    className="rounded-xl border border-border bg-surface px-3 py-2 text-sm text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary dark:border-dark-border dark:bg-dark-surface dark:text-dark-text-secondary dark:hover:bg-dark-surface-hover dark:hover:text-dark-text-primary"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
             </div>
-          )}
-          {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
-          ))}
-          {isSending && <TypingIndicator />}
-          <div ref={messagesEndRef} />
-        </div>
+          </div>
+        ) : (
+          <div className="flex h-full flex-col overflow-y-auto">
+          <div className="mx-auto max-w-3xl space-y-1 px-4 py-6">
+            {isLoadingMessages && (
+              <div className="flex justify-center py-8">
+                <Loader2 className="h-5 w-5 animate-spin text-text-tertiary dark:text-dark-text-tertiary" />
+              </div>
+            )}
+            {messages.map((msg) => (
+              <MessageBubble key={msg.id} message={msg} />
+            ))}
+            {isSending && <TypingIndicator />}
+            <div ref={messagesEndRef} />
+          </div>
+          </div>
+        )}
       </div>
 
-      {/* Input */}
       <InputArea
         input={input}
         setInput={setInput}
@@ -239,7 +271,7 @@ function InputArea({
     fileUpload;
 
   return (
-    <div className="border-t border-border dark:border-dark-border bg-surface/80 dark:bg-dark-surface/80 backdrop-blur-sm px-4 py-3">
+    <div className="shrink-0 border-t border-border bg-surface/80 px-4 py-3 backdrop-blur-sm dark:border-dark-border dark:bg-dark-surface/80">
       <div className="max-w-3xl mx-auto">
         {/* File preview */}
         {selectedFile && (
@@ -327,6 +359,15 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const isFileUpload = message.message_type === "file_upload";
+  const routingMeta = extractRoutingMeta(message.tool_results);
+  const routingBadge =
+    !isUser && routingMeta?.requested_mode === "auto"
+      ? routingMeta.is_ambiguous
+        ? "Cần làm rõ tính năng"
+        : routingMeta.resolved_label
+          ? `Đã nhận diện: ${routingMeta.resolved_label}`
+          : null
+      : null;
 
   // System file-upload messages get a clean card, not a chat bubble
   if (isSystem && isFileUpload) {
@@ -393,6 +434,11 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
           )}
         >
           <span>{new Date(message.created_at).toLocaleTimeString()}</span>
+          {routingBadge && (
+            <span className="px-1.5 py-0.5 rounded bg-accent/10 text-accent dark:bg-dark-accent/15 dark:text-dark-accent">
+              {routingBadge}
+            </span>
+          )}
           {message.message_type !== "text" && message.message_type !== "file_upload" && (
             <span className="px-1.5 py-0.5 rounded bg-bg-secondary dark:bg-dark-bg-secondary text-[10px]">
               {MESSAGE_TYPE_LABELS[message.message_type] ?? message.message_type.replace(/_/g, " ")}

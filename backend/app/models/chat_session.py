@@ -11,6 +11,7 @@ from app.models.academic_common import enum_values
 
 
 class SessionMode(str, Enum):
+    AUTO = "auto"
     GENERAL_QA = "general_qa"
     VERIFICATION = "verification"
     JOURNAL_MATCH = "journal_match"
@@ -26,7 +27,7 @@ class ChatSession(Base):
     title: Mapped[str] = mapped_column(String(255), default="Trò chuyện mới")
     mode: Mapped[SessionMode] = mapped_column(
         SqlEnum(SessionMode, values_callable=enum_values),
-        default=SessionMode.GENERAL_QA,
+        default=SessionMode.AUTO,
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
