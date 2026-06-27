@@ -50,6 +50,7 @@ from app.services.academic_verification_formatter import (
     format_citation_summary,
     format_retraction_summary,
 )
+from app.services.ai_detection_service import ai_detection_service
 from app.services.document_cache import (
     store_document,
     get_document,
@@ -157,7 +158,9 @@ _BOTH_ACTION_HINT_RE = re.compile(
 _ANALYTICAL_HINT_RE = re.compile(
     r"\b(analyze|phân\s*tích|provide|title|journal|publisher"
     r"|publication\s*year|research\s*field|lĩnh\s*vực"
-    r"|main\s*topic|abstract|suitable\s*journal|similar\s*manuscript"
+    r"|main\s*topic|abstract|authors?|tác\s*giả|tac\s*gia"
+    r"|publication(?:s)?|paper(?:s)?|works?"
+    r"|suitable\s*journal|similar\s*manuscript"
     r"|recommend\s*journal|gợi\s+ý|tạp\s*chí|chủ\s*đề)\b",
     re.IGNORECASE,
 )
@@ -337,9 +340,9 @@ except ImportError:
 
 # ── Tool singletons ─────────────────────────────────────────────────────
 from app.services.tools.retraction_scan import retraction_scanner, scan_verified_retractions
+from app.services.tools.citation_batch_service import citation_batch_service
 from app.services.tools.citation_checker import citation_checker
 from app.services.academic_policy import sanitize_user_text
-from app.services.tools.ai_writing_detector import ai_writing_detector
 from app.services.tools.grammar_checker import grammar_checker
 
 try:
@@ -527,19 +530,10 @@ def scan_retraction_and_pubpeer(text: str) -> dict:
 
 
 def verify_citation(text: str) -> dict:
-    """Verify academic citations against OpenAlex and Crossref."""
+    """Run chat-facing citation verification through the shared batch pipeline."""
     try:
-        results = citation_checker.verify(text)
-        data = _make_serializable([asdict(r) for r in results])
-        stats = _make_serializable(citation_checker.get_statistics(results))
-        no_citation_found = bool(stats.get("no_citation_found", False)) or (bool(results) and all(
-            getattr(r, "status", "") == "NO_CITATION_FOUND" for r in results
-        ))
-        return {
-            "results": data,
-            "statistics": stats,
-            "no_citation_found": no_citation_found,
-        }
+        report = citation_batch_service.verify_text(text)
+        return _make_serializable(report)
     except Exception as exc:
         logger.error("verify_citation failed: %s", exc, exc_info=True)
         return {"error": str(exc), "results": []}
@@ -553,16 +547,48 @@ def match_journal(abstract: str, title: str = "") -> dict:
         journals = journal_finder.recommend(
             abstract=abstract, title=title or None, top_k=5,
         )
-        return {"journals": _make_serializable(journals), "total": len(journals)}
+        result = _make_serializable(journals)
+        matches = []
+        for j in result if isinstance(result, list) else result.get("journals", result) if isinstance(result, dict) else []:
+            if isinstance(j, dict):
+                metrics = {
+                    "impact_factor": j.get("impact_factor"),
+                    "h_index": j.get("h_index"),
+                    "review_time_weeks": j.get("avg_review_weeks") or j.get("review_time_weeks"),
+                    "acceptance_rate": j.get("acceptance_rate"),
+                    "open_access": j.get("is_open_access") or j.get("open_access"),
+                    "citescore": j.get("citescore"),
+                    "sjr_quartile": j.get("sjr_quartile"),
+                    "jcr_quartile": j.get("jcr_quartile"),
+                    "indexed_scopus": j.get("indexed_scopus"),
+                    "indexed_wos": j.get("indexed_wos"),
+                }
+                matches.append({
+                    "journal": j.get("label") or j.get("journal") or j.get("title") or "",
+                    "venue_id": j.get("id") or j.get("venue_id"),
+                    "venue_type": "journal",
+                    "score": j.get("score") or j.get("final_score"),
+                    "reason": j.get("reason") or j.get("explanation") or "",
+                    "subject_fit": j.get("scope_fit") or j.get("subject_fit") or j.get("subjects"),
+                    "publisher": j.get("publisher"),
+                    "url": j.get("url") or j.get("homepage_url"),
+                    "supporting_evidence": j.get("supporting_evidence", []),
+                    "warning_flags": j.get("warning_flags", []),
+                    "metric_provenance": j.get("metric_provenance", {}),
+                    "unverified_metrics": j.get("unverified_metrics", []),
+                    "metrics": metrics,
+                })
+        return {"journals": matches, "total": len(matches), "type": "journal_match", "matches": matches}
     except Exception as exc:
         logger.error("match_journal failed: %s", exc, exc_info=True)
-        return {"error": str(exc), "journals": []}
+        return {"error": str(exc), "journals": [], "type": "journal_match", "matches": []}
 
 
 def detect_ai_writing(
     text: str,
     *,
     user_ai_rule_phrases: list[str] | None = None,
+    user_ai_runtime_rules: list[dict[str, Any]] | None = None,
 ) -> dict:
     """Execution-layer AI writing analysis.
 
@@ -574,11 +600,15 @@ def detect_ai_writing(
       then calls this wrapper with resolved `text`.
     """
     try:
-        result = ai_writing_detector.analyze(
+        result = ai_detection_service.analyze_text(
             text,
-            custom_rule_phrases=user_ai_rule_phrases,
+            mode="deep",
+            use_custom_rules=True,
+            runtime_rule_payloads=user_ai_runtime_rules,
+            user_ai_rule_phrases=user_ai_rule_phrases,
+            include_explanation=True,
         )
-        return _make_serializable(asdict(result))
+        return _make_serializable(result.model_dump(mode="json"))
     except Exception as exc:
         logger.error("detect_ai_writing failed: %s", exc, exc_info=True)
         return {"error": str(exc), "score": 0.5, "verdict": "ERROR"}
@@ -1115,15 +1145,36 @@ def _to_tool_result_block(tool_name: str, result: dict[str, Any]) -> dict[str, A
     msg_type_enum = _TOOL_MESSAGE_TYPE.get(tool_name)
     msg_type = msg_type_enum.value if msg_type_enum else "text"
     data_key = _TOOL_DATA_KEY.get(tool_name, "")
+    # Compatibility bridge: persisted chat rows still use the legacy
+    # message_type="ai_writing_detection", while the rich tool payload now
+    # advertises type="ai_detection" for newer frontend cards.
+    payload_type = result.get("type", msg_type) if isinstance(result, dict) else msg_type
     block: dict[str, Any] = {
         "tool_name": tool_name,
         "label": _tool_label(tool_name),
-        "type": msg_type,
-        "data": result.get(data_key, result) if data_key else result,
+        "message_type": msg_type,
+        "type": payload_type,
     }
+    if tool_name == "verify_citation":
+        block["data"] = result.get("data", result.get("results", []))
+        if "results" in result:
+            block["results"] = result.get("results")
+        if "summary" in result:
+            block["summary"] = result.get("summary")
+        if "text" in result:
+            block["text"] = result.get("text")
+        if "statistics" in result:
+            block["statistics"] = result.get("statistics")
+        if "no_citation_found" in result:
+            block["no_citation_found"] = result.get("no_citation_found")
+    else:
+        block["data"] = result.get(data_key, result) if data_key else result
     summary = _build_tool_state_text(tool_name, result)
     if summary:
-        block["summary"] = summary
+        if tool_name == "verify_citation" and isinstance(block.get("summary"), dict):
+            block["summary_text"] = summary
+        else:
+            block["summary"] = summary
     return block
 
 
@@ -1136,12 +1187,9 @@ def _build_tool_results_payload(
     if len(tool_calls) == 1:
         only = tool_calls[0]
         block = _to_tool_result_block(only["name"], only["result"])
-        return block["type"], {
-            "type": block["type"],
-            "data": block["data"],
-            "tool_name": block["tool_name"],
-            "label": block["label"],
-        }
+        payload = dict(block)
+        payload.pop("message_type", None)
+        return block["message_type"], payload
 
     groups = [_to_tool_result_block(tc["name"], tc["result"]) for tc in tool_calls]
     return "text", {
@@ -1268,6 +1316,7 @@ def _execute_tool_call(
     allowed_document_ids: set[str],
     *,
     user_ai_rule_phrases: list[str] | None = None,
+    user_ai_runtime_rules: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Execute a single tool call, resolving document_id if needed."""
     fn = _TOOL_FUNCTIONS.get(fn_name)
@@ -1354,6 +1403,7 @@ def _execute_tool_call(
 
     if fn_name == "detect_ai_writing":
         exec_args["user_ai_rule_phrases"] = user_ai_rule_phrases
+        exec_args["user_ai_runtime_rules"] = user_ai_runtime_rules
 
     try:
         return fn(**exec_args)
@@ -1426,6 +1476,7 @@ class GroqLLMService:
         *,
         allowed_tool_names: set[str] | None = None,
         user_ai_rule_phrases: list[str] | None = None,
+        user_ai_runtime_rules: list[dict[str, Any]] | None = None,
     ) -> FunctionCallingResponse | None:
         """Attempt heuristic tool execution when Groq is unavailable.
 
@@ -1472,6 +1523,7 @@ class GroqLLMService:
                 file_context,
                 allowed_tool_names=allowed_tool_names,
                 user_ai_rule_phrases=user_ai_rule_phrases,
+                user_ai_runtime_rules=user_ai_runtime_rules,
             )
             if result is None:
                 return None
@@ -1538,6 +1590,7 @@ class GroqLLMService:
         allowed_document_ids: set[str],
         *,
         user_ai_rule_phrases: list[str] | None = None,
+        user_ai_runtime_rules: list[dict[str, Any]] | None = None,
     ) -> FunctionCallingResponse:
         """Run the function-calling loop."""
         all_tool_calls: list[dict[str, Any]] = []
@@ -1576,6 +1629,7 @@ class GroqLLMService:
                     messages,
                     allowed_tool_names=available_tool_names,
                     user_ai_rule_phrases=user_ai_rule_phrases,
+                    user_ai_runtime_rules=user_ai_runtime_rules,
                 )
                 if fallback is not None:
                     return fallback
@@ -1596,6 +1650,7 @@ class GroqLLMService:
                     messages,
                     allowed_tool_names=available_tool_names,
                     user_ai_rule_phrases=user_ai_rule_phrases,
+                    user_ai_runtime_rules=user_ai_runtime_rules,
                 )
                 if fallback is not None:
                     return fallback
@@ -1624,6 +1679,7 @@ class GroqLLMService:
                         messages,
                         allowed_tool_names=available_tool_names,
                         user_ai_rule_phrases=user_ai_rule_phrases,
+                        user_ai_runtime_rules=user_ai_runtime_rules,
                     )
                     if fallback is not None:
                         return fallback
@@ -1706,6 +1762,7 @@ class GroqLLMService:
                     fn_args,
                     allowed_document_ids,
                     user_ai_rule_phrases=user_ai_rule_phrases,
+                    user_ai_runtime_rules=user_ai_runtime_rules,
                 )
 
                 # Store FULL result for UI/persistence
@@ -1776,6 +1833,7 @@ class GroqLLMService:
         system_prompt_override: str | None = None,
         expose_tools: bool = True,
         user_ai_rule_phrases: list[str] | None = None,
+        user_ai_runtime_rules: list[dict[str, Any]] | None = None,
     ) -> FunctionCallingResponse:
         """Generate a response with Function Calling support.
 
@@ -1851,6 +1909,7 @@ class GroqLLMService:
                 available_tools,
                 current_doc_ids,
                 user_ai_rule_phrases=user_ai_rule_phrases,
+                user_ai_runtime_rules=user_ai_runtime_rules,
             )
             response.text = _strip_pseudo_tool_syntax(response.text)
             if not response.text.strip():

@@ -1,7 +1,13 @@
 import {
+  AIDetectionAnalyzeRequest,
+  AIDetectionResult,
+  AIDetectionRule,
+  AIDetectionRuleCompileResponse,
+  CompiledAIDetectionRule,
   AIDetectionRulePreferences,
   AdminOverview,
   ChatCompletionResponse,
+  CitationReportPayload,
   FileAttachment,
   FileUploadResponse,
   Message,
@@ -141,6 +147,80 @@ export const api = {
     );
   },
 
+  async compileAIDetectionRule(token: string, sourceText: string): Promise<AIDetectionRuleCompileResponse> {
+    return request<AIDetectionRuleCompileResponse>(
+      "/api/v1/ai-detection/rules/compile",
+      {
+        method: "POST",
+        body: JSON.stringify({ source_text: sourceText }),
+      },
+      token,
+    );
+  },
+
+  async createAIDetectionRule(
+    token: string,
+    payload: {
+      source_text: string;
+      compiled_rule?: CompiledAIDetectionRule | null;
+      scope?: "user" | "global";
+      enabled?: boolean;
+    },
+  ): Promise<AIDetectionRule> {
+    return request<AIDetectionRule>(
+      "/api/v1/ai-detection/rules",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      token,
+    );
+  },
+
+  async listAIDetectionRules(token: string): Promise<AIDetectionRule[]> {
+    const result = await request<{ rules: AIDetectionRule[] }>("/api/v1/ai-detection/rules", {}, token);
+    return result.rules;
+  },
+
+  async updateAIDetectionRule(
+    token: string,
+    ruleId: string,
+    payload: {
+      source_text?: string;
+      compiled_rule?: CompiledAIDetectionRule | null;
+      name?: string;
+      description?: string | null;
+      severity?: "low" | "medium" | "high";
+      weight?: number;
+      enabled?: boolean;
+      scope?: "user" | "global";
+    },
+  ): Promise<AIDetectionRule> {
+    return request<AIDetectionRule>(
+      `/api/v1/ai-detection/rules/${ruleId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      },
+      token,
+    );
+  },
+
+  async deleteAIDetectionRule(token: string, ruleId: string): Promise<void> {
+    await request<void>(`/api/v1/ai-detection/rules/${ruleId}`, { method: "DELETE" }, token);
+  },
+
+  async analyzeAIDetection(token: string, payload: AIDetectionAnalyzeRequest): Promise<AIDetectionResult> {
+    return request<AIDetectionResult>(
+      "/api/v1/ai-detection/analyze",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      token,
+    );
+  },
+
   async listSessions(token: string): Promise<Session[]> {
     return request<Session[]>("/api/v1/sessions", {}, token);
   },
@@ -198,6 +278,21 @@ export const api = {
     await request("/api/v1/tools/verify-citation", {
       method: "POST",
       body: JSON.stringify({ session_id: sessionId, text }),
+    }, token);
+  },
+
+  async verifyCitations(
+    token: string,
+    payload: {
+      session_id?: string | null;
+      text: string;
+      include_ai_summary?: boolean;
+      max_items?: number;
+    },
+  ): Promise<CitationReportPayload> {
+    return request<CitationReportPayload>("/api/v1/tools/verify-citations", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }, token);
   },
 

@@ -41,7 +41,7 @@ export default function HomePage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 max-w-xl mx-auto">
           {[
             { icon: BookOpen, label: "Chat AI" },
-            { icon: FileCheck, label: "Citation Check" },
+            { icon: FileCheck, label: "Xác minh trích dẫn" },
             { icon: Search, label: "Journal Match" },
             { icon: Shield, label: "AI Detection" },
           ].map(({ icon: Icon, label }) => (

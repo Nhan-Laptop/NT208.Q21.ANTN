@@ -12,12 +12,12 @@ if str(BACKEND_ROOT) not in sys.path:
 from app.api.v1.endpoints.chat import create_completion
 from app.models.chat_message import MessageType
 from app.models.chat_session import SessionMode
+from app.schemas.ai_detection import AIDetectionAnalyzeResponse
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.tools import AIWritingDetectRequest
 from app.services import heuristic_router, llm_service
 from app.services.ai_detection_rules import build_user_ai_detection_rule_prefs
 from app.services.document_cache import store_document
-from app.services.tools.ai_writing_detector import DetectionResult
 
 try:
     from .support import TestEnvironment
@@ -26,6 +26,53 @@ except ImportError:  # pragma: no cover - unittest discover fallback
 
 
 class AIDetectionCustomRulesIntegrationTest(unittest.TestCase):
+    @staticmethod
+    def _fake_result(score: float = 0.81, matched_rule_name: str = "Legacy phrase rule") -> AIDetectionAnalyzeResponse:
+        return AIDetectionAnalyzeResponse(
+            mode="deep",
+            score=score,
+            model_score=score,
+            roberta_score=0.71,
+            custom_rule_score=0.44,
+            final_score=score,
+            rule_score=0.44,
+            risk_level="high" if score >= 0.67 else "medium",
+            confidence="MEDIUM",
+            verdict="LIKELY_AI" if score >= 0.75 else "POSSIBLY_AI",
+            method="ensemble",
+            flags=["Matched custom rule signals"],
+            details={"matched_rule_count": 1},
+            detectors_used=["rule_based", "roberta_gpt2_detector"],
+            skipped_detectors=[],
+            rule_source="user_custom_rules",
+            matched_rules=[
+                {
+                    "rule_id": "legacy-phrase-1",
+                    "rule_name": matched_rule_name,
+                    "rule_type": "phrase",
+                    "severity": "low",
+                    "weight": 0.15,
+                    "matched_text": "it is important to note that",
+                    "reason": "Matched custom phrase rule.",
+                    "confidence": 0.8,
+                    "location": {"scope": "paragraph", "paragraph_index": 0},
+                }
+            ],
+            evidence=[
+                {
+                    "text": "it is important to note that",
+                    "reason": "Matched custom phrase rule.",
+                    "rule_id": "legacy-phrase-1",
+                    "severity": "low",
+                    "paragraph_index": 0,
+                }
+            ],
+            explanation="Moderate AI-like signals from generic phrasing.",
+            suggestions=["Add more specific evidence."],
+            disclaimer="AI-writing detection is probabilistic and should not be treated as definitive proof.",
+            warnings=[],
+        )
+
     def setUp(self) -> None:
         self.env = TestEnvironment()
         self.user = self.env.create_user()
@@ -40,18 +87,15 @@ class AIDetectionCustomRulesIntegrationTest(unittest.TestCase):
     def test_tools_endpoint_uses_saved_custom_rules(self) -> None:
         from app.api.v1.endpoints.tools import detect_ai_writing
 
-        fake_result = DetectionResult(
-            score=0.81,
-            confidence="MEDIUM",
-            verdict="LIKELY_AI",
-            flags=["as an AI language model"],
-            details={"matched_rules": ["as an AI language model"]},
-            rule_score=0.81,
-            rule_source="user_custom_rules",
-            matched_rules=["as an AI language model"],
-        )
+        fake_result = self._fake_result()
 
-        with patch("app.api.v1.endpoints.tools.ai_writing_detector.analyze", return_value=fake_result) as analyze:
+        with patch(
+            "app.api.v1.endpoints.tools.get_runtime_rule_payloads",
+            return_value=[{"id": "legacy-phrase-1"}],
+        ), patch(
+            "app.api.v1.endpoints.tools.ai_detection_service.analyze_text",
+            return_value=fake_result,
+        ) as analyze:
             with self.env.session() as db:
                 response = detect_ai_writing(
                     payload=AIWritingDetectRequest(
@@ -64,26 +108,20 @@ class AIDetectionCustomRulesIntegrationTest(unittest.TestCase):
 
         self.assertEqual(response.data.rule_source, "user_custom_rules")
         analyze.assert_called_once()
-        args, kwargs = analyze.call_args
-        self.assertIn("As an AI language model", args[0])
-        self.assertEqual(
-            kwargs["custom_rule_phrases"],
-            ["as an AI language model", "it is important to note that"],
-        )
+        _, kwargs = analyze.call_args
+        self.assertEqual(kwargs["mode"], "deep")
+        self.assertEqual(kwargs["runtime_rule_payloads"], [{"id": "legacy-phrase-1"}])
 
     def test_chat_ai_detection_mode_passes_custom_rules(self) -> None:
-        fake_result = DetectionResult(
-            score=0.74,
-            confidence="MEDIUM",
-            verdict="POSSIBLY_AI",
-            flags=["it is important to note that"],
-            details={"matched_rules": ["it is important to note that"]},
-            rule_score=0.74,
-            rule_source="user_custom_rules",
-            matched_rules=["it is important to note that"],
-        )
+        fake_result = self._fake_result(score=0.74)
 
-        with patch("app.services.chat_service.ai_writing_detector.analyze", return_value=fake_result) as analyze:
+        with patch(
+            "app.services.chat_service.get_runtime_rule_payloads",
+            return_value=[{"id": "legacy-phrase-1"}],
+        ), patch(
+            "app.services.chat_service.ai_detection_service.analyze_text",
+            return_value=fake_result,
+        ) as analyze:
             with self.env.session() as db:
                 response = create_completion(
                     payload=ChatCompletionRequest(
@@ -95,12 +133,10 @@ class AIDetectionCustomRulesIntegrationTest(unittest.TestCase):
                 )
 
         self.assertEqual(response.assistant_message.message_type, MessageType.AI_WRITING_DETECTION)
+        self.assertEqual(response.assistant_message.tool_results["type"], "ai_detection")
         analyze.assert_called_once()
         _, kwargs = analyze.call_args
-        self.assertEqual(
-            kwargs["custom_rule_phrases"],
-            ["as an AI language model", "it is important to note that"],
-        )
+        self.assertEqual(kwargs["runtime_rule_payloads"], [{"id": "legacy-phrase-1"}])
 
     def test_function_call_execution_forwards_custom_rules(self) -> None:
         doc_id = store_document(
@@ -116,6 +152,7 @@ class AIDetectionCustomRulesIntegrationTest(unittest.TestCase):
                 {"document_id": doc_id},
                 {doc_id},
                 user_ai_rule_phrases=["as an AI language model"],
+                user_ai_runtime_rules=[{"id": "structured-rule-1"}],
             )
 
         self.assertEqual(result["score"], 0.9)
@@ -124,6 +161,7 @@ class AIDetectionCustomRulesIntegrationTest(unittest.TestCase):
             {
                 "text": "As an AI language model, this cached document is long enough for tool execution wiring tests.",
                 "user_ai_rule_phrases": ["as an AI language model"],
+                "user_ai_runtime_rules": [{"id": "structured-rule-1"}],
             },
         )
 
@@ -141,6 +179,7 @@ class AIDetectionCustomRulesIntegrationTest(unittest.TestCase):
                 None,
                 allowed_tool_names={"detect_ai_writing"},
                 user_ai_rule_phrases=["it is important to note that"],
+                user_ai_runtime_rules=[{"id": "structured-rule-1"}],
             )
 
         self.assertIsNotNone(result)
@@ -150,3 +189,4 @@ class AIDetectionCustomRulesIntegrationTest(unittest.TestCase):
             kwargs["user_ai_rule_phrases"],
             ["it is important to note that"],
         )
+        self.assertEqual(kwargs["user_ai_runtime_rules"], [{"id": "structured-rule-1"}])

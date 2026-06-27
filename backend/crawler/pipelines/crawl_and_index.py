@@ -279,7 +279,7 @@ class CrawlAndIndexPipeline:
             entity_type="venue",
             source_name=source.slug,
             raw_identifier=normalized["canonical_title"],
-            normalized_url_hash=dedup_service.normalized_url_hash(normalized.get("homepage_url")),
+            normalized_url_hash=dedup_service.normalized_url_hash(normalized.get("homepage_url") or normalized.get("source_url")),
             business_key=business_key,
             content_fingerprint=dedup_service.content_fingerprint(normalized["title"], normalized.get("aims_scope")),
         )
@@ -397,7 +397,7 @@ class CrawlAndIndexPipeline:
             entity_id=venue.id,
             source_name=source.slug,
             raw_identifier=normalized["canonical_title"],
-            normalized_url_hash=dedup_service.normalized_url_hash(normalized.get("homepage_url")),
+            normalized_url_hash=dedup_service.normalized_url_hash(normalized.get("homepage_url") or normalized.get("source_url")),
             business_key=business_key,
             content_fingerprint=dedup_service.content_fingerprint(normalized["title"], normalized.get("aims_scope")),
         )

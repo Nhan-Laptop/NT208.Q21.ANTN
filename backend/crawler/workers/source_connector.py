@@ -14,6 +14,8 @@ class BootstrapSeedConnector:
     def fetch(self, source: CrawlSource) -> dict[str, Any]:
         backend_root = Path(__file__).resolve().parents[2]
         seed_path = (backend_root / settings.academic_seed_path).resolve()
+        if not seed_path.exists():
+            return {"venues": [], "articles": [], "cfp_events": []}
         with open(seed_path, "r", encoding="utf-8") as handle:
             return json.load(handle)
 

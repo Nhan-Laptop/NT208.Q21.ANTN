@@ -1,5 +1,6 @@
 "use client";
 
+import { AIDetectionRuleManager } from "@/components/ai-detect-rule-manager";
 import { useAuth } from "@/lib/auth";
 import { api, showApiError } from "@/lib/api";
 import { useChat } from "@/lib/chat-store";
@@ -36,9 +37,9 @@ function getRuleMode(prefs: AIDetectionRulePreferences | null): RuleMode {
 
 function ruleStatusLabel(prefs: AIDetectionRulePreferences | null): string {
   if (!prefs || prefs.rule_source === "default_app_rules") {
-    return "Đang dùng quy tắc mặc định";
+    return "Đang dùng rule phrases mặc định";
   }
-  return "Đang dùng quy tắc tùy chỉnh";
+  return "Đang dùng custom phrase rules";
 }
 
 function formatRulesDraft(phrases: string[] | null | undefined): string {
@@ -54,9 +55,9 @@ function normalizeRuleLines(value: string): string[] {
 
 function summarizeRuleSource(prefs: AIDetectionRulePreferences | null): string {
   if (!prefs || prefs.rule_source === "default_app_rules") {
-    return "AIRA đang áp dụng bộ quy tắc mặc định cho toàn bộ phiên nghiên cứu hiện tại.";
+    return "AIRA đang áp dụng rule phrases mặc định cho toàn bộ phiên nghiên cứu hiện tại.";
   }
-  return `${prefs.phrase_count} quy tắc tùy chỉnh đang được áp dụng cho lớp rule-based của AIRA.`;
+  return `${prefs.phrase_count} custom phrase rules đang được áp dụng cho lớp rule-based của AIRA.`;
 }
 
 function readRulesPanelVisibility(): boolean {
@@ -244,12 +245,12 @@ export function AIDetectionRulesPanel({
     setSelectedMode(value);
     if (value === "custom") {
       setStatusMessage(
-        normalizedDraft.length > 0 ? "Bạn có thể lưu quy tắc rồi tiếp tục nhập prompt." : null,
+        normalizedDraft.length > 0 ? "Bạn có thể lưu danh sách cụm từ rồi tiếp tục nhập prompt." : null,
       );
       return;
     }
     if (persistedMode === "custom") {
-      setStatusMessage("Bạn đang chuyển về bộ mặc định. Nhấn Khôi phục mặc định để áp dụng.");
+      setStatusMessage("Bạn đang chuyển về rule phrases mặc định. Nhấn Khôi phục mặc định để áp dụng.");
     } else {
       setStatusMessage(null);
     }
@@ -262,7 +263,7 @@ export function AIDetectionRulesPanel({
   const saveRules = async () => {
     if (!token || isLoadingPrefs || isSaving) return;
     if (selectedMode === "custom" && normalizedDraft.length === 0) {
-      setStatusMessage("Thêm ít nhất 1 quy tắc để lưu.");
+      setStatusMessage("Thêm ít nhất 1 cụm từ để lưu.");
       return;
     }
     if (!canSaveCustomRules) return;
@@ -270,9 +271,9 @@ export function AIDetectionRulesPanel({
     try {
       const next = await api.updateAiDetectionRules(token, normalizedDraft);
       syncFromPrefs(next);
-      setStatusMessage("Đã lưu quy tắc tùy chỉnh. Bạn có thể tiếp tục kiểm tra văn bản AI.");
+      setStatusMessage("Đã lưu danh sách cụm từ tùy chỉnh. Bạn có thể tiếp tục kiểm tra văn bản AI.");
       setShowRulesPanel(false);
-      toast.success("Đã lưu quy tắc. Bạn có thể tiếp tục kiểm tra văn bản AI.");
+      toast.success("Đã lưu danh sách cụm từ tùy chỉnh.");
       focusChatInput();
     } catch (error) {
       showApiError(error);
@@ -287,9 +288,9 @@ export function AIDetectionRulesPanel({
     try {
       const next = await api.clearAiDetectionRules(token);
       syncFromPrefs(next);
-      setStatusMessage("Đã khôi phục quy tắc mặc định. Bạn có thể tiếp tục kiểm tra văn bản AI.");
+      setStatusMessage("Đã khôi phục rule phrases mặc định. Bạn có thể tiếp tục kiểm tra văn bản AI.");
       setShowRulesPanel(false);
-      toast.success("Đã khôi phục quy tắc mặc định");
+      toast.success("Đã khôi phục rule phrases mặc định");
       focusChatInput();
     } catch (error) {
       showApiError(error);
@@ -320,10 +321,10 @@ export function AIDetectionRulesPanel({
                   id="ai-rules-panel-title"
                   className="text-base font-semibold text-text-primary dark:text-dark-text-primary"
                 >
-                  Quy tắc nhận diện văn bản AI
+                  Quy tắc AI Detect tùy chỉnh
                 </h2>
                 <span className="inline-flex items-center rounded-full border border-border bg-bg-secondary/80 px-2.5 py-1 text-[11px] font-medium text-text-secondary dark:border-white/10 dark:bg-white/[0.05] dark:text-dark-text-secondary">
-                  {isLoadingPrefs ? "Đang tải quy tắc..." : ruleStatusLabel(prefs)}
+                  {isLoadingPrefs ? "Đang tải rule phrases..." : ruleStatusLabel(prefs)}
                 </span>
               </div>
               <p className="mt-1 text-sm leading-6 text-text-secondary dark:text-dark-text-secondary">
@@ -344,11 +345,11 @@ export function AIDetectionRulesPanel({
               aria-controls="ai-rules-panel-body"
               aria-expanded={showRulesPanel}
               aria-label={
-                showRulesPanel ? "Ẩn quy tắc nhận diện AI" : "Chỉnh sửa quy tắc nhận diện AI"
+                showRulesPanel ? "Ẩn quy tắc AI Detect" : "Chỉnh sửa quy tắc AI Detect"
               }
             >
               {showRulesPanel ? <X size={16} /> : <PencilLine size={14} />}
-              <span>{showRulesPanel ? "Ẩn quy tắc" : "Chỉnh sửa quy tắc"}</span>
+              <span>{showRulesPanel ? "Ẩn quy tắc AI Detect" : "Chỉnh sửa quy tắc AI Detect"}</span>
             </button>
           </div>
         </div>
@@ -369,21 +370,21 @@ export function AIDetectionRulesPanel({
         >
           <div className="flex flex-col gap-4">
             <fieldset className="grid gap-3 sm:grid-cols-2">
-              <legend className="sr-only">Chọn nguồn quy tắc nhận diện AI</legend>
+              <legend className="sr-only">Chọn nguồn custom phrase rules cho AI detection</legend>
               <RuleModeOption
                 checked={selectedMode === "default"}
-                description="Dùng bộ quy tắc mặc định của AIRA để giữ đánh giá nhất quán giữa các phiên nghiên cứu."
+                description="Dùng rule phrases mặc định của AIRA để giữ đánh giá nhất quán giữa các phiên nghiên cứu."
                 disabled={isLoadingPrefs || isSaving}
-                label="Dùng quy tắc mặc định"
+                label="Dùng rule phrases mặc định"
                 name="ai-rule-mode"
                 onChange={handleModeChange}
                 value="default"
               />
               <RuleModeOption
                 checked={selectedMode === "custom"}
-                description="Tùy chỉnh các tín hiệu rule-based để ưu tiên dấu hiệu phù hợp với bối cảnh tài liệu của bạn."
+                description="Tùy chỉnh custom phrase rules để ưu tiên dấu hiệu phù hợp với bối cảnh tài liệu của bạn."
                 disabled={isLoadingPrefs || isSaving}
-                label="Dùng quy tắc tùy chỉnh"
+                label="Dùng custom phrase rules"
                 name="ai-rule-mode"
                 onChange={handleModeChange}
                 value="custom"
@@ -397,16 +398,16 @@ export function AIDetectionRulesPanel({
                     htmlFor="custom-ai-rules"
                     className="text-sm font-medium text-text-primary dark:text-dark-text-primary"
                   >
-                    Danh sách quy tắc tùy chỉnh
+                    Danh sách cụm từ tùy chỉnh
                   </label>
                   <span className="text-xs text-text-secondary dark:text-dark-text-secondary">
                     {normalizedDraft.length > 0
-                      ? `${normalizedDraft.length} quy tắc sẵn sàng lưu`
-                      : "Thêm ít nhất 1 quy tắc để lưu"}
+                      ? `${normalizedDraft.length} cụm từ sẵn sàng lưu`
+                      : "Thêm ít nhất 1 cụm từ để lưu"}
                   </span>
                 </div>
                 <p className="mt-1 text-xs leading-5 text-text-secondary dark:text-dark-text-secondary">
-                  Mỗi dòng là một quy tắc hoặc tín hiệu cần gắn cờ. AIRA vẫn giữ pipeline
+                  Mỗi dòng là một rule phrase hoặc tín hiệu cần gắn cờ. AIRA vẫn giữ pipeline
                   ML hiện tại và dùng danh sách này cho lớp rule-based.
                 </p>
                 <textarea
@@ -427,7 +428,7 @@ export function AIDetectionRulesPanel({
                 <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <p className="text-xs leading-5 text-text-secondary dark:text-dark-text-secondary">
                     {hasUnsavedChanges
-                      ? "Bạn có thay đổi chưa lưu. Prompt bên dưới vẫn dùng được bình thường."
+                      ? "Bạn có thay đổi cụm từ chưa lưu. Prompt bên dưới vẫn dùng được bình thường."
                       : "Các dòng trống sẽ bị bỏ qua và khoảng trắng dư sẽ được chuẩn hóa khi lưu."}
                   </p>
                   <div className="flex flex-wrap items-center gap-2">
@@ -453,7 +454,7 @@ export function AIDetectionRulesPanel({
                       className="inline-flex items-center gap-1.5 rounded-xl bg-accent px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/25 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-dark-accent dark:text-dark-bg-primary dark:hover:bg-dark-accent-hover dark:focus:ring-dark-accent/25"
                     >
                       <Save size={14} />
-                      <span>Lưu quy tắc</span>
+                      <span>Lưu cụm từ</span>
                     </button>
                   </div>
                 </div>
@@ -462,11 +463,11 @@ export function AIDetectionRulesPanel({
               <div className="flex flex-col gap-3 rounded-2xl border border-border bg-bg-secondary/35 p-4 dark:border-white/8 dark:bg-white/[0.03] sm:flex-row sm:items-center sm:justify-between">
                 <div className="space-y-1">
                   <p className="text-sm font-medium text-text-primary dark:text-dark-text-primary">
-                    AIRA sẽ dùng bộ quy tắc mặc định của ứng dụng.
+                    AIRA sẽ dùng rule phrases mặc định của ứng dụng.
                   </p>
                   <p className="text-xs leading-5 text-text-secondary dark:text-dark-text-secondary">
                     {persistedMode === "custom"
-                      ? "Bạn đang chuyển về bộ mặc định. Nhấn Khôi phục mặc định để bỏ danh sách tùy chỉnh đã lưu."
+                      ? "Bạn đang chuyển về rule phrases mặc định. Nhấn Khôi phục mặc định để bỏ danh sách cụm từ đã lưu."
                       : "Phù hợp khi bạn muốn giữ tiêu chí đánh giá ổn định giữa các lần rà soát."}
                   </p>
                 </div>
@@ -487,6 +488,8 @@ export function AIDetectionRulesPanel({
                 )}
               </div>
             )}
+
+            <AIDetectionRuleManager />
           </div>
         </div>
       )}

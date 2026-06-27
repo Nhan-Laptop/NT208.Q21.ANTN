@@ -172,6 +172,7 @@ class AcademicIndexService:
                 "title": venue.title,
                 "publisher": venue.publisher,
                 "homepage_url": venue.homepage_url,
+                "source_url": venue.source_url,
                 "subject_labels": subject_labels,
                 "source_ids": source_ids,
                 "source_names": source_ids,

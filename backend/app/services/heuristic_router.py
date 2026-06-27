@@ -530,6 +530,7 @@ def fallback_process_request(
     *,
     allowed_tool_names: set[str] | None = None,
     user_ai_rule_phrases: list[str] | None = None,
+    user_ai_runtime_rules: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Attempt to process the user's request using heuristics + direct
     tool execution, bypassing Gemini entirely.
@@ -624,6 +625,7 @@ def fallback_process_request(
             raw = detect_ai_writing(
                 text=input_text,
                 user_ai_rule_phrases=user_ai_rule_phrases,
+                user_ai_runtime_rules=user_ai_runtime_rules,
             )
             text = _template_ai_detect(raw)
 
@@ -660,8 +662,9 @@ def fallback_process_request(
     # Build response matching FunctionCallingResponse structure
     msg_type = _TOOL_MESSAGE_TYPE_VALUE.get(tool_name, "text")
     data_key = _TOOL_DATA_KEY.get(tool_name, "")
+    payload_type = raw.get("type", msg_type) if isinstance(raw, dict) else msg_type
     tool_results = {
-        "type": msg_type,
+        "type": payload_type,
         "data": raw.get(data_key, raw) if data_key else raw,
     }
 

@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from app.services.ingestion.index_service import academic_index_service
+from app.services.journal_match.service import JournalMatchService
 from app.services.journal_match.reranker import match_reranker
 
 logger = logging.getLogger(__name__)
@@ -92,8 +93,11 @@ class JournalFinder:
             impact_factor = metadata.get("impact_factor")
             if min_impact_factor is not None and impact_factor is not None and float(impact_factor) < min_impact_factor:
                 continue
+            links, primary_url, link_warning = JournalMatchService.build_trusted_venue_links(metadata)
             recommendations.append(
                 {
+                    "id": metadata.get("venue_id"),
+                    "name": metadata.get("title") or metadata.get("venue_id") or row.get("record_id"),
                     "journal": metadata.get("title") or metadata.get("venue_id") or row.get("record_id"),
                     "entity_type": "venue",
                     "venue_id": metadata.get("venue_id"),
@@ -101,11 +105,12 @@ class JournalFinder:
                     "score": round(float(row.get("retrieval_score", 0.0)), 4),
                     "score_calibrated": False,
                     "reason": "Matched against indexed journal venue metadata in dữ liệu học thuật hiện có.",
-                    "url": metadata.get("homepage_url") or metadata.get("source_url") or metadata.get("url"),
+                    "url": primary_url or metadata.get("homepage_url") or metadata.get("source_url") or metadata.get("url"),
                     "publisher": metadata.get("publisher"),
                     "open_access": False,
                     "impact_factor": None,
-                    "issn": None,
+                    "issn": JournalMatchService._normalize_issn(metadata.get("issn")),
+                    "eissn": JournalMatchService._normalize_issn(metadata.get("eissn")),
                     "h_index": None,
                     "review_time_weeks": None,
                     "acceptance_rate": None,
@@ -118,6 +123,8 @@ class JournalFinder:
                         key for key in ("impact_factor", "h_index", "avg_review_weeks", "acceptance_rate", "is_open_access")
                         if metadata.get(key) is not None
                     ],
+                    "links": links,
+                    "link_warning": link_warning,
                 }
             )
             if len(recommendations) >= top_k:

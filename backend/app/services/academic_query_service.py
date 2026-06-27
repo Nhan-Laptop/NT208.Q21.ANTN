@@ -66,6 +66,9 @@ _STOPWORDS = {
 class AcademicQueryResult:
     text: str
     records: list[dict[str, Any]]
+    query_terms: list[str]
+    best_score: int = 0
+    confidence: float = 0.0
 
 
 class AcademicQueryService:
@@ -75,6 +78,9 @@ class AcademicQueryService:
     explicitly asks about records/papers/data in the local academic database.
     Citation and DOI verification remain owned by the citation tools.
     """
+
+    INTERNAL_CONFIDENCE_THRESHOLD = 0.40
+    INTERNAL_BEST_SCORE_THRESHOLD = 2
 
     def should_handle(self, text: str) -> bool:
         normalized = (text or "").strip()
@@ -86,15 +92,58 @@ class AcademicQueryService:
             return False
         return bool(_ACADEMIC_DB_QUERY_RE.search(normalized))
 
-    def answer(self, db: Session, text: str, *, limit: int = 5) -> AcademicQueryResult:
-        terms = self._extract_terms(text)
+    def lookup(
+        self,
+        db: Session,
+        text: str,
+        *,
+        query_hint: str | None = None,
+        limit: int = 5,
+    ) -> AcademicQueryResult:
+        terms = self._extract_terms(query_hint or text)
         if not terms:
-            return AcademicQueryResult(text=self._no_data_text(), records=[])
+            return AcademicQueryResult(text=self._no_data_text(), records=[], query_terms=[], best_score=0, confidence=0.0)
 
         records = self._search_records(db, terms, limit=limit)
+        best_score = int(records[0].get("retrieval_score", 0) or 0) if records else 0
+        denominator = max(min(len(terms), 4), 1)
+        confidence = min(best_score / denominator, 1.0)
         if not records:
-            return AcademicQueryResult(text=self._no_data_text(terms), records=[])
+            return AcademicQueryResult(
+                text=self._no_data_text(terms),
+                records=[],
+                query_terms=terms,
+                best_score=0,
+                confidence=0.0,
+            )
 
+        return AcademicQueryResult(
+            text=self._found_text(records),
+            records=records,
+            query_terms=terms,
+            best_score=best_score,
+            confidence=round(confidence, 3),
+        )
+
+    def answer(
+        self,
+        db: Session,
+        text: str,
+        *,
+        query_hint: str | None = None,
+        limit: int = 5,
+    ) -> AcademicQueryResult:
+        return self.lookup(db, text, query_hint=query_hint, limit=limit)
+
+    def has_sufficient_confidence(self, result: AcademicQueryResult) -> bool:
+        return bool(
+            result.records
+            and result.best_score >= self.INTERNAL_BEST_SCORE_THRESHOLD
+            and result.confidence >= self.INTERNAL_CONFIDENCE_THRESHOLD
+        )
+
+    @staticmethod
+    def _found_text(records: list[dict[str, Any]]) -> str:
         lines = [
             f"Mình tìm thấy {len(records)} bản ghi liên quan trong {USER_SAFE_DATA_LABEL}. "
             "Các kết quả dưới đây là grounded findings từ dữ liệu học thuật hiện có, không phải kết luận từ kiến thức ngoài."
@@ -107,7 +156,7 @@ class AcademicQueryService:
             if snippet:
                 lines.append(f"   {snippet[:280]}")
             lines.append(f"   {format_grounded_evidence(record)}")
-        return AcademicQueryResult(text="\n".join(lines), records=records)
+        return "\n".join(lines)
 
     @staticmethod
     def _extract_terms(text: str) -> list[str]:
@@ -164,6 +213,7 @@ class AcademicQueryService:
                 "doi": article.doi,
                 "url": article.url,
                 "authors": [author.full_name for author in article.authors[:5]],
+                "retrieval_score": score,
             }))
 
         venues = (
@@ -195,6 +245,7 @@ class AcademicQueryService:
                 "year": "N/A",
                 "doi": "N/A",
                 "url": venue.homepage_url,
+                "retrieval_score": score,
             }))
 
         cfps = (
@@ -227,6 +278,7 @@ class AcademicQueryService:
                 "year": cfp.full_paper_deadline.isoformat() if cfp.full_paper_deadline else "N/A",
                 "doi": "N/A",
                 "url": cfp.source_url,
+                "retrieval_score": score,
             }))
 
         scored.sort(key=lambda item: item[0], reverse=True)

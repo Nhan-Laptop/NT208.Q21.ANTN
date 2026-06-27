@@ -98,19 +98,6 @@ playwright-report/
 test-results/
 
 # =========================
-# Docs / internal notes (optional)
-# =========================
-CLAUDE.md
-CODEX.md
-AGENTS.md
-Report.md
-FINAL_REPORT_FEATURES.md
-aira_system_prompt.md
-.codex
-.claude
-module_tree.md
-
-# =========================
 # OS/editor junk
 # =========================
 .DS_Store
@@ -122,3 +109,14 @@ Desktop.ini
 *.swo
 *~
 .claude/
+# Python tooling
+.pyre/
+.dmypy.json
+.pytype/
+
+# FastAPI / runtime
+backend/.coverage
+backend/htmlcov/
+
+# Local runtime data / vector DB / crawl snapshots
+backend/data/

@@ -15,6 +15,7 @@ from app.schemas.chat import ChatCompletionRequest
 from app.services import llm_service
 from app.services import heuristic_router
 from app.services.academic_query_service import academic_query_service
+from app.services.external_academic_search import ScholarlyLookupResult
 from app.services.academic_verification_formatter import format_citation_summary
 from app.services.tools.citation_checker import CitationChecker, CitationCheckResult
 
@@ -36,9 +37,63 @@ class ChatAcademicDatabaseRoutingTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.env.close()
 
-    def test_general_academic_database_query_returns_grounded_no_data_without_llm(self) -> None:
+    def test_general_academic_database_query_uses_external_fallback_without_llm(self) -> None:
+        lookup_result = ScholarlyLookupResult(
+            status="external_found",
+            source_mode="external_scholarly",
+            records=[
+                {
+                    "title": "M-theory holographic duality and quantum gravity",
+                    "authors": ["A. Researcher"],
+                    "year": 2024,
+                    "venue": "Journal of Theoretical Physics",
+                    "doi": "10.1234/mtheory.2024.001",
+                    "abstract": "A grounded metadata record for holographic duality.",
+                    "url": "https://doi.org/10.1234/mtheory.2024.001",
+                    "source": "OpenAlex",
+                    "confidence": 0.91,
+                    "match_status": "best_match",
+                    "subjects": ["Theoretical physics"],
+                    "keywords": ["M-theory", "holographic duality"],
+                    "score": 0.91,
+                },
+            ],
+            best_record={
+                "title": "M-theory holographic duality and quantum gravity",
+                "authors": ["A. Researcher"],
+                "year": 2024,
+                "venue": "Journal of Theoretical Physics",
+                "doi": "10.1234/mtheory.2024.001",
+                "abstract": "A grounded metadata record for holographic duality.",
+                "url": "https://doi.org/10.1234/mtheory.2024.001",
+                "source": "OpenAlex",
+                "confidence": 0.91,
+                "match_status": "best_match",
+                "subjects": ["Theoretical physics"],
+                "keywords": ["M-theory", "holographic duality"],
+                "score": 0.91,
+            },
+            query_terms=["m-theory", "holographic", "duality"],
+            confidence=0.91,
+            confidence_label="High",
+            external_search_used=True,
+            checked_sources=[
+                {"name": "Internal academic database", "state": "no_match", "detail": "Checked internal terms: m-theory, holographic, duality.", "candidate_count": 0},
+                {"name": "Crossref", "state": "matched", "detail": None, "candidate_count": 1},
+                {"name": "OpenAlex", "state": "matched", "detail": None, "candidate_count": 1},
+            ],
+            source_diagnostics={
+                "crossref": {"state": "matched", "candidate_count": 1, "detail": None},
+                "openalex": {"state": "matched", "candidate_count": 1, "detail": None},
+            },
+            notes=["Resolved the lookup query from the supplied title/reference metadata."],
+            internal_result={"count": 0, "best_score": 0, "confidence": 0.0},
+        )
         with self.env.session() as db:
-            with patch.object(llm_service.gemini_service, "generate_response", side_effect=AssertionError("LLM should not route no-data academic query")):
+            with (
+                patch.object(llm_service.gemini_service, "generate_response", side_effect=AssertionError("LLM should not route academic lookup fallback")),
+                patch("app.services.chat_service.external_academic_search_service.lookup", return_value=lookup_result),
+            ):
                 response = create_completion(
                     payload=ChatCompletionRequest(session_id=self.session.id, user_message=ACADEMIC_DB_QUERY),
                     db=db,
@@ -49,12 +104,12 @@ class ChatAcademicDatabaseRoutingTest(unittest.TestCase):
         self.assertEqual(assistant.message_type, "text")
         self.assertIsNotNone(assistant.tool_results)
         self.assertEqual(assistant.tool_results.get("type"), "academic_lookup")
-        self.assertEqual(assistant.tool_results.get("status"), "no_data")
-        self.assertIn("chưa tìm thấy bài hoặc bản ghi học thuật liên quan", assistant.content or "")
+        self.assertEqual(assistant.tool_results.get("status"), "external_found")
+        self.assertIn("nguồn học thuật bên ngoài", (assistant.content or "").lower())
+        self.assertIn("Crossref", str(assistant.tool_results))
+        self.assertIn("OpenAlex", str(assistant.tool_results))
         self.assertNotIn("crawler.db", assistant.content or "")
         self.assertNotIn("citation_report", str(assistant.tool_results))
-        self.assertNotIn("Kết quả tìm kiếm", assistant.content or "")
-        self.assertNotIn("Maldacena", assistant.content or "")
 
     def test_academic_database_query_does_not_route_to_citation_verification(self) -> None:
         self.assertTrue(academic_query_service.should_handle(ACADEMIC_DB_QUERY))
@@ -72,6 +127,22 @@ class ChatAcademicDatabaseRoutingTest(unittest.TestCase):
 
         doi_only = "https://doi.org/10.1111/GCB.17128"
         self.assertEqual(llm_service._detect_explicit_tool_requests(doi_only), ["verify_citation"])
+
+    def test_llm_runtime_exposes_only_the_five_local_tools(self) -> None:
+        expected_tools = {
+            "scan_retraction_and_pubpeer",
+            "verify_citation",
+            "match_journal",
+            "detect_ai_writing",
+            "check_grammar",
+        }
+        groq_tool_names = {tool["function"]["name"] for tool in llm_service._GROQ_TOOLS}
+
+        self.assertEqual(groq_tool_names, expected_tools)
+        self.assertEqual(set(llm_service._TOOL_FUNCTIONS), expected_tools)
+        self.assertNotIn("web_search", groq_tool_names)
+        self.assertNotIn("tavily", groq_tool_names)
+        self.assertNotIn("tavily_search", groq_tool_names)
 
     def test_heuristic_router_treats_doi_only_as_exact_verification_not_retraction(self) -> None:
         with patch.object(heuristic_router._semantic_router, "classify", return_value=(None, 0.0)):

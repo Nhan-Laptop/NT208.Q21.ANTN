@@ -21,11 +21,13 @@ from app.services.tools.citation_checker import (
     CitationCheckResult,
     ReferenceMetadata,
     _normalize_semantic_scholar_paper,
+    choose_best_match,
     build_csl_json,
     build_completed_metadata,
     format_apa_reference,
     format_bibtex,
     parse_reference_metadata,
+    score_candidate,
     search_semantic_scholar_candidates,
 )
 
@@ -159,6 +161,53 @@ class CitationMetadataMatchingTest(unittest.TestCase):
         }
         for r in meta_results:
             self.assertIn(r.status, valid_statuses)
+
+    def test_choose_best_match_prefers_the_highest_scoring_candidate(self) -> None:
+        ref = ReferenceMetadata(
+            raw=APA_NO_DOI_REAL,
+            title="Attention is all you need",
+            authors=["vaswani", "shazeer"],
+            year=2017,
+            venue="Advances in Neural Information Processing Systems",
+            confidence=0.95,
+        )
+        candidates = [
+            CandidateWork(
+                source="crossref",
+                title="An unrelated transformer survey",
+                authors=["someone", "else"],
+                year=2015,
+                venue="Another venue",
+                doi="10.0001/a",
+            ),
+            CandidateWork(
+                source="openalex",
+                title="Attention is all you need",
+                authors=["vaswani", "shazeer"],
+                year=2017,
+                venue="Advances in Neural Information Processing Systems",
+                doi="10.0001/b",
+                pages="5998-6008",
+            ),
+            CandidateWork(
+                source="semantic_scholar",
+                title="Attention is all you need",
+                authors=["vaswani"],
+                year=2018,
+                venue="ArXiv",
+                doi="10.0001/c",
+            ),
+        ]
+        scores = {
+            candidate.doi: score_candidate(ref, candidate)["final_score"]
+            for candidate in candidates
+        }
+        match = choose_best_match(ref, candidates)
+
+        self.assertEqual(match.best_candidate.doi, "10.0001/b")
+        self.assertEqual(max(scores, key=scores.get), "10.0001/b")
+        self.assertAlmostEqual(match.confidence, scores["10.0001/b"], places=6)
+        self.assertIn(match.status, {"METADATA_VERIFIED", "LIKELY_MATCH"})
 
     # ------------------------------------------------------------------ #
     # 4. Fake reference → NO_MATCH_FOUND                                  #
@@ -618,6 +667,24 @@ class CitationMetadataMatchingTest(unittest.TestCase):
                 self.assertEqual(search_semantic_scholar_candidates(parsed), [])
             with patch("app.services.tools.citation_checker.httpx.Client", TimeoutClient):
                 self.assertEqual(search_semantic_scholar_candidates(parsed), [])
+
+    # ------------------------------------------------------------------ #
+    # 20. Likely match is not counted as verified in statistics           #
+    # ------------------------------------------------------------------ #
+    def test_likely_match_does_not_increase_verified_statistics(self) -> None:
+        checker = CitationChecker()
+        stats = checker.get_statistics([
+            CitationCheckResult(
+                citation="Attention is all you need. 2017.",
+                status="LIKELY_MATCH",
+                confidence=0.88,
+            )
+        ])
+
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["likely_match"], 1)
+        self.assertEqual(stats["metadata_verified"], 0)
+        self.assertEqual(stats["verified_rate"], 0.0)
 
 
 if __name__ == "__main__":

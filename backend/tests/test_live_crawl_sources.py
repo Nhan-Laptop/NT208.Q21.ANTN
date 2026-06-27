@@ -6,18 +6,21 @@ from pathlib import Path
 
 from tests.test_support import BackendTestCase
 
+from app.core.config import settings
 from app.models.crawl_source import CrawlSource
 from app.models.raw_source_snapshot import RawSourceSnapshot
 from app.models.venue import Venue
 from app.models.venue_metric import VenueMetric
 from app.services.ingestion.index_service import academic_index_service
 from crawler.connectors.base import SnapshotInfo, read_csv_rows, read_xlsx_rows
+from crawler.connectors.clarivate import ClarivateConnector, parse_clarivate_api_hit, parse_clarivate_rows
 from crawler.connectors.core_ranks import parse_core_rank_rows
 from crawler.connectors.sciencedirect_cfp import parse_sciencedirect_cfp_html
 from crawler.connectors.scopus import ScopusConnector, parse_scopus_title_list
 from crawler.connectors.source_registry import SourceConfig, source_registry
 from crawler.connectors.springer import parse_springer_journals_html
 from crawler.pipelines.crawl_and_index import crawl_and_index_pipeline
+from crawler.workers.source_connector import BootstrapSeedConnector
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "crawler"
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +56,178 @@ def test_scopus_title_list_parser_from_sample_file() -> None:
     assert records[0]["title"] == "Journal of Machine Learning Research"
     assert records[0]["issn_print"] == "1532-4435"
     assert records[0]["indexed_scopus"] is True
+
+
+def test_clarivate_parser_from_sample_file() -> None:
+    rows = read_csv_rows((FIXTURES / "clarivate_mjl.csv").read_bytes())
+    records = parse_clarivate_rows(rows, "https://mjl.clarivate.com/export.csv")
+    assert records[0]["title"] == "Nature Machine Intelligence"
+    assert records[0]["indexed_wos"] is True
+    assert records[0]["jcr_quartile"] == "Q1"
+    assert "Computer Science" in records[0]["subjects"][0]
+
+
+def test_clarivate_api_hit_parser_maps_basic_fields() -> None:
+    payload = parse_clarivate_api_hit(
+        {
+            "id": "WOS-0001",
+            "self": "https://api.clarivate.com/apis/wos-journals/v1/journals/WOS-0001",
+            "name": "Nature Machine Intelligence",
+            "jcr_title": "NAT MACH INTELL",
+            "iso_title": "Nature Mach. Intell.",
+            "issn": "2522-5839",
+            "e_issn": "2522-5839",
+            "publisher": {"name": "Springer Nature", "country_region": "United Kingdom"},
+            "language": "English",
+            "categories": {"value": [{"name": "Computer Science, Artificial Intelligence"}]},
+            "journal_citation_reports": {"year": 2025, "url": "https://jcr.clarivate.com/jcr-journal-profile"},
+            "metrics": {"impact_metrics": {"jif": "15.2", "jci": "4.1"}, "source_metrics": {"jif_percentile": 98.0}},
+            "ranks": {"jif": [{"category": "Computer Science, Artificial Intelligence", "quartile": "Q1"}]},
+        },
+        "https://api.clarivate.com/apis/wos-journals/v1/journals?page=1&limit=50",
+    )
+    assert payload is not None
+    assert payload["title"] == "Nature Machine Intelligence"
+    assert payload["publisher"] == "Springer Nature"
+    assert payload["issn_print"] == "2522-5839"
+    assert payload["jcr_quartile"] == "Q1"
+    assert payload["metric_year"] == 2025
+    assert payload["indexed_wos"] is True
+    assert payload["source_external_id"] == "WOS-0001"
+    assert payload["metrics"][0]["metric_name"] == "Journal Impact Factor"
+
+
+def test_bootstrap_seed_connector_returns_empty_payload_when_seed_file_missing(monkeypatch, tmp_path) -> None:
+    original_seed_path = settings.academic_seed_path
+    monkeypatch.setattr(settings, "academic_seed_path", str(tmp_path / "missing-seed.json"))
+    try:
+        connector = BootstrapSeedConnector()
+        source = CrawlSource(slug="bootstrap-academic-seed", name="Bootstrap", source_type="bootstrap_json")
+        payload = connector.fetch(source)
+    finally:
+        monkeypatch.setattr(settings, "academic_seed_path", original_seed_path)
+    assert payload == {"venues": [], "articles": [], "cfp_events": []}
+
+
+def test_clarivate_connector_requires_supported_manual_import_files(monkeypatch, tmp_path) -> None:
+    import_dir = tmp_path / "clarivate"
+    import_dir.mkdir(parents=True, exist_ok=True)
+    (import_dir / "mjl.xls").write_bytes(b"legacy-binary-xls")
+    original_import_dir = settings.clarivate_manual_import_dir
+    monkeypatch.setattr(settings, "clarivate_manual_import_dir", str(import_dir))
+    try:
+        source = SourceConfig(
+            id="clarivate_mjl",
+            name="Clarivate MJL",
+            base_url="https://mjl.clarivate.com/collection-list-downloads",
+            source_type="journal_index",
+            access_mode="manual_import",
+            crawl_strategy="manual_csv_xlsx_import",
+            allowed_domains=["mjl.clarivate.com"],
+            rate_limit=1,
+            enabled=True,
+            priority=1,
+            parser="clarivate",
+            expected_entities=["venue"],
+        )
+        result = ClarivateConnector(source).run()
+    finally:
+        monkeypatch.setattr(settings, "clarivate_manual_import_dir", original_import_dir)
+    assert result.status == "manual_import"
+    assert any("unsupported" in note.lower() for note in result.notes)
+
+
+def test_clarivate_connector_reads_staged_csv(monkeypatch, tmp_path) -> None:
+    import_dir = tmp_path / "clarivate"
+    import_dir.mkdir(parents=True, exist_ok=True)
+    (import_dir / "clarivate_mjl.csv").write_bytes((FIXTURES / "clarivate_mjl.csv").read_bytes())
+    original_import_dir = settings.clarivate_manual_import_dir
+    monkeypatch.setattr(settings, "clarivate_manual_import_dir", str(import_dir))
+    try:
+        source = SourceConfig(
+            id="clarivate_mjl",
+            name="Clarivate MJL",
+            base_url="https://mjl.clarivate.com/collection-list-downloads",
+            source_type="journal_index",
+            access_mode="manual_import",
+            crawl_strategy="manual_csv_xlsx_import",
+            allowed_domains=["mjl.clarivate.com"],
+            rate_limit=1,
+            enabled=True,
+            priority=1,
+            parser="clarivate",
+            expected_entities=["venue"],
+        )
+        result = ClarivateConnector(source, crawl_run_id="clarivate-test-run").run()
+    finally:
+        monkeypatch.setattr(settings, "clarivate_manual_import_dir", original_import_dir)
+    assert result.status == "succeeded"
+    assert len(result.records) == 2
+    assert result.records[0].payload["title"] == "Nature Machine Intelligence"
+    assert result.snapshots[0].parser_version == "clarivate-manual-import-v2"
+
+
+def test_clarivate_connector_uses_official_api_when_key_present(monkeypatch, tmp_path) -> None:
+    original_api_key = settings.clarivate_api_key
+    original_import_dir = settings.clarivate_manual_import_dir
+    monkeypatch.setattr(settings, "clarivate_api_key", "test-api-key")
+    monkeypatch.setattr(settings, "clarivate_manual_import_dir", str(tmp_path / "clarivate"))
+
+    source = SourceConfig(
+        id="clarivate_mjl",
+        name="Clarivate MJL",
+        base_url="https://mjl.clarivate.com/collection-list-downloads",
+        source_type="journal_index",
+        access_mode="manual_import",
+        crawl_strategy="manual_csv_xlsx_import",
+        allowed_domains=["mjl.clarivate.com"],
+        rate_limit=1,
+        enabled=True,
+        priority=1,
+        parser="clarivate",
+        expected_entities=["venue"],
+    )
+    connector = ClarivateConnector(source, limit=2, crawl_run_id="clarivate-api-run")
+
+    def fake_fetch_api_page(*, page: int, page_limit: int):
+        payload = {
+            "metadata": {"total": 2, "page": page, "limit": 1},
+            "hits": [
+                {
+                    "id": f"WOS-{page}",
+                    "self": f"https://api.clarivate.com/apis/wos-journals/v1/journals/WOS-{page}",
+                    "name": f"Clarivate Journal {page}",
+                    "issn": f"1234-56{page}{page}",
+                    "publisher": {"name": "Clarivate Publisher", "country_region": "United States"},
+                    "categories": {"value": [{"name": "Computer Science"}]},
+                }
+            ],
+        }
+        snapshot = SnapshotInfo(
+            source_id="clarivate_mjl",
+            url=f"https://api.clarivate.com/apis/wos-journals/v1/journals?page={page}&limit={page_limit}",
+            fetched_at="2026-06-12T00:00:00+00:00",
+            status_code=200,
+            content_type="application/json",
+            content_length=256,
+            content_hash=f"clarivate-page-{page}",
+            parser_version="clarivate-official-api-v1",
+            crawl_run_id="clarivate-api-run",
+        )
+        return payload, snapshot
+
+    monkeypatch.setattr(connector, "_fetch_api_page", fake_fetch_api_page)
+    try:
+        result = connector.run()
+    finally:
+        monkeypatch.setattr(settings, "clarivate_api_key", original_api_key)
+        monkeypatch.setattr(settings, "clarivate_manual_import_dir", original_import_dir)
+
+    assert result.status == "succeeded"
+    assert len(result.records) == 2
+    assert result.records[0].payload["indexed_wos"] is True
+    assert result.records[0].payload["source_name"] == "Clarivate Web of Science Journals API"
+    assert any("official Journals API" in note for note in result.notes)
 
 
 def test_read_xlsx_rows_preserves_sparse_column_alignment() -> None:
@@ -365,9 +540,11 @@ class LiveCrawlIngestionTests(BackendTestCase):
         venue_id = self._ingest_venue(source)
         with self.db() as db:
             venue = db.query(Venue).filter(Venue.id == venue_id).one()
+            assert venue.source_url == "https://www.elsevier.com/list.csv"
             document, metadata = academic_index_service.build_venue_document(venue)
             assert "Source: scopus" in document
             assert metadata["source_ids"] == "scopus"
+            assert metadata["source_url"] == "https://www.elsevier.com/list.csv"
             assert "SJR" in metadata["metric_names"]
 
     def _ingest_venue(self, source: CrawlSource) -> str:

@@ -48,8 +48,9 @@ def format_citation_summary(
     unverified_no_doi = _count(stats, "unverified_no_doi")
     no_match_found = _count(stats, "no_match_found")
     parse_failed = _count(stats, "parse_failed")
-    verified = valid + doi_verified + identifier_verified + metadata_verified + likely_match
-    partial = _count(stats, "partial_match") + possible_match + ambiguous_match
+    verified = doi_verified + identifier_verified + metadata_verified
+    clear_match = valid + verified
+    partial = _count(stats, "partial_match") + likely_match + possible_match + ambiguous_match
     hallucinated = _count(stats, "hallucinated") + no_match_found
     unverified = _count(stats, "unverified") + unverified_no_doi + parse_failed
     doi_not_found = _count(stats, "doi_not_found")
@@ -61,27 +62,40 @@ def format_citation_summary(
     metadata_suffix = ""
     if metadata_match_total > 0:
         metadata_suffix = (
-            f" Trong đó có {metadata_match_total} mục không kèm DOI được xác minh qua metadata "
+            f" Trong đó có {metadata_match_total} mục không kèm DOI được kiểm tra thêm qua metadata "
             f"(METADATA_VERIFIED={metadata_verified}, LIKELY={likely_match}, "
             f"POSSIBLE={possible_match}, AMBIGUOUS={ambiguous_match}, "
             f"NO_MATCH={no_match_found}, PARSE_FAILED={parse_failed})."
         )
 
-    if doi_not_found > 0 and verified == 0 and partial == 0 and identifier_not_found == 0:
+    if doi_not_found > 0 and clear_match == 0 and partial == 0 and identifier_not_found == 0:
         return (
             "Mình đã thử xác minh DOI bạn cung cấp, nhưng hiện chưa tìm thấy bản ghi học thuật khớp hoàn toàn. "
             "Mình không dùng kết quả gần giống để thay thế cho DOI này, vì DOI là định danh cần khớp chính xác. "
             "Bạn nên đối chiếu lại DOI trên trang DOI, trang nhà xuất bản, hoặc gửi thêm tiêu đề bài báo để kiểm tra tiếp."
         )
 
-    if identifier_not_found > 0 and verified == 0 and partial == 0 and doi_not_found == 0:
+    if identifier_not_found > 0 and clear_match == 0 and partial == 0 and doi_not_found == 0:
         return (
             "Mình đã thử xác minh exact identifier bạn cung cấp, nhưng hiện chưa tìm thấy bản ghi học thuật khớp hoàn toàn. "
             "Mình không dùng kết quả gần giống để thay thế cho định danh này. "
             "Bạn nên đối chiếu lại PMID, PMCID, OpenAlex ID hoặc gửi thêm tiêu đề bài báo để kiểm tra tiếp."
         )
 
-    if verified > 0 and partial == 0 and hallucinated == 0 and unverified == 0 and doi_not_found == 0:
+    if (
+        clear_match == total
+        and clear_match > 0
+        and partial == 0
+        and hallucinated == 0
+        and unverified == 0
+        and doi_not_found == 0
+        and identifier_not_found == 0
+    ):
+        if total > 1:
+            return (
+                f"Mình đã kiểm tra {total} mục trích dẫn và cả {clear_match} mục đều khớp rõ ràng với bản ghi học thuật. "
+                "Bạn vẫn nên giữ DOI hoặc đường dẫn nhà xuất bản trong danh mục tài liệu để người đọc dễ đối chiếu."
+            )
         noun = "DOI" if doi_verified > 0 and valid == 0 and identifier_verified == 0 else (
             "định danh học thuật"
             if identifier_verified > 0 and doi_verified == 0 and valid == 0
@@ -92,7 +106,7 @@ def format_citation_summary(
             "Bạn vẫn nên giữ DOI hoặc đường dẫn nhà xuất bản trong danh mục tài liệu để người đọc dễ đối chiếu."
         )
 
-    if partial > 0 and verified == 0 and hallucinated == 0:
+    if partial > 0 and clear_match == 0 and hallucinated == 0:
         return (
             "Mình đã kiểm tra trích dẫn này. Kết quả hiện chỉ khớp một phần với dữ liệu học thuật đang có, "
             "nên chưa thể xác nhận hoàn toàn. Bạn nên đối chiếu thêm DOI, trang nhà xuất bản, tên tác giả hoặc năm xuất bản trước khi sử dụng."
