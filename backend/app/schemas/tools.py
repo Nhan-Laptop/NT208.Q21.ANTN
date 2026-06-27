@@ -1,11 +1,18 @@
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class VerifyCitationRequest(BaseModel):
     session_id: str
     text: str = Field(min_length=5)
+
+
+class CitationBatchVerifyRequest(BaseModel):
+    session_id: str | None = None
+    text: str = Field(min_length=5)
+    include_ai_summary: bool = False
+    max_items: int | None = Field(default=None, ge=1)
 
 
 class CitationItem(BaseModel):
@@ -44,11 +51,49 @@ class CitationItem(BaseModel):
     formatted_apa: str | None = None
     formatted_bibtex: str | None = None
     csl_json: dict[str, Any] | None = None
+    resolved_url: str | None = None
+    evidence_urls: list[str] = []
+    resolver_chain: list[str] = []
+    candidate_gap: float | None = None
+    matched_by: str | None = None
+    discovered_from: str | None = None
+    source_domain: str | None = None
+    web_search_query: str | None = None
+    web_search_provider: str | None = None
+    web_search_skipped_reason: str | None = None
+    source_type: str | None = None
+    source_number: int | None = None
+
+
+class CitationBatchResultItem(CitationItem):
+    index: int
+    raw_citation: str
+    ux_group: str
+    short_issue: str | None = None
+    suggested_action: str | None = None
+
+
+class CitationBatchSummary(BaseModel):
+    total_count: int = 0
+    verified_count: int = 0
+    review_count: int = 0
+    problem_count: int = 0
+    temporary_issue_count: int = 0
+    status_counts: dict[str, int] = {}
+    summary_text: str | None = None
+    default_summary_text: str | None = None
 
 
 class CitationReportResponse(BaseModel):
     type: str = "citation_report"
     data: list[CitationItem]
+    text: str
+
+
+class CitationBatchVerifyResponse(BaseModel):
+    type: str = "citation_report"
+    summary: CitationBatchSummary
+    results: list[CitationBatchResultItem]
     text: str
 
 
@@ -72,7 +117,15 @@ class JournalMatchRequest(BaseModel):
         return data
 
 
+class JournalLink(BaseModel):
+    label: str
+    url: str
+    type: str
+
+
 class JournalItem(BaseModel):
+    id: str | None = None
+    name: str | None = None
     journal: str
     venue_id: str | None = None
     venue_type: str | None = None
@@ -86,6 +139,7 @@ class JournalItem(BaseModel):
     publisher: str | None = None
     open_access: bool = False
     issn: str | None = None
+    eissn: str | None = None
     h_index: int | None = None
     review_time_weeks: int | None = None
     acceptance_rate: float | None = None
@@ -98,6 +152,8 @@ class JournalItem(BaseModel):
     warning_flags: list[str] = []
     scope_fit: str | None = None
     evidence_count: int = 0
+    links: list[JournalLink] = []
+    link_warning: str | None = None
 
 
 class JournalMatchResponse(BaseModel):
@@ -159,10 +215,21 @@ class PdfSummaryResponse(BaseModel):
 class AIWritingDetectRequest(BaseModel):
     session_id: str
     text: str = Field(min_length=50)
+    mode: str = "deep"
+    use_custom_rules: bool = True
+    rule_ids: list[str] | None = None
+    include_explanation: bool = True
 
 
 class AIWritingDetectResult(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     score: float
+    model_score: float | None = None
+    roberta_score: float | None = None
+    custom_rule_score: float = 0.0
+    final_score: float | None = None
+    risk_level: str | None = None
     verdict: str
     confidence: str
     flags: list[str]
@@ -175,7 +242,12 @@ class AIWritingDetectResult(BaseModel):
     fallback_reason: str | None = None
     detectors_used: list[str] = []
     rule_source: str = "default_app_rules"
-    matched_rules: list[str] = []
+    matched_rules: list[dict[str, Any] | str] = []
+    evidence: list[dict[str, Any]] = []
+    explanation: str | None = None
+    suggestions: list[str] = []
+    disclaimer: str | None = None
+    warnings: list[str] = []
 
 
 class AIWritingDetectResponse(BaseModel):

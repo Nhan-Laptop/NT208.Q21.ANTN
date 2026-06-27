@@ -20,6 +20,7 @@ class Venue(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     issn_print: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     issn_electronic: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     homepage_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     aims_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
     country: Mapped[str | None] = mapped_column(String(128), nullable=True)
     language: Mapped[str | None] = mapped_column(String(64), nullable=True)

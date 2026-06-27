@@ -241,7 +241,7 @@ class GeneralAcademicDiscussionRoutingTest(unittest.TestCase):
         self.assertEqual(response.assistant_message.message_type, "journal_list")
 
     def test_academic_db_query_unchanged(self) -> None:
-        """'Bài trong cơ sở dữ liệu' queries still go through academic_query_service."""
+        """'Bài trong cơ sở dữ liệu' queries now return the academic lookup fallback payload."""
         query = "Hãy cho tôi biết các bài trong cơ sở dữ liệu này về M-theory holographic duality."
         with self.env.session() as db:
             response = create_completion(
@@ -255,7 +255,10 @@ class GeneralAcademicDiscussionRoutingTest(unittest.TestCase):
 
         assistant = response.assistant_message
         self.assertEqual(assistant.message_type, "text")
-        self.assertIn("chưa tìm thấy bài hoặc bản ghi học thuật liên quan", assistant.content or "")
+        self.assertIsInstance(assistant.tool_results, dict)
+        self.assertEqual(assistant.tool_results.get("type"), "academic_lookup")
+        self.assertEqual(assistant.tool_results.get("status"), "not_found")
+        self.assertIn("nguồn học thuật bên ngoài", (assistant.content or "").lower())
 
 
 class GeneralAcademicPromptTest(unittest.TestCase):

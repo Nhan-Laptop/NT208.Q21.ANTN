@@ -7,16 +7,18 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import create_engine, pool
 
-from app.core.config import settings
+from app.core.config import normalize_database_url, settings
 from app.core.database import Base
 from app import models  # noqa: F401
 
 config = context.config
 configured_url = config.get_main_option("sqlalchemy.url")
 if settings.alembic_database_url:
-    config.set_main_option("sqlalchemy.url", settings.alembic_database_url)
+    config.set_main_option("sqlalchemy.url", normalize_database_url(settings.alembic_database_url))
 elif not configured_url:
-    config.set_main_option("sqlalchemy.url", settings.database_url)
+    config.set_main_option("sqlalchemy.url", normalize_database_url(settings.database_url))
+else:
+    config.set_main_option("sqlalchemy.url", normalize_database_url(configured_url))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

@@ -14,6 +14,7 @@ import {
   MessageSquare,
 } from "lucide-react";
 import Link from "next/link";
+import React from "react";
 import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 

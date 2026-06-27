@@ -72,14 +72,17 @@ class BackendTestCase(unittest.TestCase):
         self._orig_chroma_db_path = settings.chroma_db_path
         self._orig_local_storage_path = settings.local_storage_path
         self._orig_academic_seed_path = settings.academic_seed_path
+        self._orig_academic_embedding_hash_fallback = settings.academic_embedding_hash_fallback
         object.__setattr__(settings, "database_url", f"sqlite:///{self.db_path}")
         object.__setattr__(settings, "chroma_db_path", str(self.chroma_path))
         object.__setattr__(settings, "local_storage_path", str(self.storage_path))
         object.__setattr__(settings, "academic_seed_path", str(BACKEND_ROOT / "tests" / "fixtures" / "academic_seed.json"))
+        object.__setattr__(settings, "academic_embedding_hash_fallback", True)
         self.addCleanup(object.__setattr__, settings, "database_url", self._orig_database_url)
         self.addCleanup(object.__setattr__, settings, "chroma_db_path", self._orig_chroma_db_path)
         self.addCleanup(object.__setattr__, settings, "local_storage_path", self._orig_local_storage_path)
         self.addCleanup(object.__setattr__, settings, "academic_seed_path", self._orig_academic_seed_path)
+        self.addCleanup(object.__setattr__, settings, "academic_embedding_hash_fallback", self._orig_academic_embedding_hash_fallback)
 
         try:
             from app.services.ingestion.index_service import academic_index_service

@@ -26,6 +26,19 @@ from app.schemas.academic import (
     VenueSearchItem,
     VenueSearchResponse,
 )
+from app.schemas.ai_detection import (
+    AIDetectionAnalyzeRequest,
+    AIDetectionAnalyzeResponse,
+    AIDetectionMatchedRule,
+    AIDetectionRuleCompileRequest,
+    AIDetectionRuleCompileResponse,
+    AIDetectionRuleCreateRequest,
+    AIDetectionRuleListResponse,
+    AIDetectionRuleOut,
+    AIDetectionRuleUpdateRequest,
+    AIDetectionWrappedAnalyzeResponse,
+    CompiledAIDetectionRule,
+)
 from app.schemas.auth import PromoteUserRequest, Token, UserCreate, UserOut
 from app.schemas.chat import (
     ChatCompletionRequest,
@@ -88,6 +101,16 @@ __all__ = [
     "SessionOut",
     "SessionUpdate",
     # Tools
+    "AIDetectionAnalyzeRequest",
+    "AIDetectionAnalyzeResponse",
+    "AIDetectionMatchedRule",
+    "AIDetectionRuleCompileRequest",
+    "AIDetectionRuleCompileResponse",
+    "AIDetectionRuleCreateRequest",
+    "AIDetectionRuleListResponse",
+    "AIDetectionRuleOut",
+    "AIDetectionRuleUpdateRequest",
+    "AIDetectionWrappedAnalyzeResponse",
     "AIWritingDetectRequest",
     "AIWritingDetectResponse",
     "AIWritingDetectResult",
@@ -102,6 +125,7 @@ __all__ = [
     "RetractionScanRequest",
     "RetractionScanResponse",
     "VerifyCitationRequest",
+    "CompiledAIDetectionRule",
     # Upload
     "FileAttachmentOut",
     "FileUploadResponse",

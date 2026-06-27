@@ -1,3 +1,4 @@
+from app.models.ai_detection_rule import AIDetectionRule, RuleScope, RuleSeverity, RuleType
 from app.models.article import Article
 from app.models.article_author import ArticleAuthor
 from app.models.article_keyword import ArticleKeyword
@@ -22,6 +23,7 @@ from app.models.venue_policy import VenuePolicy
 from app.models.venue_subject import VenueSubject
 
 __all__ = [
+    "AIDetectionRule",
     "Article",
     "ArticleAuthor",
     "ArticleKeyword",
@@ -38,6 +40,9 @@ __all__ = [
     "CrawlState",
     "CrawlJob",
     "RawSourceSnapshot",
+    "RuleScope",
+    "RuleSeverity",
+    "RuleType",
     "Venue",
     "VenueAlias",
     "VenueMetric",

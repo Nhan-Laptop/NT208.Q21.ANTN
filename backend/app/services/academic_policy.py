@@ -117,6 +117,20 @@ QUY TẮC BẮT BUỘC:
 - Phong cách chuyên nghiệp, rõ ràng, ngắn gọn, thân thiện.
 """
 
+AIRA_RESOLVED_RECORD_FOLLOWUP_PROMPT = """Bạn là AIRA, Academic Integrity & Research Assistant.
+
+Chế độ hiện tại: follow-up trên một bản ghi học thuật đã được resolve trước đó.
+Bạn chỉ được dựa trên metadata/abstract/source note đã được cung cấp trong context hiện tại.
+
+QUY TẮC BẮT BUỘC:
+- KHÔNG bịa DOI, citation, journal metric, ranking, hoặc chi tiết học thuật không có trong record context.
+- Nếu cần suy luận ngắn từ title/abstract, nói rõ đó là nhận xét dựa trên metadata đã resolve, không phải xác minh mới.
+- KHÔNG gọi tool mới trong lượt này.
+- Nếu context thiếu dữ liệu để kết luận, nói rõ phần nào chưa có trong record đã resolve.
+- Trả lời bằng tiếng Việt nếu người dùng hỏi tiếng Việt.
+- Phong cách chuyên nghiệp, ngắn gọn, dễ kiểm chứng.
+"""
+
 # Backward-compat alias
 AIRA_SYSTEM_PROMPT = AIRA_CORPUS_GROUNDED_PROMPT
 
@@ -219,12 +233,27 @@ def format_journal_match_summary(
             "Hãy bổ sung thêm abstract, keywords, hoặc lĩnh vực nghiên cứu để mình thử lại."
         )
 
-    if diagnostics.get("embedding_model") == "hash-fallback":
+    data_sources_used = diagnostics.get("data_sources_used") or []
+    if diagnostics.get("embedding_model") == "hash-fallback" and "chroma" in data_sources_used:
         return (
             "Mình đã tạo một danh sách gợi ý journal từ dữ liệu học thuật hiện có, có dùng bài báo liên quan làm evidence phụ. "
             "CẢNH BÁO: Embedding đang chạy ở chế độ fallback (hash-based) vì mô hình SPECTER2 chưa khả dụng. "
             "Kết quả gợi ý CÓ THỂ KHÔNG CHÍNH XÁC về mặt ngữ nghĩa. "
             "Vui lòng cài đặt mô hình SPECTER2 hoặc cấu hình HF_TOKEN để có chất lượng matching tốt nhất."
+        )
+
+    if diagnostics.get("metadata_only_match"):
+        confidence = str(diagnostics.get("confidence") or "low").lower()
+        confidence_text = {
+            "high": "cao",
+            "medium": "trung bình",
+            "low": "thấp",
+        }.get(confidence, confidence)
+        return (
+            "Mình đã tạo danh sách gợi ý journal từ metadata venue nội bộ "
+            f"(độ tin cậy {confidence_text}). "
+            "Nếu hệ thống có article/policy liên quan thì chúng chỉ được dùng làm evidence bổ sung, "
+            "không phải điều kiện bắt buộc để đưa ra gợi ý."
         )
 
     return (

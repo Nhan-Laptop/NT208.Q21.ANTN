@@ -56,6 +56,25 @@ class AcademicVerificationFlowTest(unittest.TestCase):
         self.assertIn("Title matches strongly", summary)
         self.assertIn("verified one", summary)
 
+    def test_likely_match_summary_is_review_needed_not_verified(self) -> None:
+        summary = format_citation_summary(
+            {
+                "total": 1,
+                "doi_verified": 0,
+                "identifier_verified": 0,
+                "metadata_verified": 0,
+                "likely_match": 1,
+                "possible_match": 0,
+                "ambiguous_match": 0,
+                "no_match_found": 0,
+                "parse_failed": 0,
+                "unverified_no_doi": 0,
+            }
+        )
+
+        self.assertIn("chỉ khớp một phần", summary)
+        self.assertNotIn("khớp rõ ràng", summary)
+
     def test_exact_doi_not_found_does_not_fall_back_to_fuzzy_partial_match(self) -> None:
         checker = CitationChecker()
 

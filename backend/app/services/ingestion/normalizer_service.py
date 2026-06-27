@@ -60,6 +60,7 @@ class NormalizerService:
             "issn_print": self.normalize_text(raw.get("issn_print")),
             "issn_electronic": self.normalize_text(raw.get("issn_electronic")),
             "homepage_url": self.normalize_text(raw.get("homepage_url") or raw.get("url")),
+            "source_url": self.normalize_text(raw.get("source_url")),
             "aims_scope": self.normalize_text(raw.get("aims_scope") or raw.get("scope")),
             "country": self.normalize_text(raw.get("country")),
             "language": self.normalize_text(raw.get("language")),

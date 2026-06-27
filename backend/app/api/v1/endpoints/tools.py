@@ -14,6 +14,10 @@ from app.schemas.tools import (
     AIWritingDetectRequest,
     AIWritingDetectResponse,
     AIWritingDetectResult,
+    CitationBatchResultItem,
+    CitationBatchSummary,
+    CitationBatchVerifyRequest,
+    CitationBatchVerifyResponse,
     CitationItem,
     CitationReportResponse,
     GrammarCheckRequest,
@@ -31,16 +35,13 @@ from app.schemas.tools import (
     VerifyCitationRequest,
 )
 from app.services.chat_service import chat_service
+from app.services.ai_detection_rule_service import get_runtime_rule_payloads
+from app.services.ai_detection_service import ai_detection_service
 from app.services.file_service import file_service
-from app.services.academic_verification_formatter import (
-    format_citation_summary,
-    format_retraction_summary,
-)
+from app.services.academic_verification_formatter import format_retraction_summary
 from app.services.llm_service import gemini_service
-from app.services.tools.ai_writing_detector import ai_writing_detector
-from app.services.ai_detection_rules import get_user_ai_detection_rule_phrases
+from app.services.tools.citation_batch_service import citation_batch_service
 from app.services.tools.grammar_checker import grammar_checker
-from app.services.tools.citation_checker import citation_checker
 from app.services.tools.retraction_scan import retraction_scanner, scan_verified_retractions
 
 try:
@@ -54,34 +55,112 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/tools", tags=["tools"])
 
 
-@router.post("/verify-citation", response_model=CitationReportResponse)
+def _persist_citation_report(
+    *,
+    db: Session,
+    current_user: User,
+    session_id: str | None,
+    user_input: str,
+    summary: str,
+    tool_payload: dict[str, object],
+) -> None:
+    if not session_id:
+        return
+
+    chat_service.persist_tool_interaction(
+        db=db,
+        current_user=current_user,
+        session_id=session_id,
+        user_input=user_input,
+        message_type=MessageType.CITATION_REPORT,
+        summary=summary,
+        tool_payload=tool_payload,
+    )
+
+
+@router.post(
+    "/verify-citations",
+    response_model=CitationBatchVerifyResponse,
+    summary="Internal batch citation verification API backing chat citation verification",
+)
+def verify_citations(
+    payload: CitationBatchVerifyRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
+) -> CitationBatchVerifyResponse:
+    try:
+        report = citation_batch_service.verify_text(
+            payload.text,
+            include_ai_summary=payload.include_ai_summary,
+            max_items=payload.max_items,
+        )
+        summary = CitationBatchSummary(**report["summary"])
+        results = [CitationBatchResultItem(**item) for item in report["results"]]
+
+        tool_payload = {
+            "type": "citation_report",
+            "data": [item.model_dump() for item in results],
+            "results": [item.model_dump() for item in results],
+            "summary": summary.model_dump(),
+            "text": report["text"],
+            "statistics": report["statistics"],
+            "no_citation_found": report["no_citation_found"],
+        }
+        _persist_citation_report(
+            db=db,
+            current_user=current_user,
+            session_id=payload.session_id,
+            user_input=payload.text,
+            summary=report["text"],
+            tool_payload=tool_payload,
+        )
+
+        return CitationBatchVerifyResponse(
+            summary=summary,
+            results=results,
+            text=report["text"],
+        )
+    except Exception:
+        logger.exception("verify_citations endpoint failed")
+        raise HTTPException(
+            status_code=400,
+            detail="Mình chưa xác minh được danh sách trích dẫn này. Bạn có thể thử lại hoặc gửi DOI, PMID, PMCID, OpenAlex ID hoặc các dòng reference đầy đủ hơn.",
+        )
+
+
+@router.post(
+    "/verify-citation",
+    response_model=CitationReportResponse,
+    summary="Legacy compatibility citation verification API backing chat citation verification",
+)
 def verify_citation(
     payload: VerifyCitationRequest,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
 ) -> CitationReportResponse:
     try:
-        raw_results = citation_checker.verify(payload.text)
-        data = [CitationItem(**asdict(item)) for item in raw_results]
-        stats = citation_checker.get_statistics(raw_results)
-        summary = format_citation_summary(
-            stats,
-            no_citation_found=bool(stats.get("no_citation_found", False)),
-            results=raw_results,
-        )
-
-        chat_service.persist_tool_interaction(
+        report = citation_batch_service.verify_text(payload.text)
+        data = [CitationItem(**item) for item in report["results"]]
+        tool_payload = {
+            "type": "citation_report",
+            "data": [item.model_dump() for item in data],
+            "results": report["results"],
+            "summary": report["summary"],
+            "text": report["text"],
+            "statistics": report["statistics"],
+            "no_citation_found": report["no_citation_found"],
+        }
+        _persist_citation_report(
             db=db,
             current_user=current_user,
             session_id=payload.session_id,
             user_input=payload.text,
-            message_type=MessageType.CITATION_REPORT,
-            summary=summary,
-            tool_payload={"type": "citation_report", "data": [x.model_dump() for x in data]},
+            summary=report["text"],
+            tool_payload=tool_payload,
         )
 
-        return CitationReportResponse(data=data, text=summary)
-    except Exception as exc:
+        return CitationReportResponse(data=data, text=report["text"])
+    except Exception:
         logger.exception("verify_citation endpoint failed")
         raise HTTPException(
             status_code=400,
@@ -226,46 +305,21 @@ def detect_ai_writing(
     current_user: Annotated[User, Depends(AccessGateway.require_permissions(Permission.TOOL_EXECUTE))],
 ) -> AIWritingDetectResponse:
     try:
-        result = ai_writing_detector.analyze(
+        runtime_rules = get_runtime_rule_payloads(
+            db,
+            current_user,
+            use_custom_rules=payload.use_custom_rules,
+            rule_ids=payload.rule_ids,
+        )
+        result = ai_detection_service.analyze_text(
             payload.text,
-            custom_rule_phrases=get_user_ai_detection_rule_phrases(current_user),
+            mode=payload.mode,
+            use_custom_rules=payload.use_custom_rules,
+            runtime_rule_payloads=runtime_rules,
+            include_explanation=payload.include_explanation,
         )
-
-        verdict_labels = {
-            "LIKELY_HUMAN": "✅ Văn bản có vẻ được viết bởi con người",
-            "POSSIBLY_HUMAN": "🤔 Văn bản có thể được viết bởi con người",
-            "UNCERTAIN": "🤔 Văn bản chưa rõ ràng, cần thêm ngữ cảnh để đánh giá",
-            "POSSIBLY_AI": "⚠️ Văn bản có dấu hiệu được tạo bởi AI",
-            "LIKELY_AI": "🚨 Văn bản rất có thể được tạo bởi AI",
-        }
-        prefix = verdict_labels.get(result.verdict, "🤔 Văn bản chưa rõ ràng")
-        summary = f"{prefix} (score: {result.score:.1%}). Độ tin cậy: {result.confidence}."
-
-        if result.flags:
-            summary += f" Các dấu hiệu: {'; '.join(result.flags[:3])}."
-        if result.rule_source == "user_custom_rules":
-            summary += " Rule source: custom user rules."
-        if result.detectors_used:
-            summary += f" Detectors: {', '.join(result.detectors_used)}."
-        if result.skipped_detectors:
-            summary += f" Skipped: {', '.join(result.skipped_detectors)}."
-
-        data = AIWritingDetectResult(
-            score=result.score,
-            verdict=result.verdict,
-            confidence=result.confidence,
-            flags=result.flags,
-            details=result.details,
-            method=result.method,
-            ml_score=result.ml_score,
-            rule_score=result.rule_score,
-            specter2_score=result.specter2_score,
-            skipped_detectors=result.skipped_detectors,
-            fallback_reason=result.fallback_reason,
-            detectors_used=result.detectors_used,
-            rule_source=result.rule_source,
-            matched_rules=result.matched_rules,
-        )
+        summary = ai_detection_service.build_summary_text(result)
+        data = AIWritingDetectResult.model_validate(result.model_dump(mode="json"))
 
         chat_service.persist_tool_interaction(
             db=db,
@@ -274,7 +328,7 @@ def detect_ai_writing(
             user_input=payload.text[:500] + ("..." if len(payload.text) > 500 else ""),
             message_type=MessageType.AI_WRITING_DETECTION,
             summary=summary,
-            tool_payload={"type": "ai_writing_detection", "data": data.model_dump()},
+            tool_payload=ai_detection_service.build_tool_payload(result),
         )
 
         return AIWritingDetectResponse(data=data, text=summary)

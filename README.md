@@ -32,6 +32,7 @@
 - [Installation & Local Setup](#-installation--local-setup)
 - [Environment Variables](#-environment-variables)
 - [Running the Application](#-running-the-application)
+- [Temporary Public Demo with ngrok](#-temporary-public-demo-with-ngrok)
 - [Project Structure](#-project-structure)
 - [API Endpoints](#-api-endpoints)
 - [ML Models & AI Pipeline](#-ml-models--ai-pipeline)
@@ -63,7 +64,7 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 | Feature | Description | Powered By |
 |---------|-------------|------------|
 | 💬 **General Q&A** | Conversational AI for research questions with backend context protection (4-message router window, input truncation, pass-by-reference for long/file text) | Groq (LLaMA 3.1) |
-| 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI). DOI inputs → exact Crossref/OpenAlex lookup. References **without DOI** → metadata matching: Crossref + OpenAlex, with optional Semantic Scholar fallback when no candidates exist or best score is below threshold. Matched no-DOI references can return source-backed completion metadata plus APA-like text, BibTeX, and CSL JSON. Confidence-based, **not absolute verification**. Zero-hallucination — never synthesize DOI/metadata; API failures degrade gracefully. | OpenAlex + Crossref + Semantic Scholar |
+| 📝 **Citation Verification** | Extract citations (APA, IEEE, Vancouver, DOI, PMID, PMCID, OpenAlex ID). DOI / exact identifiers → exact Crossref/OpenAlex lookup plus metadata-consistency comparison when the user also provides title/authors/year. References **without DOI** → metadata matching with field-level evidence, source diagnostics, Crossref + OpenAlex search, and optional Semantic Scholar fallback when no candidates exist, confidence is low, or source metadata is incomplete/conflicting. Only `METADATA_VERIFIED` no-DOI matches return source-backed completion metadata plus APA-like text, BibTeX, and CSL JSON. Confidence-based, **not absolute verification**. Never fabricate DOI or unsupported scholarly fields; API failures degrade gracefully. | OpenAlex + Crossref + Semantic Scholar |
 | 📚 **Journal Matching** | Paste your abstract → get top-5 journal recommendations ranked by ChromaDB semantic search + domain match | ChromaDB + SPECTER2 (`allenai/specter2_base`) |
 | 🔍 **Retraction Scanning** | Check DOIs against retraction databases → multi-source risk assessment (NONE → CRITICAL) | Crossref + OpenAlex + PubPeer |
 | 🤖 **AI Writing Detection** | Ensemble estimate: 70% RoBERTa ML classifier + 30% rule-based heuristics (7 linguistic features) → 5-level probabilistic verdict scale (not definitive proof) | RoBERTa + Custom Rules |
@@ -75,14 +76,21 @@ AIRA combines **6 research tools** with a conversational AI interface, featuring
 
 ### Citation Metadata Completion
 
-For no-DOI references with a selected source candidate, CitationChecker now returns:
+Xác minh trích dẫn trả về evidence giải thích được cho cả exact-identifier và nhánh không có DOI:
 
-- `completed_metadata`: only fields present in the selected Crossref/OpenAlex/Semantic Scholar candidate.
+- `reason`: short natural-language explanation of why the status was assigned.
+- `field_evidence`: per-field comparison for title, authors, year, venue, volume/pages, DOI, or exact identifier.
+- `source_diagnostics`: per-source status (`matched`, `no_match`, `timeout`, `http_error`, `disabled`, `skipped`, `error`).
+- `metadata_consistency`: exact-identifier consistency result (`consistent`, `partial_mismatch`, `mismatch`, `not_provided`).
+
+For no-DOI references, only `METADATA_VERIFIED` results expose:
+
+- `completed_metadata`: source-backed candidate fields plus helper fields such as `source`, `confidence`, and inferred `type`.
 - `formatted_apa`: APA-like reference text for user review, not a claim of full APA 7 compliance.
 - `formatted_bibtex`: deterministic BibTeX using `article`, `inproceedings`, or `misc`.
 - `csl_json`: compact CSL JSON suitable for citation-manager import flows.
 
-If a candidate has no DOI, the response does not invent a DOI or DOI URL. `PARSE_FAILED` and `NO_MATCH_FOUND` results do not include completion metadata.
+If a candidate has no DOI, the response does not invent a DOI or DOI URL. `LIKELY_MATCH`, `POSSIBLE_MATCH`, `AMBIGUOUS_MATCH`, `PARSE_FAILED`, `UNVERIFIED`, and `NO_MATCH_FOUND` do not include completion/export metadata.
 
 ---
 
@@ -111,7 +119,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 │  ├─────────────────────────────────────────────────────────┤     │
 │  │  Services: ChatService │ FileService │ GroqLLMService     │     │
 │  ├─────────────────────────────────────────────────────────┤     │
-│  │  ML Tools: JournalFinder │ CitationChecker │             │     │
+│  │  ML Tools: JournalFinder │ Citation Verification │       │     │
 │  │            RetractionScanner │ AIWritingDetector │        │     │
 │  │            GrammarChecker (LanguageTool JVM)              │     │
 │  ├─────────────────────────────────────────────────────────┤     │
@@ -154,6 +162,22 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 - Retraction scan with no DOI is represented explicitly as `total_checked=0` + `no_doi_found=true` (never as fake `N/A` DOI checked).
 - AI-writing output is an estimated likelihood signal, not definitive proof.
 - Cache lifecycle is bounded by TTL + max-entry eviction to prevent unbounded memory growth.
+
+### Citation Web Fallback
+
+- AIRA does **not** expose a free-form browser or generic web-search tool to the LLM runtime.
+- Optional web search is restricted to the backend citation-verification fallback path for no-DOI references.
+- `generic_json` remains supported for backward compatibility; Tavily is an optional provider switch, not a new runtime capability.
+- Tavily can be enabled as a provider for that fallback only; it is **not** added to the function-calling tool list and cannot be invoked directly from chat.
+- Web results remain hints only. DOI candidates discovered from web search are re-verified through the existing exact DOI verification path before promotion.
+- Title/URL/snippet-only web hits never become `METADATA_VERIFIED`; they stay in the weaker review states already used by citation verification.
+
+To enable Tavily for citation fallback:
+
+- `WEB_SEARCH_PROVIDER=tavily`
+- `TAVILY_API_KEY=...`
+- Optional tuning: `TAVILY_SEARCH_DEPTH`, `TAVILY_MAX_RESULTS`, `TAVILY_TIMEOUT_SECONDS`
+- Keep `TAVILY_INCLUDE_ANSWER=false` and `TAVILY_INCLUDE_RAW_CONTENT=false` unless you have a specific backend need.
 
 ---
 
@@ -203,6 +227,7 @@ AIRA follows a **Modular Monolith + Layered Architecture** pattern:
 | **OpenAlex** | Scholarly metadata (250M+ works) | Free, no API key required |
 | **Crossref** | DOI verification, retraction metadata | Free, `update-to` field for retraction detection |
 | **Semantic Scholar** | Optional no-DOI citation fallback and metadata completion source | API key optional; configured by `SEMANTIC_SCHOLAR_ENABLED`, `SEMANTIC_SCHOLAR_API_KEY`, `SEMANTIC_SCHOLAR_FALLBACK_THRESHOLD` |
+| **Tavily** | Optional web-search provider for citation verification fallback only | Disabled by default; configured by `WEB_SEARCH_PROVIDER=tavily` and `TAVILY_API_KEY` |
 | **PubPeer** | Post-publication peer review comments | Free, community-driven early warnings |
 | **AWS S3** | Object storage (optional) | Fallback: local filesystem |
 
@@ -351,6 +376,62 @@ The frontend will be available at `http://localhost:3000`.
 2. Click **Get Started** → Register a new account.
 3. You'll be redirected to the chat interface → Try sending a message!
 4. Switch modes using the dropdown (General Q&A → Verification → Journal Match).
+
+### 🌐 Temporary Public Demo with ngrok
+
+Use this flow for short-lived demos or external testing without deploying a real server.
+
+**Supported topology**
+
+`https://<your-ngrok-domain>` → local `frontend:3000` → Next.js rewrite proxy → local `backend:8000`
+
+This is the recommended setup for this repo because:
+
+- `frontend/lib/api.ts` uses same-origin requests such as `/api/v1/...`
+- `frontend/next.config.mjs` rewrites `/api/v1/*` and `/health` to `http://localhost:8000`
+- The browser only talks to the public frontend URL, so you do not need to expose the backend separately for normal UI testing
+
+**Preconditions**
+
+- Backend is running locally on `http://localhost:8000`
+- Frontend is running locally on `http://localhost:3000`
+- `ngrok` is installed and already authenticated on your machine
+- `frontend/.env.local` keeps `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000`
+
+**Runbook**
+
+```bash
+cd frontend
+npm run dev
+```
+
+```bash
+cd backend
+source .venv/bin/activate
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+```bash
+ngrok http 3000
+```
+
+After `ngrok` starts, share only the generated public frontend URL. Do not share a separate public backend URL for this flow.
+
+**Verification checklist**
+
+1. Open the public `ngrok` URL and confirm the landing page loads.
+2. Register or log in through the shared URL.
+3. Send a normal chat message and confirm the response returns.
+4. Test citation/reference verification from the Verification flow.
+5. Test journal recommendation from the Journal Match flow.
+6. Upload a file, confirm it is processed by the app, and verify download still works through the same UI.
+
+**Cautions**
+
+- This is for demo and temporary external testing, not production deployment.
+- Free `ngrok` domains are usually ephemeral and may change every time you restart the tunnel.
+- If you later want a reserved/custom domain, the tunnel URL can be made stable without changing the frontend-only topology.
+- If you later want testers or third-party tools to call the backend directly, that is a different setup and will require backend `CORS_ALLOW_ORIGINS` updates.
 
 ---
 
@@ -609,5 +690,5 @@ This project was developed as part of the **NT208 — Web Application Developmen
 ---
 
 <p align="center">
-  From MIXI with ❤️ by the AIRA Team
+  Chúng em đã biết làm web và hiểu hệ thống web hoạt động như thế nào.
 </p>

@@ -82,14 +82,16 @@ class ChatJournalModeRegressionTest(unittest.TestCase):
                 db=db,
                 current_user=self.user,
             )
-            self.assertEqual(response.assistant_message.message_type, "journal_list")
+            self.assertEqual(response.assistant_message.message_type, "text")
             tool_results = response.assistant_message.tool_results
-            self.assertEqual(tool_results["type"], "journal_list")
+            self.assertEqual(tool_results["type"], "journal_match")
             self.assertIn("request_id", tool_results)
+            self.assertIn("confidence", tool_results)
             summary = (response.assistant_message.content or "").lower()
             self.assertTrue("gợi ý" in summary or "fallback" in summary)
-            if tool_results["data"]:
-                self.assertIn("recommendation", tool_results["data"][0]["reason"].lower())
+            if tool_results["matches"]:
+                self.assertIn("journal", tool_results["matches"][0]["journal"].lower())
+                self.assertIn("links", tool_results["matches"][0])
 
     def test_chat_journal_mode_handles_match_failure_gracefully(self) -> None:
         with patch("app.services.journal_match.service.manuscript_retriever.retrieve", side_effect=RuntimeError("retrieval down")):
@@ -99,10 +101,12 @@ class ChatJournalModeRegressionTest(unittest.TestCase):
                     db=db,
                     current_user=self.user,
                 )
-        self.assertEqual(response.assistant_message.message_type, "journal_list")
+        self.assertEqual(response.assistant_message.message_type, "text")
         content = response.assistant_message.content or ""
-        self.assertIn("chưa thể hoàn tất journal matching", content.lower())
-        self.assertNotIn("retrieval down", content)
+        payload = response.assistant_message.tool_results
+        self.assertEqual(payload["type"], "journal_match")
+        self.assertGreaterEqual(len(payload["matches"]), 1)
+        self.assertNotIn("retrieval down", content.lower())
 
 
 if __name__ == "__main__":

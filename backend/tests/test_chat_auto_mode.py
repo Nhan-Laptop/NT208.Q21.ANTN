@@ -10,6 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.api.v1.endpoints.chat import create_completion
+from app.models.ai_detection_rule import AIDetectionRule
 from app.models.chat_message import MessageType
 from app.models.chat_session import SessionMode
 from app.schemas.chat import ChatCompletionRequest, SessionCreate
@@ -40,6 +41,26 @@ class ChatAutoModeRoutingTest(unittest.TestCase):
 
     def test_session_create_defaults_to_auto(self) -> None:
         self.assertEqual(SessionCreate().mode, SessionMode.AUTO)
+
+    def test_chat_completion_survives_missing_ai_rule_table(self) -> None:
+        AIDetectionRule.__table__.drop(self.env.engine)
+
+        with patch(
+            "app.services.chat_service.ChatService._run_general_qa_flow",
+            return_value=(MessageType.TEXT, "Fallback general answer", None),
+        ):
+            with self.env.session() as db:
+                response = create_completion(
+                    payload=ChatCompletionRequest(
+                        session_id=self.session.id,
+                        user_message="Giải thích xu hướng research retrieval hiện nay.",
+                    ),
+                    db=db,
+                    current_user=self.user,
+                )
+
+        self.assertEqual(response.assistant_message.message_type, "text")
+        self.assertEqual(response.assistant_message.content, "Fallback general answer")
 
     def test_auto_routes_doi_metadata_without_general_flow(self) -> None:
         with (
@@ -97,6 +118,77 @@ class ChatAutoModeRoutingTest(unittest.TestCase):
         routing = self._routing(response)
         self.assertEqual(routing["resolved_feature"], "verification")
 
+    def test_auto_routes_doi_author_query_to_general_qa(self) -> None:
+        with (
+            patch(
+                "app.services.chat_service.ChatService._run_mode_tool",
+                side_effect=AssertionError("citation verification should not run"),
+            ),
+            patch(
+                "app.services.chat_service.ChatService._run_general_qa_flow",
+                return_value=(
+                    MessageType.TEXT,
+                    "Stubbed author publication search",
+                    {"type": "author_publication_search", "status": "matched", "authors": []},
+                ),
+            ) as general_flow,
+        ):
+            with self.env.session() as db:
+                response = create_completion(
+                    payload=ChatCompletionRequest(
+                        session_id=self.session.id,
+                        user_message="tác giả của DOI 10.1038/s41586-020-2649-2 có thêm bài báo nào nữa không",
+                    ),
+                    db=db,
+                    current_user=self.user,
+                )
+
+        self.assertTrue(general_flow.called)
+        self.assertEqual(response.assistant_message.message_type, "text")
+        self.assertEqual(response.assistant_message.tool_results["type"], "author_publication_search")
+        routing = self._routing(response)
+        self.assertEqual(routing["resolved_feature"], "general_qa")
+
+    def test_auto_routes_multi_citation_verification_through_shared_batch_pipeline(self) -> None:
+        report = {
+            "type": "citation_report",
+            "text": "1 verified, 1 review.",
+            "summary": {
+                "total_count": 2,
+                "verified_count": 1,
+                "review_count": 1,
+                "problem_count": 0,
+                "temporary_issue_count": 0,
+                "status_counts": {"DOI_VERIFIED": 1, "LIKELY_MATCH": 1},
+            },
+            "results": [
+                {"index": 1, "raw_citation": "10.1000/verified", "status": "DOI_VERIFIED"},
+                {"index": 2, "raw_citation": "Review citation", "status": "LIKELY_MATCH"},
+            ],
+        }
+        with (
+            patch("app.services.chat_service.ChatService._run_general_qa_flow", side_effect=AssertionError("general flow should not run")),
+            patch(
+                "app.services.chat_service.citation_batch_service.verify_text",
+                return_value=report,
+            ) as verify_text,
+        ):
+            with self.env.session() as db:
+                response = create_completion(
+                    payload=ChatCompletionRequest(
+                        session_id=self.session.id,
+                        user_message="Xác minh các trích dẫn sau:\n10.1000/verified\nReview citation",
+                    ),
+                    db=db,
+                    current_user=self.user,
+                )
+
+        self.assertEqual(response.assistant_message.message_type, "citation_report")
+        self.assertEqual(response.assistant_message.tool_results["type"], "citation_report")
+        self.assertEqual(response.assistant_message.tool_results["summary"]["total_count"], 2)
+        self.assertEqual(self._routing(response)["resolved_feature"], "verification")
+        verify_text.assert_called_once_with("Xác minh các trích dẫn sau:\n10.1000/verified\nReview citation")
+
     def test_auto_routes_journal_match_from_doi(self) -> None:
         with (
             patch("app.services.chat_service.ChatService._run_general_qa_flow", side_effect=AssertionError("general flow should not run")),
@@ -121,6 +213,37 @@ class ChatAutoModeRoutingTest(unittest.TestCase):
 
         self.assertTrue(run_match.called)
         self.assertEqual(response.assistant_message.message_type, "journal_list")
+        routing = self._routing(response)
+        self.assertEqual(routing["resolved_feature"], "journal_match")
+
+    def test_auto_routes_journal_match_from_lookup_text(self) -> None:
+        with (
+            patch("app.services.chat_service.ChatService._run_general_qa_flow", side_effect=AssertionError("general flow should not run")),
+            patch(
+                "app.services.chat_service.ChatService._run_direct_journal_match",
+                return_value=(
+                    MessageType.TEXT,
+                    "Stubbed direct journal match via title fallback",
+                    {"type": "journal_match", "matches": [{"journal": "Cog Psychology"}], "status": "matched"},
+                ),
+            ) as run_direct,
+        ):
+            with self.env.session() as db:
+                response = create_completion(
+                    payload=ChatCompletionRequest(
+                        session_id=self.session.id,
+                        user_message=(
+                            "Gợi ý tạp chí cho bài này:\n"
+                            "Is working memory domain-general or domain-specific?\n"
+                            "Nazbanou Nozari, Randi C. Martin"
+                        ),
+                    ),
+                    db=db,
+                    current_user=self.user,
+                )
+
+        self.assertTrue(run_direct.called)
+        self.assertEqual(response.assistant_message.message_type, "text")
         routing = self._routing(response)
         self.assertEqual(routing["resolved_feature"], "journal_match")
 
@@ -171,6 +294,66 @@ class ChatAutoModeRoutingTest(unittest.TestCase):
         self.assertEqual(response.assistant_message.tool_results["type"], "intent_disambiguation")
         routing = self._routing(response)
         self.assertTrue(routing["is_ambiguous"])
+
+    def test_auto_routes_journal_match_with_content_to_direct_match(self) -> None:
+        with (
+            patch("app.services.chat_service.ChatService._run_general_qa_flow", side_effect=AssertionError("general flow should not run")),
+            patch("app.services.chat_service.ChatService._run_direct_journal_match",
+                return_value=(
+                    MessageType.TEXT,
+                    "Direct journal match completed.",
+                    {"type": "journal_match", "matches": [{"journal": "Test Journal", "score": 0.85}], "status": "matched"},
+                ),
+            ) as run_direct,
+        ):
+            with self.env.session() as db:
+                response = create_completion(
+                    payload=ChatCompletionRequest(
+                        session_id=self.session.id,
+                        user_message=(
+                            "journal suggestion: Abstract: Machine learning for NLP tasks. "
+                            "Keywords: transformers, BERT, deep learning"
+                        ),
+                    ),
+                    db=db,
+                    current_user=self.user,
+                )
+
+        self.assertTrue(run_direct.called)
+        self.assertEqual(response.assistant_message.message_type, "text")
+        self.assertEqual(response.assistant_message.tool_results["type"], "journal_match")
+        routing = self._routing(response)
+        self.assertEqual(routing["resolved_feature"], "journal_match")
+
+    def test_auto_routes_vn_journal_prompt_to_direct_match(self) -> None:
+        with (
+            patch("app.services.chat_service.ChatService._run_general_qa_flow", side_effect=AssertionError("general flow should not run")),
+            patch("app.services.chat_service.ChatService._run_direct_journal_match",
+                return_value=(
+                    MessageType.TEXT,
+                    "Direct journal match completed.",
+                    {"type": "journal_match", "matches": [{"journal": "Tạp chí Khoa học", "score": 0.75}], "status": "matched"},
+                ),
+            ) as run_direct,
+        ):
+            with self.env.session() as db:
+                response = create_completion(
+                    payload=ChatCompletionRequest(
+                        session_id=self.session.id,
+                        user_message=(
+                            "gợi ý tạp chí cho: Abstract: Nghiên cứu về học máy trong xử lý ngôn ngữ tự nhiên. "
+                            "Từ khóa: NLP, deep learning"
+                        ),
+                    ),
+                    db=db,
+                    current_user=self.user,
+                )
+
+        self.assertTrue(run_direct.called)
+        self.assertEqual(response.assistant_message.message_type, "text")
+        self.assertEqual(response.assistant_message.tool_results["type"], "journal_match")
+        routing = self._routing(response)
+        self.assertEqual(routing["resolved_feature"], "journal_match")
 
     def test_auto_re_evaluates_each_message_while_session_stays_auto(self) -> None:
         with patch(

@@ -38,8 +38,16 @@ _STRICT_CITATION_RE = re.compile(
     re.IGNORECASE,
 )
 _JOURNAL_EXPLICIT_RE = re.compile(
-    r"\b(\nơi\s*nộp\s*bài|gợi\s*ý\s*tạp\s*chí|đề\s*xuất\s*tạp\s*chí|"
-    r"journal\s+recommendation|journal\s+match|tìm\s*tạp\s*chí|recommend\s+journal)\b",
+    r"\b("
+    r"gợi\s*ý\s*tạp\s*chí|đề\s*xuất\s*tạp\s*chí|tạp\s*chí\s+phù\s*hợp|"
+    r"tìm\s*tạp\s*chí|nên\s+gửi\s+bài\s+ở\s+đâu|nên\s+nộp\s+tạp\s+chí\s+nào|"
+    r"journal\s+suggestion|journals?\s+suggestion|"
+    r"journal\s+recommendation|journals?\s+recommendation|"
+    r"journal\s+matching|journals?\s+matching|"
+    r"recommend\s+journal|suggest\s+journal|"
+    r"where\s+should\s+i\s+submit|"
+    r"nơi\s*nộp\s*bài|journal\s+match|journals?\s+match"
+    r")\b",
     re.IGNORECASE,
 )
 _RETRACTION_EXPLICIT_RE = re.compile(
@@ -60,10 +68,41 @@ _GRAMMAR_HINT_RE = re.compile(
 _DOI_METADATA_REQUEST_RE = re.compile(
     r"\b("
     r"analyze|phân\s*tích|provide|show|extract|list|"
+    r"authors?|tác\s*giả|tac\s*gia|"
     r"thông\s*tin\s+về|thong\s*tin\s+ve|information\s+about|"
     r"doi\s+info|doi\s+metadata|metadata\s+doi|metadata|paper\s+info|"
     r"abstract|summary|title|journal|publisher|publication\s*year|"
     r"research\s*field|lĩnh\s*vực|main\s*topic|chủ\s*đề"
+    r")\b",
+    re.IGNORECASE,
+)
+_DOI_AUTHOR_PUBLICATION_RE = re.compile(
+    r"(?:\b(?:authors?|tác\s*giả|tac\s*gia)\b(?:[^\n]{0,80}?)"
+    r"\b(?:publication(?:s)?|paper(?:s)?|works?|bài\s*báo|bai\s*bao|công\s*trình|cong\s*trinh)\b)|"
+    r"(?:\b(?:publication(?:s)?|paper(?:s)?|works?|bài\s*báo|bai\s*bao|công\s*trình|cong\s*trinh)\b"
+    r"(?:[^\n]{0,80}?)\b(?:authors?|tác\s*giả|tac\s*gia)\b)",
+    re.IGNORECASE,
+)
+_AUTHOR_PUBLICATION_QUERY_RE = re.compile(
+    r"(?:\b(?:publication(?:s)?|paper(?:s)?|works?|bài\s*báo|bai\s*bao|công\s*trình|cong\s*trinh)\b"
+    r"(?:[^\n]{0,40}?)\b(?:của|cua|by)\s+[A-Za-zÀ-ỹ])|"
+    r"(?:^[A-ZÀ-Ỹ][^\n]{2,120}\s+(?:có|co|has|have)\s+"
+    r"(?:những|nhung|các|cac|all|bao\s+nhieu|bao\s+nhiêu|what|which)?\s*"
+    r"(?:publication(?:s)?|paper(?:s)?|works?|bài\s*báo|bai\s*bao|công\s*trình|cong\s*trinh)\b)|"
+    r"(?:\b(?:tất\s*cả|tat\s*ca|all)\b(?:[^\n]{0,30}?)"
+    r"\b(?:publication(?:s)?|paper(?:s)?|works?|bài\s*báo|bai\s*bao|công\s*trình|cong\s*trinh)\b"
+    r"(?:[^\n]{0,30}?)\b(?:mà|ma|by)\s+[A-Za-zÀ-ỹ])",
+    re.IGNORECASE,
+)
+_ACADEMIC_QA_IDENTIFIER_RE = re.compile(
+    r"\b("
+    r"tác\s*giả|tac\s*gia|authors?|"
+    r"publication(?:s)?|paper(?:s)?|works?|"
+    r"bài\s*báo\s+khác|bai\s*bao\s*khac|paper\s+khác|paper\s+khac|"
+    r"công\s*trình\s+khác|cong\s*trinh\s*khac|"
+    r"other\s+papers?|related\s+works?|"
+    r"venue|journal|nội\s*dung|noi\s*dung|"
+    r"phương\s*pháp|phuong\s*phap|kết\s*quả|ket\s*qua"
     r")\b",
     re.IGNORECASE,
 )
@@ -156,7 +195,10 @@ class AutoIntentRouter:
         doi_count = len(citation_checker.extract_dois(normalized))
         has_exact_identifier = bool(citation_checker.extract_exact_identifiers(normalized))
 
-        if doi_count and _DOI_METADATA_REQUEST_RE.search(normalized):
+        if doi_count and _DOI_AUTHOR_PUBLICATION_RE.search(normalized):
+            return self._result(FEATURE_GENERAL_QA, 0.92, "doi_author_publication_regex")
+
+        if doi_count and _DOI_METADATA_REQUEST_RE.search(normalized) and not _AUTHOR_PUBLICATION_QUERY_RE.search(normalized):
             return self._result(FEATURE_DOI_METADATA, 1.0, "doi_metadata_regex")
 
         explicit_candidates = self._explicit_candidates(normalized)
@@ -164,6 +206,12 @@ class AutoIntentRouter:
             return self._ambiguous(explicit_candidates, "explicit_multi_signal")
         if explicit_candidates:
             return self._candidate_result(explicit_candidates[0])
+
+        if (doi_count or has_exact_identifier) and _ACADEMIC_QA_IDENTIFIER_RE.search(normalized):
+            return self._result(FEATURE_GENERAL_QA, 0.9, "identifier_academic_qa_regex")
+
+        if _AUTHOR_PUBLICATION_QUERY_RE.search(normalized):
+            return self._result(FEATURE_GENERAL_QA, 0.9, "author_publication_regex")
 
         if doi_count or has_exact_identifier:
             return self._result(FEATURE_VERIFICATION, 0.96, "exact_identifier_default")

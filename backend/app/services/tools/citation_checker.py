@@ -1,5 +1,5 @@
 """
-Citation Checker — verify references against OpenAlex & Crossref.
+Citation Checker — verify academic citations with evidence-backed source lookup.
 
 Features (auto-selected based on installed packages):
 - PyAlex wrapper for OpenAlex             (when ``pyalex`` is installed)
@@ -7,6 +7,19 @@ Features (auto-selected based on installed packages):
 - Direct httpx fallback                   (always available)
 - Multi-format extraction: APA, IEEE, Vancouver, DOI, simple author-year
 - Fuzzy author matching via difflib
+
+Verification policy highlights:
+- Exact DOI input stays exact. Unresolved DOI => ``DOI_NOT_FOUND``.
+- Exact PMID / PMCID / OpenAlex input stays exact. Unresolved identifier
+  => ``IDENTIFIER_NOT_FOUND``.
+- Metadata verification preserves the academic-source fallback chain:
+  Crossref -> OpenAlex -> DataCite (selectively) -> Semantic Scholar
+  (when available and needed) -> web discovery fallback -> fuzzy metadata
+  scoring.
+- Web discovery never directly promotes a weak candidate to verified. Any DOI
+  discovered from the web is re-checked through exact DOI verification first.
+- LLM helpers may parse, normalize, classify, or summarize evidence, but they
+  must not mark a citation verified without source-backed evidence.
 """
 
 import re
@@ -18,8 +31,32 @@ from difflib import SequenceMatcher
 import httpx
 
 from app.core.config import get_settings
+from app.services.tools.citation import formatters as citation_formatters
+from app.services.tools.citation import models as citation_models
+from app.services.tools.citation import normalize as citation_normalize
+from app.services.tools.citation import parser as citation_parser
+from app.services.tools.citation import scoring as citation_scoring
+from app.services.tools.citation.sources import (
+    CrossrefSource,
+    DataCiteSource,
+    OpenAlexSource,
+    PublisherMetaSource,
+    SemanticScholarSource,
+    WebSearchSource,
+    normalize_crossref_work as source_normalize_crossref_work,
+    normalize_datacite_work as source_normalize_datacite_work,
+    normalize_openalex_work as source_normalize_openalex_work,
+    normalize_semantic_scholar_paper as source_normalize_semantic_scholar_paper,
+)
 
 logger = logging.getLogger(__name__)
+
+_CROSSREF_SOURCE = CrossrefSource()
+_OPENALEX_SOURCE = OpenAlexSource()
+_SEMANTIC_SCHOLAR_SOURCE = SemanticScholarSource()
+_DATACITE_SOURCE = DataCiteSource()
+_PUBLISHER_META_SOURCE = PublisherMetaSource()
+_WEB_SEARCH_SOURCE = WebSearchSource()
 
 # ---------------------------------------------------------------------------
 # Optional deps
@@ -1793,6 +1830,9 @@ class CitationChecker:
     def __init__(self) -> None:
         self._crossref = _HabaneroCrossref() if _HABANERO_AVAILABLE else None
         self._http_client: httpx.Client | None = None
+        self._datacite_source = _DATACITE_SOURCE
+        self._publisher_meta_source = _PUBLISHER_META_SOURCE
+        self._web_search_source = _WEB_SEARCH_SOURCE
 
     def _get_client(self) -> httpx.Client:
         if self._http_client is None:
@@ -1906,23 +1946,32 @@ class CitationChecker:
         if verification_mode == "doi":
             diagnostics = {
                 "crossref": _empty_source_diagnostic("skipped"),
+                "datacite": _empty_source_diagnostic("skipped"),
                 "openalex": _empty_source_diagnostic("skipped"),
+                "publisher_meta": _empty_source_diagnostic("skipped"),
             }
             if resolved:
                 if source and "crossref" in source:
                     diagnostics["crossref"] = _empty_source_diagnostic("matched")
                     diagnostics["crossref"]["candidate_count"] = 1
+                elif source and "datacite" in source:
+                    diagnostics["crossref"] = _empty_source_diagnostic("no_match")
+                    diagnostics["datacite"] = _empty_source_diagnostic("matched")
+                    diagnostics["datacite"]["candidate_count"] = 1
                 elif source and "openalex" in source:
                     diagnostics["crossref"] = _empty_source_diagnostic("no_match")
+                    diagnostics["datacite"] = _empty_source_diagnostic("no_match")
                     diagnostics["openalex"] = _empty_source_diagnostic("matched")
                     diagnostics["openalex"]["candidate_count"] = 1
             else:
                 diagnostics["crossref"] = _empty_source_diagnostic("no_match")
+                diagnostics["datacite"] = _empty_source_diagnostic("no_match")
                 diagnostics["openalex"] = _empty_source_diagnostic("no_match")
             return diagnostics
 
         diagnostics = {
             "openalex": _empty_source_diagnostic("matched" if resolved else "no_match"),
+            "publisher_meta": _empty_source_diagnostic("skipped"),
         }
         if resolved:
             diagnostics["openalex"]["candidate_count"] = 1
@@ -1969,6 +2018,8 @@ class CitationChecker:
         metadata = result.metadata or {}
         if isinstance(metadata.get("crossref"), dict):
             return _normalize_crossref_work(metadata["crossref"])
+        if isinstance(metadata.get("datacite"), dict):
+            return _normalize_datacite_work(metadata["datacite"])
         if isinstance(metadata.get("openalex"), dict):
             return _normalize_openalex_work(metadata["openalex"])
         return CandidateWork(
@@ -2000,6 +2051,30 @@ class CitationChecker:
         result.formatted_apa = format_apa_reference(completed_metadata) or None if completed_metadata else None
         result.formatted_bibtex = format_bibtex(completed_metadata) or None if completed_metadata else None
         result.csl_json = build_csl_json(completed_metadata) or None if completed_metadata else None
+        evidence_urls: list[str] = []
+        for url in [candidate.resolved_url, candidate.url, *(candidate.evidence_urls or [])]:
+            if url and url not in evidence_urls:
+                evidence_urls.append(url)
+        if candidate.doi:
+            doi_url = f"https://doi.org/{candidate.doi}"
+            if doi_url not in evidence_urls:
+                evidence_urls.append(doi_url)
+        result.resolved_url = candidate.resolved_url or candidate.url or (f"https://doi.org/{candidate.doi}" if candidate.doi else None)
+        result.evidence_urls = evidence_urls
+        if verification_mode == "doi":
+            if result.source and "crossref" in result.source:
+                result.resolver_chain = ["crossref_exact"]
+            elif result.source and "datacite" in result.source:
+                result.resolver_chain = ["datacite_exact"]
+            elif result.source and "openalex" in result.source:
+                result.resolver_chain = ["openalex_exact"]
+            else:
+                result.resolver_chain = ["exact_lookup"]
+            result.matched_by = "doi_exact"
+        else:
+            result.resolver_chain = ["openalex_identifier_exact"]
+            result.matched_by = "identifier_exact"
+        result.candidate_gap = None
         result.source_diagnostics = self._source_diagnostics_for_exact(
             source=result.source,
             verification_mode=verification_mode,
@@ -2098,7 +2173,7 @@ class CitationChecker:
         return None
 
     @staticmethod
-    def _split_reference_blocks(text: str) -> list[str]:
+    def _split_reference_blocks(text: str, *, dedupe: bool = True) -> list[str]:
         if not text:
             return []
 
@@ -2135,6 +2210,9 @@ class CitationChecker:
                 ln = re.sub(r"\s+", " ", ln).strip()
                 if len(ln) >= 20:
                     blocks.append(ln)
+
+        if not dedupe:
+            return blocks
 
         # De-duplicate while preserving order.
         deduped: list[str] = []
@@ -2436,6 +2514,24 @@ class CitationChecker:
                 logger.debug("OpenAlex exact DOI lookup failed for %s: %s", doi, e)
         return None
 
+    def _verify_doi_datacite_exact(self, doi: str) -> CitationCheckResult | None:
+        doi = self._normalize_doi(doi)
+        candidate = self._datacite_source.lookup_doi(doi)
+        if not candidate:
+            return None
+        return CitationCheckResult(
+            citation=doi,
+            status="DOI_VERIFIED",
+            evidence=f"Verified via DataCite DOI lookup: {candidate.title}",
+            doi=candidate.doi,
+            title=candidate.title,
+            authors=list(candidate.authors or []),
+            year=candidate.year,
+            source="datacite_doi",
+            confidence=0.92,
+            metadata={"datacite": candidate.raw},
+        )
+
     def verify_doi_exact(
         self,
         raw_doi: str,
@@ -2460,6 +2556,16 @@ class CitationChecker:
                 verification_mode="doi",
             )
 
+        datacite_result = self._verify_doi_datacite_exact(doi)
+        if datacite_result:
+            return self._annotate_exact_result(
+                datacite_result,
+                citation_context=citation_context,
+                exact_label="DOI",
+                exact_value=doi,
+                verification_mode="doi",
+            )
+
         openalex_result = self._verify_doi_openalex_exact(doi)
         if openalex_result:
             return self._annotate_exact_result(
@@ -2474,7 +2580,7 @@ class CitationChecker:
             citation=doi,
             status="DOI_NOT_FOUND",
             evidence=(
-                "Tra cứu DOI chính xác chưa tìm thấy bản ghi tương ứng trong Crossref hoặc OpenAlex. "
+                "Tra cứu DOI chính xác chưa tìm thấy bản ghi tương ứng trong Crossref, DataCite hoặc OpenAlex. "
                 "Hệ thống không dùng fuzzy match để thay thế cho DOI input."
             ),
             doi=doi,
@@ -2490,7 +2596,7 @@ class CitationChecker:
         result.search_strategy = "exact_lookup"
         result.parse_status = "NOT_PROVIDED"
         result.metadata_consistency = "not_provided"
-        result.reason = "The DOI did not resolve to an exact scholarly record in Crossref or OpenAlex."
+        result.reason = "The DOI did not resolve to an exact scholarly record in Crossref, DataCite, or OpenAlex."
         return result
 
     def verify_identifier_exact(
@@ -2724,6 +2830,46 @@ class CitationChecker:
             logger.warning("%s candidate search raised unexpectedly: %s", source_name, exc)
             return [], _empty_source_diagnostic(state, detail)
 
+    def _enrich_candidates_with_publisher_meta(
+        self,
+        candidates: list[CandidateWork],
+        *,
+        limit: int = 3,
+    ) -> tuple[list[CandidateWork], dict[str, Any]]:
+        if not candidates:
+            return candidates, _empty_source_diagnostic("skipped")
+
+        enriched: list[CandidateWork] = []
+        attempted = 0
+        matched = 0
+        first_error: str | None = None
+        for idx, candidate in enumerate(candidates):
+            if idx >= limit or not candidate.url:
+                enriched.append(candidate)
+                continue
+            attempted += 1
+            try:
+                enriched_candidate = self._publisher_meta_source.enrich_candidate(candidate)
+                if (enriched_candidate.raw or {}).get("publisher_meta"):
+                    matched += 1
+                enriched.append(enriched_candidate)
+            except Exception as exc:
+                logger.warning("publisher_meta enrichment failed for %s: %s", candidate.url or candidate.doi, exc)
+                if first_error is None:
+                    _state, detail = _classify_source_exception(exc)
+                    first_error = detail
+                enriched.append(candidate)
+
+        if matched > 0:
+            diagnostic = _empty_source_diagnostic("matched")
+            diagnostic["candidate_count"] = matched
+            return enriched, diagnostic
+        if attempted == 0:
+            return enriched, _empty_source_diagnostic("skipped")
+        if first_error:
+            return enriched, _empty_source_diagnostic("error", first_error)
+        return enriched, _empty_source_diagnostic("no_match")
+
     @staticmethod
     def _should_use_semantic_cross_check(
         ref: ReferenceMetadata,
@@ -2746,6 +2892,152 @@ class CitationChecker:
             return True
 
         return False
+
+    @staticmethod
+    def _should_use_web_search_fallback(
+        ref: ReferenceMetadata,
+        preliminary_match: MetadataMatchResult | None,
+        citation: dict[str, Any],
+    ) -> bool:
+        if citation.get("doi") or citation.get("input_doi"):
+            return False
+        if citation.get("type") in {"doi", "pmid", "pmcid", "openalex"}:
+            return False
+        if not ref or not ref.title:
+            return False
+        if preliminary_match is None:
+            return True
+        if preliminary_match.status in {"NO_MATCH_FOUND", "PARSE_FAILED"}:
+            return True
+        return preliminary_match.confidence < 0.65
+
+    @staticmethod
+    def _collect_candidate_evidence_urls(candidates: list[CandidateWork]) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            for url in [candidate.resolved_url, candidate.url, *(candidate.evidence_urls or [])]:
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                urls.append(url)
+        return urls
+
+    def _search_web_candidates(
+        self,
+        ref: ReferenceMetadata,
+        *,
+        settings: Any,
+        limit: int = 5,
+    ) -> tuple[list[CandidateWork], dict[str, Any], dict[str, str | None]]:
+        hits, context = self._web_search_source.search_with_context(
+            ref,
+            limit=limit,
+            provider=getattr(settings, "web_search_provider", None),
+            api_key=getattr(settings, "web_search_api_key", None),
+            endpoint=getattr(settings, "web_search_endpoint", None),
+            timeout=getattr(settings, "external_search_timeout_seconds", 10.0),
+            tavily_api_key=getattr(settings, "tavily_api_key", None),
+            tavily_endpoint=getattr(settings, "tavily_search_endpoint", None),
+            tavily_search_depth=getattr(settings, "tavily_search_depth", None),
+            tavily_max_results=getattr(settings, "tavily_max_results", limit),
+            tavily_include_answer=getattr(settings, "tavily_include_answer", False),
+            tavily_include_raw_content=getattr(settings, "tavily_include_raw_content", False),
+            tavily_timeout_seconds=getattr(settings, "tavily_timeout_seconds", None),
+        )
+        diagnostic = _empty_source_diagnostic(
+            context.get("state", "skipped"),
+            context.get("detail"),
+        )
+        diagnostic["candidate_count"] = len(hits)
+        return hits, diagnostic, {
+            "query": context.get("query"),
+            "provider": context.get("provider"),
+            "skipped_reason": context.get("detail")
+            if context.get("state") in {"disabled", "skipped"}
+            else None,
+        }
+
+    def _attach_web_search_context_to_exact_result(
+        self,
+        result: CitationCheckResult,
+        *,
+        web_candidate: CandidateWork,
+        web_diagnostic: dict[str, Any],
+        web_query: str | None,
+        web_provider: str | None,
+        web_skipped_reason: str | None = None,
+    ) -> CitationCheckResult:
+        result.discovered_from = "web_search"
+        result.source_domain = web_candidate.source_domain
+        result.web_search_query = web_query
+        result.web_search_provider = web_provider
+        result.web_search_skipped_reason = web_skipped_reason
+        web_metadata = {
+            "title": web_candidate.title,
+            "url": web_candidate.url,
+            "source_domain": web_candidate.source_domain,
+            "snippet": (web_candidate.raw or {}).get("snippet"),
+            "doi_candidates": (web_candidate.raw or {}).get("doi_candidates"),
+            "provider": web_provider,
+            "query": web_query,
+        }
+        result.metadata["web_search"] = {key: value for key, value in web_metadata.items() if value}
+        result.source_diagnostics["web_search"] = dict(web_diagnostic)
+        result.resolver_chain = [
+            "web_search",
+            *[item for item in (result.resolver_chain or []) if item != "web_search"],
+        ]
+        evidence_urls = self._collect_candidate_evidence_urls([web_candidate])
+        for url in result.evidence_urls or []:
+            if url and url not in evidence_urls:
+                evidence_urls.append(url)
+        result.evidence_urls = evidence_urls
+        return result
+
+    def _maybe_promote_web_discovered_doi(
+        self,
+        *,
+        citation: dict[str, Any],
+        web_hits: list[CandidateWork],
+        web_diagnostic: dict[str, Any],
+        web_query: str | None,
+        web_provider: str | None,
+        web_skipped_reason: str | None = None,
+    ) -> CitationCheckResult | None:
+        doi_candidates: dict[str, CandidateWork] = {}
+        for hit in web_hits:
+            raw_dois = (hit.raw or {}).get("doi_candidates")
+            if isinstance(raw_dois, list):
+                for doi in raw_dois:
+                    if isinstance(doi, str) and doi.strip() and doi not in doi_candidates:
+                        doi_candidates[doi] = hit
+            elif hit.doi and hit.doi not in doi_candidates:
+                doi_candidates[hit.doi] = hit
+
+        if not doi_candidates:
+            return None
+        if len(doi_candidates) > 1:
+            return None
+
+        doi, web_candidate = next(iter(doi_candidates.items()))
+        result = self.verify_doi_exact(doi, citation_context=citation)
+        if result.status != "DOI_VERIFIED":
+            return None
+        return self._attach_web_search_context_to_exact_result(
+            result,
+            web_candidate=web_candidate,
+            web_diagnostic=web_diagnostic,
+            web_query=web_query,
+            web_provider=web_provider,
+            web_skipped_reason=web_skipped_reason,
+        )
+
+    @staticmethod
+    def _cap_web_only_match(match: MetadataMatchResult) -> MetadataMatchResult:
+        if match.status == "METADATA_VERIFIED":
+            match.status = "LIKELY_MATCH"
+        return match
 
     # -- public API --------------------------------------------------------
 
@@ -2772,6 +3064,7 @@ class CitationChecker:
                     "url": c.url,
                     "external_id": c.external_id,
                     "external_id_type": c.external_id_type,
+                    "source_domain": c.source_domain,
                 })
 
         evidence_summary = None
@@ -2787,7 +3080,7 @@ class CitationChecker:
         elif match.status == "PARSE_FAILED":
             evidence_summary = "Reference parsing failed (insufficient metadata)."
         elif match.status == "NO_MATCH_FOUND":
-            evidence_summary = "No matching work found in Crossref/OpenAlex/Semantic Scholar."
+            evidence_summary = "No matching work found in Crossref/OpenAlex/DataCite/Semantic Scholar."
 
         completed_metadata = None
         formatted_apa = None
@@ -2831,6 +3124,16 @@ class CitationChecker:
             formatted_apa=formatted_apa,
             formatted_bibtex=formatted_bibtex,
             csl_json=csl_json,
+            resolved_url=match.resolved_url,
+            evidence_urls=list(match.evidence_urls or []),
+            resolver_chain=list(match.resolver_chain or []),
+            candidate_gap=match.candidate_gap,
+            matched_by=match.matched_by,
+            discovered_from=match.discovered_from,
+            source_domain=match.source_domain,
+            web_search_query=match.web_search_query,
+            web_search_provider=match.web_search_provider,
+            web_search_skipped_reason=match.web_search_skipped_reason,
         )
 
     def _verify_metadata_match(self, citation: dict[str, Any]) -> CitationCheckResult:
@@ -2841,9 +3144,12 @@ class CitationChecker:
         source_diagnostics: dict[str, Any] = {
             "crossref": _empty_source_diagnostic("skipped"),
             "openalex": _empty_source_diagnostic("skipped"),
+            "datacite": _empty_source_diagnostic("skipped"),
             "semantic_scholar": _empty_source_diagnostic(
                 "disabled" if not settings.semantic_scholar_enabled else "skipped"
             ),
+            "publisher_meta": _empty_source_diagnostic("skipped"),
+            "web_search": _empty_source_diagnostic("skipped"),
         }
 
         # Pre-fill missing fields from the extracted citation dict.
@@ -2929,7 +3235,23 @@ class CitationChecker:
             search_ref,
             limit=5,
         )
-        candidates = _merge_candidates(crossref_hits, openalex_hits)
+        preliminary_candidates = _merge_candidates(crossref_hits, openalex_hits)
+        use_datacite = self._should_use_semantic_cross_check(
+            search_ref,
+            preliminary_candidates,
+            threshold=max(settings.semantic_scholar_fallback_threshold, 0.92),
+        )
+        if use_datacite:
+            datacite_hits, source_diagnostics["datacite"] = self._run_candidate_search(
+                "datacite",
+                self._datacite_source.search,
+                search_ref,
+                limit=5,
+            )
+        else:
+            datacite_hits = []
+            source_diagnostics["datacite"] = _empty_source_diagnostic("skipped")
+        candidates = _merge_candidates(crossref_hits, openalex_hits, datacite_hits)
         if settings.semantic_scholar_enabled and search_ref.title:
             if self._should_use_semantic_cross_check(
                 search_ref,
@@ -2944,18 +3266,129 @@ class CitationChecker:
                 )
                 candidates = _merge_candidates(candidates, semantic_hits)
 
+        preliminary_match = choose_best_match(search_ref, candidates) if candidates else None
+        if preliminary_match and preliminary_match.confidence >= 0.65:
+            candidates, source_diagnostics["publisher_meta"] = self._enrich_candidates_with_publisher_meta(
+                candidates,
+                limit=3,
+            )
+
         match = choose_best_match(search_ref, candidates)
         match.source_diagnostics = source_diagnostics
         match.parse_status = parse_status
         match.search_attempted = True
         match.search_strategy = search_strategy
+        if match.best_candidate:
+            match.resolved_url = match.best_candidate.resolved_url or match.best_candidate.url or (
+                f"https://doi.org/{match.best_candidate.doi}" if match.best_candidate.doi else None
+            )
+            evidence_urls = list(match.evidence_urls or [])
+            for url in [match.best_candidate.resolved_url, match.best_candidate.url, *(match.best_candidate.evidence_urls or [])]:
+                if url and url not in evidence_urls:
+                    evidence_urls.append(url)
+            if match.best_candidate.doi:
+                doi_url = f"https://doi.org/{match.best_candidate.doi}"
+                if doi_url not in evidence_urls:
+                    evidence_urls.append(doi_url)
+            match.evidence_urls = evidence_urls
+            resolver_chain = [
+                source_name
+                for source_name, diagnostic in source_diagnostics.items()
+                if isinstance(diagnostic, dict) and diagnostic.get("state") == "matched"
+            ]
+            match.resolver_chain = resolver_chain
+            if (match.best_candidate.raw or {}).get("publisher_meta_confirmed"):
+                match.matched_by = "publisher_meta_confirmed"
+            elif match.best_candidate.source == "datacite":
+                match.matched_by = "datacite_match"
+            else:
+                match.matched_by = "metadata_match"
+
+        web_search_context: dict[str, str | None] = {
+            "query": None,
+            "provider": getattr(settings, "web_search_provider", None),
+            "skipped_reason": None,
+        }
+        if self._should_use_web_search_fallback(search_ref, match, citation):
+            web_hits, source_diagnostics["web_search"], web_search_context = self._search_web_candidates(
+                search_ref,
+                settings=settings,
+                limit=5,
+            )
+            web_search_state = source_diagnostics["web_search"].get("state")
+            if web_search_state == "matched":
+                unique_web_dois: set[str] = set()
+                for hit in web_hits:
+                    doi_list = (hit.raw or {}).get("doi_candidates")
+                    if isinstance(doi_list, list):
+                        unique_web_dois.update(doi for doi in doi_list if isinstance(doi, str) and doi.strip())
+                    elif hit.doi:
+                        unique_web_dois.add(hit.doi)
+                if len(unique_web_dois) > 1:
+                    source_diagnostics["web_search"]["state"] = "ambiguous"
+                    source_diagnostics["web_search"]["detail"] = (
+                        "Multiple distinct DOI hints were found across web search results."
+                    )
+                else:
+                    promoted = self._maybe_promote_web_discovered_doi(
+                        citation=citation,
+                        web_hits=web_hits,
+                        web_diagnostic=source_diagnostics["web_search"],
+                        web_query=web_search_context.get("query"),
+                        web_provider=web_search_context.get("provider"),
+                        web_skipped_reason=web_search_context.get("skipped_reason"),
+                    )
+                    if promoted is not None:
+                        return promoted
+                    if unique_web_dois:
+                        source_diagnostics["web_search"]["detail"] = (
+                            "Web search surfaced a DOI candidate, but exact DOI verification did not succeed."
+                        )
+
+                web_hits_for_matching = [hit for hit in web_hits if hit.title]
+                if web_hits_for_matching:
+                    web_match = choose_best_match(search_ref, web_hits_for_matching)
+                    web_match = self._cap_web_only_match(web_match)
+                    if web_match.best_candidate and web_match.status not in {"NO_MATCH_FOUND", "PARSE_FAILED", "UNVERIFIED_NO_DOI"}:
+                        web_match.source_diagnostics = source_diagnostics
+                        web_match.parse_status = parse_status
+                        web_match.search_attempted = True
+                        web_match.search_strategy = f"{search_strategy}+web_search"
+                        web_match.discovered_from = "web_search"
+                        web_match.source_domain = web_match.best_candidate.source_domain
+                        web_match.web_search_query = web_search_context.get("query")
+                        web_match.web_search_provider = web_search_context.get("provider")
+                        web_match.web_search_skipped_reason = web_search_context.get("skipped_reason")
+                        web_match.resolved_url = web_match.best_candidate.url
+                        web_match.evidence_urls = self._collect_candidate_evidence_urls(web_hits)
+                        web_match.resolver_chain = ["web_search"]
+                        web_match.matched_by = "web_search_evidence"
+                        web_match.warning = (
+                            "Web search surfaced a similar result, but no DOI exact verification succeeded. "
+                            "Review this citation manually."
+                        )
+                        web_match.reason = _build_match_reason(
+                            web_match.status,
+                            web_match.field_evidence,
+                            source_diagnostics=source_diagnostics,
+                            parse_status=parse_status,
+                        )
+                        match = web_match
+            else:
+                match.web_search_skipped_reason = web_search_context.get("skipped_reason")
+        else:
+            source_diagnostics["web_search"] = _empty_source_diagnostic(
+                "skipped",
+                "Scholarly source candidates were sufficient; web fallback was not needed.",
+            )
 
         degraded_sources = [
             source
             for source, diagnostic in source_diagnostics.items()
+            if source != "publisher_meta"
             if isinstance(diagnostic, dict) and diagnostic.get("state") in _SOURCE_ERROR_STATES
         ]
-        if not candidates and degraded_sources:
+        if degraded_sources and (not candidates or match.confidence < 0.65):
             match.status = "UNVERIFIED"
             match.confidence = 0.0
             match.warning = (
@@ -2973,6 +3406,11 @@ class CitationChecker:
             source_diagnostics=source_diagnostics,
             parse_status=parse_status,
         )
+        match.discovered_from = match.discovered_from or None
+        match.source_domain = match.source_domain or (match.best_candidate.source_domain if match.best_candidate else None)
+        match.web_search_query = match.web_search_query or web_search_context.get("query")
+        match.web_search_provider = match.web_search_provider or web_search_context.get("provider")
+        match.web_search_skipped_reason = match.web_search_skipped_reason or web_search_context.get("skipped_reason")
         return self._metadata_match_to_result(match, raw_citation=raw)
 
     @staticmethod
@@ -3153,9 +3591,9 @@ class CitationChecker:
             "avg_confidence": sum(r.confidence for r in checked) / total,
         }
         stats["verified_rate"] = (
-            stats["valid"] + stats["doi_verified"]
+            stats["doi_verified"]
             + stats["identifier_verified"]
-            + stats["metadata_verified"] + stats["likely_match"]
+            + stats["metadata_verified"]
         ) / total
         stats["risk_rate"] = (
             stats["hallucinated"] + stats["doi_not_found"]
@@ -3171,6 +3609,55 @@ class CitationChecker:
 
     def __del__(self) -> None:
         self.close()
+
+
+def _search_crossref_candidates_impl(ref: citation_models.ReferenceMetadata, limit: int = 5) -> list[citation_models.CandidateWork]:
+    return _CROSSREF_SOURCE.search(ref, limit=limit)
+
+
+def _search_openalex_candidates_impl(ref: citation_models.ReferenceMetadata, limit: int = 5) -> list[citation_models.CandidateWork]:
+    return _OPENALEX_SOURCE.search(ref, limit=limit)
+
+
+def _search_semantic_scholar_candidates_impl(ref: citation_models.ReferenceMetadata, limit: int = 5) -> list[citation_models.CandidateWork]:
+    return _SEMANTIC_SCHOLAR_SOURCE.search(ref, limit=limit)
+
+
+def _search_datacite_candidates_impl(ref: citation_models.ReferenceMetadata, limit: int = 5) -> list[citation_models.CandidateWork]:
+    return _DATACITE_SOURCE.search(ref, limit=limit)
+
+
+# Compatibility exports now point at the refactored citation package.
+CitationCheckResult = citation_models.CitationCheckResult
+ReferenceMetadata = citation_models.ReferenceMetadata
+CandidateWork = citation_models.CandidateWork
+MetadataMatchResult = citation_models.MetadataMatchResult
+normalize_title = citation_normalize.normalize_title
+normalize_author_name = citation_normalize.normalize_author_name
+normalize_venue = citation_normalize.normalize_venue
+build_completed_metadata = citation_formatters.build_completed_metadata
+format_apa_reference = citation_formatters.format_apa_reference
+format_bibtex = citation_formatters.format_bibtex
+build_csl_json = citation_formatters.build_csl_json
+extract_authors = citation_parser.extract_authors
+parse_reference_metadata = citation_parser.parse_reference_metadata
+_build_fallback_title_query = citation_parser.build_fallback_title_query
+_compare_reference_to_candidate = citation_scoring.compare_reference_to_candidate
+_metadata_consistency_from_field_evidence = citation_scoring.metadata_consistency_from_field_evidence
+_candidate_has_incomplete_metadata = citation_scoring.candidate_has_incomplete_metadata
+_has_source_conflict = citation_scoring.has_source_conflict
+_LOW_PARSE_CONFIDENCE = citation_scoring.LOW_PARSE_CONFIDENCE
+_SOURCE_ERROR_STATES = citation_scoring.SOURCE_ERROR_STATES
+_normalize_crossref_work = source_normalize_crossref_work
+_normalize_openalex_work = source_normalize_openalex_work
+_normalize_semantic_scholar_paper = source_normalize_semantic_scholar_paper
+_normalize_datacite_work = source_normalize_datacite_work
+search_crossref_candidates = _search_crossref_candidates_impl
+search_openalex_candidates = _search_openalex_candidates_impl
+search_semantic_scholar_candidates = _search_semantic_scholar_candidates_impl
+search_datacite_candidates = _search_datacite_candidates_impl
+choose_best_match = citation_scoring.choose_best_match
+score_candidate = citation_scoring.score_candidate
 
 
 # Singleton

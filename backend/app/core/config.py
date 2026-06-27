@@ -6,13 +6,36 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _logger = logging.getLogger(__name__)
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 _INSECURE_JWT_DEFAULTS = {"replace-me-in-production", "changeme", "secret", ""}
 _INSECURE_ADMIN_DEFAULTS = {"ChangeMe!123", "changeme", "password", "admin", ""}
 
 
+def normalize_database_url(url: str, *, base_dir: Path | None = None) -> str:
+    normalized = (url or "").strip()
+    if not normalized:
+        return normalized
+
+    base = (base_dir or _BACKEND_ROOT).resolve()
+    for prefix in ("sqlite+pysqlite:///", "sqlite:///"):
+        if not normalized.startswith(prefix):
+            continue
+        raw_path, separator, query = normalized[len(prefix) :].partition("?")
+        if raw_path in {"", ":memory:"} or raw_path.startswith("/"):
+            return normalized
+        resolved_path = (base / raw_path).resolve()
+        suffix = f"?{query}" if separator else ""
+        return f"{prefix}{resolved_path.as_posix()}{suffix}"
+    return normalized
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=str(_BACKEND_ROOT / ".env"),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
 
     app_name: str = "AIRA Backend"
     app_env: str = "development"
@@ -33,6 +56,10 @@ class Settings(BaseSettings):
     clarivate_manual_import_dir: str = "data/imports/clarivate"
     clarivate_username: str | None = None
     clarivate_password: str | None = None
+    clarivate_api_key: str | None = None
+    clarivate_journals_api_url: str = "https://api.clarivate.com/apis/wos-journals/v1"
+    clarivate_api_editions: str = "SCIE;SSCI;AHCI;ESCI"
+    clarivate_api_jcr_year: int | None = None
     use_browser_crawler: bool = False
     browser_headless: bool = True
     academic_browser_path: str | None = None
@@ -48,6 +75,15 @@ class Settings(BaseSettings):
     ai_detect_ensemble_weight_ml: float = Field(default=0.7, ge=0.0, le=1.0)
     ai_detect_ensemble_weight_rules: float = Field(default=0.3, ge=0.0, le=1.0)
     ai_detect_use_specter2: bool = False
+    ai_detection_rule_source_max_chars: int = Field(default=4000, ge=200, le=10000)
+    ai_detection_semantic_instruction_max_chars: int = Field(default=500, ge=50, le=4000)
+    ai_detection_analyze_max_chars: int = Field(default=20000, ge=1000, le=100000)
+    ai_detection_max_active_rules: int = Field(default=25, ge=1, le=200)
+    ai_detection_max_conditions_per_rule: int = Field(default=8, ge=1, le=50)
+    ai_detection_max_phrases_per_condition: int = Field(default=20, ge=1, le=100)
+    ai_detection_regex_max_chars: int = Field(default=300, ge=20, le=2000)
+    ai_detection_max_semantic_calls_per_request: int = Field(default=8, ge=0, le=50)
+    ai_detection_max_semantic_calls_per_rule: int = Field(default=2, ge=0, le=10)
     academic_enable_startup_schema_create: bool | None = None
     academic_enable_startup_source_bootstrap: bool | None = None
     academic_enable_startup_chroma_init: bool | None = None
@@ -101,9 +137,29 @@ class Settings(BaseSettings):
 
     google_api_key: str | None = None
     groq_api_key: str | None = None
+    enable_external_academic_search: bool = True
+    crossref_enabled: bool = True
+    openalex_enabled: bool = True
+    external_search_timeout_seconds: float = Field(default=10.0, gt=0.0, le=60.0)
+    external_academic_min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    external_academic_cache_ttl_seconds: int = Field(default=3600, ge=0)
     semantic_scholar_enabled: bool = True
     semantic_scholar_api_key: str | None = None
     semantic_scholar_fallback_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
+    semantic_scholar_retry_count: int = Field(default=1, ge=0, le=5)
+    semantic_scholar_retry_backoff_ms: int = Field(default=500, ge=0, le=10_000)
+    web_search_provider: str = "disabled"
+    web_search_api_key: str | None = None
+    web_search_endpoint: str | None = None
+    tavily_api_key: str | None = None
+    tavily_search_endpoint: str = "https://api.tavily.com/search"
+    tavily_search_depth: str = Field(default="basic", min_length=1)
+    tavily_max_results: int = Field(default=5, ge=1, le=10)
+    tavily_include_answer: bool = False
+    tavily_include_raw_content: bool = False
+    tavily_timeout_seconds: float = Field(default=8.0, gt=0.0, le=60.0)
+    pubmed_enabled: bool = True
+    pubmed_api_key: str | None = None
     # Model names are provider-managed and may change.
     gemini_model: str = "gemini-flash-latest"
     groq_model: str = "llama-3.1-8b-instant"
@@ -117,10 +173,44 @@ class Settings(BaseSettings):
             object.__setattr__(self, "groq_api_key", None)
         if isinstance(self.semantic_scholar_api_key, str) and not self.semantic_scholar_api_key.strip():
             object.__setattr__(self, "semantic_scholar_api_key", None)
+        if isinstance(self.web_search_provider, str):
+            normalized_provider = self.web_search_provider.strip().lower()
+            object.__setattr__(self, "web_search_provider", normalized_provider or "disabled")
+        if isinstance(self.web_search_api_key, str) and not self.web_search_api_key.strip():
+            object.__setattr__(self, "web_search_api_key", None)
+        if isinstance(self.web_search_endpoint, str) and not self.web_search_endpoint.strip():
+            object.__setattr__(self, "web_search_endpoint", None)
+        if isinstance(self.tavily_api_key, str) and not self.tavily_api_key.strip():
+            object.__setattr__(self, "tavily_api_key", None)
+        if isinstance(self.tavily_search_endpoint, str):
+            endpoint = self.tavily_search_endpoint.strip()
+            object.__setattr__(
+                self,
+                "tavily_search_endpoint",
+                endpoint or "https://api.tavily.com/search",
+            )
+        if isinstance(self.tavily_search_depth, str):
+            depth = self.tavily_search_depth.strip().lower()
+            object.__setattr__(self, "tavily_search_depth", depth or "basic")
+        if isinstance(self.pubmed_api_key, str) and not self.pubmed_api_key.strip():
+            object.__setattr__(self, "pubmed_api_key", None)
+        if isinstance(self.clarivate_api_key, str) and not self.clarivate_api_key.strip():
+            object.__setattr__(self, "clarivate_api_key", None)
         if isinstance(self.hf_token, str) and not self.hf_token.strip():
             object.__setattr__(self, "hf_token", None)
         if isinstance(self.alembic_database_url, str) and not self.alembic_database_url.strip():
             object.__setattr__(self, "alembic_database_url", None)
+        return self
+
+    @model_validator(mode="after")
+    def _normalize_database_urls(self) -> "Settings":
+        object.__setattr__(self, "database_url", normalize_database_url(self.database_url))
+        if self.alembic_database_url:
+            object.__setattr__(
+                self,
+                "alembic_database_url",
+                normalize_database_url(self.alembic_database_url),
+            )
         return self
 
     # Hugging Face token for authenticated model downloads (optional)

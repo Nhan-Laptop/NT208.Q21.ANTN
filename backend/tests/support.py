@@ -69,6 +69,9 @@ class SyncASGIClient:
     def put(self, url: str, **kwargs):
         return self.request("PUT", url, **kwargs)
 
+    def patch(self, url: str, **kwargs):
+        return self.request("PATCH", url, **kwargs)
+
     def delete(self, url: str, **kwargs):
         return self.request("DELETE", url, **kwargs)
 
@@ -94,6 +97,17 @@ class TestEnvironment:
             "academic_enable_startup_source_bootstrap": settings.academic_enable_startup_source_bootstrap,
             "academic_enable_startup_chroma_init": settings.academic_enable_startup_chroma_init,
             "academic_embedding_hash_fallback": settings.academic_embedding_hash_fallback,
+            "enable_external_academic_search": settings.enable_external_academic_search,
+            "crossref_enabled": settings.crossref_enabled,
+            "openalex_enabled": settings.openalex_enabled,
+            "semantic_scholar_enabled": settings.semantic_scholar_enabled,
+            "semantic_scholar_retry_count": settings.semantic_scholar_retry_count,
+            "semantic_scholar_retry_backoff_ms": settings.semantic_scholar_retry_backoff_ms,
+            "pubmed_enabled": settings.pubmed_enabled,
+            "pubmed_api_key": settings.pubmed_api_key,
+            "external_search_timeout_seconds": settings.external_search_timeout_seconds,
+            "external_academic_min_confidence": settings.external_academic_min_confidence,
+            "external_academic_cache_ttl_seconds": settings.external_academic_cache_ttl_seconds,
         }
         object.__setattr__(settings, "database_url", f"sqlite:///{self.db_path}")
         object.__setattr__(settings, "chroma_db_path", str(self.chroma_path))
@@ -104,6 +118,17 @@ class TestEnvironment:
         object.__setattr__(settings, "academic_enable_startup_source_bootstrap", False)
         object.__setattr__(settings, "academic_enable_startup_chroma_init", False)
         object.__setattr__(settings, "academic_embedding_hash_fallback", True)
+        object.__setattr__(settings, "enable_external_academic_search", False)
+        object.__setattr__(settings, "crossref_enabled", False)
+        object.__setattr__(settings, "openalex_enabled", False)
+        object.__setattr__(settings, "semantic_scholar_enabled", False)
+        object.__setattr__(settings, "semantic_scholar_retry_count", 0)
+        object.__setattr__(settings, "semantic_scholar_retry_backoff_ms", 0)
+        object.__setattr__(settings, "pubmed_enabled", False)
+        object.__setattr__(settings, "pubmed_api_key", None)
+        object.__setattr__(settings, "external_search_timeout_seconds", 1.0)
+        object.__setattr__(settings, "external_academic_min_confidence", 0.75)
+        object.__setattr__(settings, "external_academic_cache_ttl_seconds", 0)
         self._user_counter = 0
         self._reset_services()
         self.engine = create_engine(settings.database_url, connect_args={"check_same_thread": False})
@@ -126,6 +151,11 @@ class TestEnvironment:
         try:
             from app.services.ingestion.index_service import academic_index_service
             academic_index_service._client = None
+        except Exception:
+            pass
+        try:
+            from app.services.external_academic_search import external_academic_search_service
+            external_academic_search_service._cache.clear()
         except Exception:
             pass
         try:
@@ -167,15 +197,12 @@ class TestEnvironment:
             return session_obj
 
     def api_client(self, *, current_user: User) -> SyncASGIClient:
-        from app.api.v1.endpoints import chat, crawl_admin, journal_match, manuscripts, tools, venues
+        from app.api.v1.endpoints import ai_detection, chat, tools
 
         app = FastAPI()
+        app.include_router(ai_detection.router, prefix="/api/v1")
         app.include_router(chat.router, prefix="/api/v1")
-        app.include_router(crawl_admin.router, prefix="/api/v1")
-        app.include_router(journal_match.router, prefix="/api/v1")
-        app.include_router(manuscripts.router, prefix="/api/v1")
         app.include_router(tools.router, prefix="/api/v1")
-        app.include_router(venues.router, prefix="/api/v1")
 
         def override_db() -> Iterator[Session]:
             db = self.SessionLocal()
