@@ -502,6 +502,6 @@ For a quick non-destructive audit workflow, see [`backend/security/pentest/READM
 
 ---
 
-## 📄 License
-
-No explicit `LICENSE` file is present in this repository as of **2026-06-29**. Treat the project as course/internal code until a formal license is added.
+<p align="center">
+  <strong>Chúng em đã biết làm web và hiểu hệ thống web hoạt động như thế nào.</strong>
+</p>
