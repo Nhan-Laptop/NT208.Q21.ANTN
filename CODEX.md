@@ -1,32 +1,33 @@
 # AIRA Master Architecture Codex
 
-> Absolute Source of Truth for AI agents and engineers working on AIRA (Academic Integrity & Research Assistant).
+> Absolute source of truth for engineers and coding agents working on AIRA (Academic Integrity & Research Assistant).
 >
-> Last updated: 2026-04-03
+> Last updated: 2026-06-29
 
 ## Core Directives for Future Agents
 
-> Directive 1: Zero hallucination is mandatory. Never fabricate DOI, citation, retraction status, journal metadata, or crawler outputs.
+> Directive 1: Zero hallucination is mandatory. Never fabricate DOI, citation, retraction status, venue metadata, crawl records, or AI-detection evidence.
 >
-> Directive 2: Preserve offline safety behavior in the crawler and toolchain. If scraping fails, do not synthesize fake records.
+> Directive 2: Preserve contract truth over requested behavior. If code and docs diverge, update docs to match code and call out the divergence explicitly.
 >
-> Directive 3: Respect API contracts exactly, especially the LLM handoff schema represented by FunctionCallingResponse (text, tool_calls, message_type, tool_results).
+> Directive 3: Preserve structured payload compatibility. Frontend depends on `message_type` and `tool_results`, not on best-effort prose.
 >
-> Directive 4: Document and preserve real behavior over requested behavior. If code and docs diverge, docs must reflect code and explicitly note the divergence.
+> Directive 4: Deterministic academic actions must stay deterministic. Explicit citation/retraction/grammar/AI-detection flows should not become ambiguous LLM-only behaviors.
+>
+> Directive 5: Do not weaken security defaults, ownership checks, or encryption boundaries for convenience.
 
 ---
 
 ## 1) System Overview
 
-AIRA is a full-stack academic integrity and research assistant platform.
+AIRA is a modular monolith for academic assistance.
 
-- Backend: FastAPI service providing auth, chat, tool execution, file workflows, and admin endpoints.
-- Frontend: Next.js 15 application for chat, session management, file upload, and admin monitoring.
-- LLM orchestration: Groq chat-completions with OpenAI-compatible function calling.
-- Academic tools: Citation verification, retraction scanning, journal matching, AI-writing detection, grammar checking.
-- Data engineering pipeline: Config-driven crawler + embedding + ChromaDB persistent vector store.
+- Frontend: Next.js 15 app with authenticated chat, verification mode, AI-rule management UI, and admin dashboard.
+- Backend: FastAPI service exposing auth, sessions, chat, tool execution, AI-detection rule management, upload, manuscripts, journal match, venues, crawl-admin, and admin APIs.
+- Data layer: SQLAlchemy models for chat, files, venue corpus, crawl state, manuscript assessment, and AI-detection rules.
+- Academic engine: citation verification, retraction scanning, journal matching, AI-writing detection, grammar checking, and academic venue indexing.
 
-Primary objective: deliver grounded, verifiable academic assistance with strict anti-hallucination constraints.
+Primary objective: provide grounded academic workflows with explainable evidence and minimal hallucination surface.
 
 ---
 
@@ -36,306 +37,254 @@ Primary objective: deliver grounded, verifiable academic assistance with strict 
 
 | Layer | Technology | Role |
 |---|---|---|
-| Backend API | FastAPI, Uvicorn | HTTP API, routing, dependency injection, app lifecycle |
-| Data layer | SQLAlchemy | ORM for users, sessions, messages, file metadata |
+| Frontend | Next.js 15, React 18, TypeScript | App Router UI and client state |
+| Backend API | FastAPI, Uvicorn | Routing, dependencies, lifecycle |
+| Data layer | SQLAlchemy, Alembic | ORM and migrations |
 | Settings | pydantic-settings | Environment-driven runtime configuration |
-| Frontend | Next.js 15, React 18, TypeScript | Client UI and chat UX |
 
 ### 2.2 LLM and Reasoning Plane
 
-| Component | Implementation | Role |
+| Component | Current implementation | Role |
 |---|---|---|
-| LLM Provider | Groq SDK | Central reasoning and tool-routing engine |
-| Active model | llama-3.1-8b-instant | Low-latency generation with tool calling |
-| Call API | chat.completions.create | OpenAI-compatible function-calling loop |
-| Reliability | tenacity retries + heuristic fallback | Recovers from transient provider failures |
+| LLM provider | Groq SDK | Tool-calling chat runtime |
+| Active model | `llama-3.1-8b-instant` | Default low-latency model |
+| Reliability | tenacity + heuristic fallback | Recover from transient provider issues |
+| Title generation | `generate_simple()` | Auto-title short session names |
 
 Notes:
-- Groq replaced Gemini as active runtime LLM service.
-- Backward-compat aliases still exist in code (for example gemini_service variable names), but execution path is Groq.
 
-### 2.3 Retrieval and Data Pipeline Stack
+- Historical Gemini naming remains in some identifiers (`gemini_service`) but active execution path is Groq.
+- The frontend never calls Groq directly; all reasoning stays behind backend routes.
+
+### 2.3 Retrieval and Academic Data Plane
 
 | Component | Implementation | Role |
 |---|---|---|
-| Vector DB | ChromaDB PersistentClient | Stores CFP vectors in local persistent collection |
-| Collection | journal_cfps | Semantic retrieval target for journal matching |
-| Embeddings | sentence-transformers allenai/specter2_base | Encodes crawler records and user query text with 768-dimensional academic-literature embeddings |
-| Scraping transport | DrissionPage (CDP-based Chromium automation) | Renders dynamic publisher pages and survives modern WAF / anti-bot challenges |
-| HTML parsing | DrissionPage DOM queries | Extracts live CSS-selected CFP metadata such as deadlines, scopes, and deep links |
-
-Scope note:
-- `allenai/specter2_base` is the active embedding model for ChromaDB ingestion/retrieval (`journal_cfps`).
-- `all-MiniLM-L6-v2` is still used only by `heuristic_router.py` for fallback intent classification when Groq calls fail.
+| Vector/index store | ChromaDB | Persistent academic match/index storage |
+| Embeddings | SPECTER2 | Academic retrieval embeddings |
+| Crawl runtime | DrissionPage + source registry | Live academic source extraction |
+| Venue enrichment | Clarivate/manual import + local SQL models | Venue metadata normalization |
 
 ### 2.4 Academic APIs and Tool Dependencies
 
 | Domain | Libraries / APIs | Purpose |
 |---|---|---|
-| Citation integrity | PyAlex, Habanero, httpx | Verify references against OpenAlex/Crossref |
-| Retraction checks | OpenAlex, Crossref, PubPeer endpoint handling | Retraction/correction/concerning-paper analysis |
-| AI detection | transformers + torch | RoBERTa-based AI-writing scoring |
-| Grammar | language_tool_python | Grammar/spelling diagnostics |
-
-### 2.5 Security and Platform Dependencies
-
-| Concern | Implementation |
-|---|---|
-| Authentication | JWT (HS256) via python-jose |
-| Password hashing | bcrypt |
-| Encryption | PyCryptodome AES-GCM stack used by crypto layer |
-| Middleware | Security headers + rate limiting middleware |
+| Citation integrity | Crossref, OpenAlex, DataCite, Semantic Scholar, optional Tavily | Verify references and enrich metadata |
+| Retraction checks | Crossref, OpenAlex, PubPeer | Risk/retraction/community-signal scan |
+| AI detection | transformers + torch + custom rule engine | AI-writing likelihood scoring |
+| Grammar | LanguageTool | Grammar/spelling diagnostics |
+| Storage | local filesystem / boto3 S3 | File persistence |
 
 ---
 
 ## 3) Repository Macro Modules
 
-### 3.1 Backend API Module
+### 3.1 Frontend App Module
 
-Path: backend/app/api
-
-Responsibilities:
-- Hosts v1 router composition and endpoint modules.
-- Exposes REST endpoints for auth, sessions, chat, tools, upload, and admin.
-- Chat handlers are HTTP endpoints (no WebSocket handlers currently implemented in this module).
-
-Route composition:
-- backend/app/api/v1/router.py includes: auth, admin, sessions, chat, tools, upload.
-
-Representative endpoint surface:
-- /auth: register, login, me, admin/promote.
-- /chat: completions, session-targeted completion, encrypted completion.
-- /sessions: CRUD + message listing.
-- /tools: verify-citation, journal-match, retraction-scan, summarize-pdf, detect-ai-writing, check-grammar.
-- /upload: upload, list, stats, download/delete, presigned URLs.
-- /admin: overview, user role management, file/storage management.
-
-### 3.2 Core Platform Module
-
-Path: backend/app/core
+Path: `frontend/`
 
 Responsibilities:
-- settings and environment normalization.
-- database session/engine wiring.
-- cryptography and encrypted payload support.
-- security primitives (password/JWT/current-user dependency).
-- RBAC + ABAC authorization gateway.
-- security headers and rate-limiter middleware.
-- audit logging and limiter state management.
 
-Key behavior highlights:
-- Startup security validators reject insecure defaults outside development.
-- JWT payload includes sub, exp, iat, and jti claims.
-- Security and rate-limit middleware are globally attached in app startup.
+- route users through landing, login, chat, and admin UIs;
+- persist auth state and chat state;
+- render structured tool results via specialized cards;
+- proxy same-origin `/api/v1/*` calls to the backend through Next.js rewrites.
 
-### 3.3 Service Layer Module
+Notable areas:
 
-Path: backend/app/services
+- `components/chat-view.tsx`
+- `components/tool-results.tsx`
+- `components/citation-report.tsx`
+- `components/topbar.tsx`
+- `components/ai-detect-rule-manager.tsx`
+- `lib/api.ts`
+- `lib/chat-store.tsx`
+
+### 3.2 Backend API Module
+
+Path: `backend/app/api/v1/`
+
+Current router composition:
+
+- `auth`
+- `admin`
+- `sessions`
+- `chat`
+- `tools`
+- `ai_detection`
+- `upload`
+- `manuscripts`
+- `journal_match`
+- `venues`
+- `crawl_admin`
+
+Representative route surface:
+
+- `/auth/*`
+- `/sessions/*`
+- `/chat/*`
+- `/tools/*`
+- `/ai-detection/*`
+- `/upload/*`
+- `/manuscripts/*`
+- `/journal-match/*`
+- `/venues/*`
+- `/crawl/*`, `/crawl-admin/*`
+- `/admin/*`
+
+### 3.3 Core Platform Module
+
+Path: `backend/app/core`
 
 Responsibilities:
-- Business orchestration for sessions/messages/files.
-- LLM orchestration and function-calling state machine.
-- Bootstrap/admin creation on startup.
-- Heuristic fallback routing when provider calls fail.
-- Storage strategy abstraction.
 
-Notable services:
-- llm_service.py: Groq orchestration, strict function-calling loop, and lightweight auto-title generation for new chats.
-- chat_service.py: mode routing, file-context injection, persistence of user/assistant messages.
-- file_service.py and storage_service.py: file metadata and storage interactions.
-- heuristic_router.py: semantic intent fallback when Groq is unavailable.
+- settings and runtime safety validation;
+- JWT and password security helpers;
+- RBAC + ABAC authorization gateway;
+- AES-GCM crypto and encrypted SQLAlchemy types;
+- middleware for security headers and rate limiting;
+- DB engine/session creation;
+- audit logging.
 
-### 3.4 Academic Tools Module
+### 3.4 Orchestration and Domain Services
 
-Path: backend/app/services/tools
+Path: `backend/app/services`
 
 Responsibilities:
-- Implements domain tools callable by LLM or direct tool endpoints.
-- Exposes singleton instances for runtime use.
 
-Tool set:
-- citation_checker: reference extraction + verification pipeline.
-- retraction_scan: DOI risk/retraction/concerning-paper checks; no-DOI input is reported as `total_checked=0` + `no_doi_found=true` (never as fake checked DOI).
-- journal_finder: ChromaDB semantic match for journal CFP recommendations using Specter2 embeddings and bounded similarity scoring.
-- ai_writing_detector: ML + rule-based AI text likelihood (probabilistic estimate, not definitive proof).
-- grammar_checker: LanguageTool diagnostics with conservative auto-correction (unsafe/domain-sensitive replacements are skipped).
+- chat/session orchestration (`chat_service.py`);
+- function-calling, pass-by-reference routing, and fallback (`llm_service.py`);
+- upload/storage flows (`file_service.py`, `storage_service.py`);
+- AI detection and rule compilation (`ai_detection_service.py`, `ai_detection_rule_service.py`);
+- journal match domain (`journal_match/*`);
+- ingestion/index services (`ingestion/*`, `embeddings/*`);
+- external academic lookup helpers.
 
-### 3.5 Data Engineering Pipeline Module
+### 3.5 Academic Tools Module
 
-Path: backend/crawler
+Path: `backend/app/services/tools`
+
+Tool surface:
+
+- `citation_batch_service.py`
+- `citation_checker.py`
+- `citation/*`
+- `retraction_scan.py`
+- `ai_writing_detector.py`
+- `grammar_checker.py`
+
+Behavioral note:
+
+- Citation verification now has a dedicated batch/report layer above the core verifier.
+- Journal matching is no longer isolated to a single legacy tool file; it lives across `services/journal_match/*` and dedicated APIs.
+
+### 3.6 Data Engineering / Crawl Module
+
+Path: `backend/crawler`
 
 Responsibilities:
-- Crawl live CFP sources from configured publishers.
-- Normalize records into deterministic format.
-- Embed title/scope text with a 768-dimensional academic retrieval model.
-- Rebuild and upsert ChromaDB collection used by Journal Finder.
 
-Pipeline files:
-- sources.json: source URLs and CSS selectors.
-- universal_scraper.py: DrissionPage extraction executor for live CFP pages.
-- db_builder.py: embedding + ChromaDB load.
-- run.py: orchestration entrypoint.
+- manage crawl source registry and connectors;
+- collect raw academic source snapshots;
+- normalize and dedupe data;
+- rebuild academic index inputs and reindex flows;
+- expose scheduler-backed admin operations.
 
 ---
 
 ## 4) Deep-Dive Mechanics
 
-### 4.1 LLM Function Calling Loop (backend/app/services/llm_service.py)
+### 4.1 LLM Function Calling Loop (`backend/app/services/llm_service.py`)
 
-Operational sequence:
+Current verified mechanics:
 
-1. Build message array:
-- Add system prompt.
-- Append sanitized conversation history (history user turns never create new `document_id`, and historical document markers are stripped from router scope).
-- Replace attached/oversized raw document text with metadata-only references (`document_id`, text length) before sending the prompt to Groq.
-- Append current user message.
+1. Build system prompt + recent history + prepared user text.
+2. Limit history to the last 4 messages and 2000 chars/message.
+3. Truncate active router input to 10000 chars.
+4. Convert long text or attached content into backend-side `document_id` references once input crosses 1500 chars or clearly represents a document.
+5. Call Groq with dynamic tool list.
+6. Resolve tool calls locally.
+7. Early-exit terminal tools with structured payloads.
+8. Stop after `_MAX_FC_ITERATIONS = 5`.
 
-2. Invoke Groq chat completions:
-- model = settings.groq_model
-- tools = _GROQ_TOOLS
-- tool_choice = auto
+Important invariants:
 
-2.5 Deterministic explicit-action shortcut:
-- Nếu user request thể hiện rõ intent `verify_citation` hoặc `scan_retraction_and_pubpeer`, backend thực thi tool trực tiếp (server-side) thay vì yêu cầu Groq chọn tool.
-- Nếu user explicit yêu cầu cả citation + retraction (ví dụ: "kiểm tra cả hai"), backend thực thi tuần tự cả hai tool theo deterministic path và trả grouped payload cho UI.
-- Shortcut này vẫn giữ pass-by-reference: khi có `document_id`, backend resolve nội dung cục bộ trước khi chạy tool.
+- `detect_ai_writing` and `check_grammar` are document-only at the Groq-facing schema layer.
+- `verify_citation`, `scan_retraction_and_pubpeer`, `match_journal` may use `document_id`.
+- Out-of-scope `document_id` values must be rejected.
+- Pseudo-tool text fragments must not leak into persisted assistant content as if they were valid tool calls.
 
-3. If tool_calls are present:
-- Parse each requested function name and JSON arguments.
-- If a tool call contains `document_id`, resolve it back to the cached full text inside the backend execution layer.
-- Dispatch to local Python callable via `_TOOL_FUNCTIONS` registry.
-- Capture tool output.
-- For non-terminal tools, append a compact model-facing summary back into conversation.
-- For terminal tools (`detect_ai_writing`, `check_grammar`), exit loop immediately with backend-generated assistant summary + full structured payload.
-- Continue iterative loop.
+### 4.2 Chat Orchestration (`backend/app/services/chat_service.py`)
 
-4. If no tool_calls:
-- Final synthesized assistant text is returned.
-- If pseudo tool syntax appears without native `tool_calls`, treat as invalid action path and attempt heuristic fallback.
-- Malformed pseudo fragments (orphan tags, broken tool stubs, raw `{"document_id": ...}` remnants) are sanitized and must not persist into chat history/UI text.
-- If tool calls happened earlier and only one tool is present, map tool to message_type and build single structured tool_results payload.
-- If multiple tool families are executed intentionally (for example citation + retraction), build grouped payload (`tool_results.type = "multi_tool_report"`, `groups[]`) so UI renders separate cards without semantic mixing.
-- If synthesized text is low-signal/generic, backend can replace it with deterministic tool-state messaging (for example: no DOI detected, lookup failure, clean vs problematic findings).
+Verified current behavior:
 
-5. Loop safety:
-- Max iterations capped by _MAX_FC_ITERATIONS = 5.
+- Session titles default by mode, with `Trò chuyện mới` for `auto` and `general_qa`.
+- Chat history is loaded before saving the current message to avoid duplicate-context bugs.
+- Response payload includes updated serialized session so frontend can sync title/mode immediately.
+- Auto mode can resolve into:
+  - general academic QA,
+  - citation verification,
+  - retraction scan,
+  - journal match,
+  - grammar,
+  - AI detection,
+  - DOI metadata / academic lookup follow-up flows.
 
-6. Fallback path on provider failure:
-- _call_chat_completions is retried with tenacity.
-- After retry failure, `_try_heuristic_fallback` attempts semantic intent routing + direct local tool execution.
-- Fallback path honors the request-scoped exposed-tool contract via `allowed_tool_names`.
-- If heuristic routing cannot classify intent, return static overload/failure message.
+### 4.3 Citation Verification
 
-### 4.1.1 Context Management and Token-Limit Protections
+Verified architecture:
 
-Router protections in `llm_service.py`:
+- `citation_batch_service.verify_text()` is the report/batch entrypoint.
+- `citation_checker.py` handles exact identifier and metadata match logic.
+- `citation/*` submodules split parser, normalization, scoring, models, formatters, and source adapters.
 
-- Sliding window: only the last 4 user/assistant history messages are sent to Groq.
-- History truncation: each retained history message is capped at 2,000 characters and suffixed with `...[truncated]` when clipped.
-- Current-input truncation: the active user payload is capped at 10,000 characters and tagged with a visible truncation notice.
+Critical constraints:
 
-Architectural purpose:
+- Exact DOI / identifier lookup must remain exact.
+- No-DOI metadata matching can be strong, likely, possible, ambiguous, or unverified; it must not silently “upgrade” unsupported matches.
+- Export metadata is only allowed when evidence supports it.
+- Web fallback is bounded to citation verification; it is not general browsing.
 
-- Groq is treated primarily as a router/tool-caller, not as a long-context document processor.
-- These limits protect the OpenAI-compatible Groq request body from 413 payload/rate-limit failures and 400 tool-use failures caused by oversized JSON arguments.
-- The system preserves enough recent context for intent routing while preventing massive pasted text from destabilizing tool calling.
+### 4.4 Journal Match Domain
 
-### 4.1.2 Auto-Title Generation
+Verified architecture:
 
-New-session UX behavior:
+- Dedicated APIs: `/manuscripts/*`, `/journal-match/*`, `/venues/search`.
+- Service decomposition: parser, retriever, reranker, filters, explainer, topic profile.
+- Legacy `/tools/journal-match` still exists for chat compatibility.
 
-- When the first user message is sent in a session whose title is still the default placeholder, the backend issues a secondary lightweight `generate_simple()` call to produce a concise Vietnamese title.
-- The title-generator prompt is constrained to return only a 4-5 word session summary with no explanation text.
-- The generated title is committed back to the `chat_sessions.title` field before the chat response is returned.
-- Chat completion responses now include the updated serialized session object so the frontend sidebar can sync the renamed session immediately without relying on raw first-message text.
+Critical constraints:
 
-### 4.1.3 Pass-by-Reference Document Routing
+- Do not collapse the dedicated domain back into a simplistic single-file matcher.
+- Preserve separation between manuscript parsing, retrieval, reranking, and presentation payload shaping.
 
-Enterprise routing mechanism:
+### 4.5 AI Detection and Grammar
 
-- Raw attached documents and oversized pasted text are cached in-memory on the backend and assigned a stable `document_id`.
-- Document cache lifecycle is bounded (TTL + max entries) to avoid unbounded memory growth.
-- Groq receives only metadata such as `document_id` and character length, never the full cached document body.
-- If user intent text is not clearly separable from the long body, router query is inferred from intent hints (safe generic text), not copied raw from the document body.
-- Long-text intent inference giữ riêng citation vs retraction (không collapse về generic query) để giảm sai lệch tool selection.
-- Tool schemas expose `document_id` so the model can route intent using a reference instead of embedding large raw text into JSON arguments.
-- For `detect_ai_writing` and `check_grammar`, the Groq-facing schema is `document_id`-only; those tools must not receive raw `text` arguments from the LLM layer.
-- Groq-facing hybrid tools remain dual-mode: `scan_retraction_and_pubpeer(document_id|text)`, `verify_citation(document_id|text)`, and `match_journal(document_id|abstract[, title])`; prefer `document_id` whenever it exists in request scope.
-- If a request does not expose any valid `document_id`, Groq is not shown the `detect_ai_writing` or `check_grammar` tool schemas at all.
-- `_execute_tool_call()` resolves `document_id` back to full text immediately before the local Python/ML tool runs, then strips the reference key from the callable arguments.
-- `document_id` scope is current-turn-only (safe-first); history references are intentionally not carried forward.
-- Heuristic fallback can also reconstruct the cached document from `document_id`, so provider outages do not require the LLM to carry raw file text.
-- Heuristic fallback is prevented from invoking hidden tools not exposed in the current request.
+Verified architecture:
 
-Architecture intent:
+- Phrase-rule preferences live on `/auth/me/ai-detection-rules`.
+- Structured natural-language rule compilation and persistence live on `/ai-detection/rules*`.
+- Direct analyze endpoint: `/ai-detection/analyze`.
+- Grammar checking remains local-tool backed via LanguageTool.
 
-- This is a pass-by-reference design: Document Cache -> Groq receives only ID/metadata -> Groq returns tool call with ID -> Backend resolves ID to text -> ML tool executes.
-- The goal is to permanently reduce Groq 413 payload/rate-limit failures and 400 malformed tool-call JSON failures caused by sending large raw document payloads through the OpenAI-compatible function-calling interface.
+Critical constraints:
 
-Strict response contract:
+- AI-detection output is probabilistic evidence, not definitive proof.
+- Rule compilation errors and permission boundaries must stay explicit.
+- Grammar auto-correction must remain conservative.
 
-```python
-@dataclass
-class FunctionCallingResponse:
-    text: str
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    message_type: str = "text"
-    tool_results: dict[str, Any] | None = None
-```
+### 4.6 Crawl / Index Runtime
 
-### 4.2 Data Pipeline and Degradation Behavior (backend/crawler)
+Verified architecture:
 
-Execution flow:
+- Crawl jobs and reindex jobs are triggered via `/crawl/*` and `/crawl-admin/*`.
+- Startup may bootstrap default sources and initialize collections depending on config.
+- Academic ingest/index flows live across `crawler/*` and `services/ingestion/*`.
 
-1. run.py initializes UniversalScraper.
-2. UniversalScraper loads sources.json.
-3. For each publisher source:
-- Open the live page with DrissionPage Chromium automation.
-- Wait for dynamic content and anti-bot JavaScript challenges to settle.
-- Extract title, deadline, scope, link, and publisher metadata from the rendered DOM using configured CSS selectors.
+Critical constraints:
 
-4. Aggregate all scraped records.
-5. Always call seed_database(records):
-- Delete existing journal_cfps collection (stale data purge).
-- Recreate/get collection with cosine metric.
-- Encode title + scope using allenai/specter2_base (768 dimensions).
-- Upsert in batches.
-
-Architecture note:
-- The vector database now uses 768-dimensional embeddings tailored for academic literature via allenai/specter2_base, replacing the previous 384-dimensional all-MiniLM-L6-v2 general-purpose vectors.
-
-Code-truth on fallback policy:
-- Zero-hallucination behavior exists.
-- If a source fails to load, is blocked by anti-bot defenses, or returns no parseable data, that source is skipped.
-- If all sources fail, pipeline logs empty result and ChromaDB can be left empty.
-- There is currently no seed_data.json fallback in backend/crawler.
-
-Implication for future agents:
-- Do not document or implement fake-data fallback.
-- If introducing static fallback later, it must be real curated data and explicitly versioned.
-
-### 4.3 Semantic Journal Matching (backend/app/services/tools/journal_finder.py)
-
-Runtime mechanics:
-
-1. Startup wiring:
-- Connect to persistent ChromaDB directory at backend/data/chroma_db.
-- Open collection journal_cfps if available.
-- Load the fixed SentenceTransformer model allenai/specter2_base so query embeddings match the ingestion pipeline exactly.
-
-2. Query flow on recommend(abstract, title, top_k):
-- Build query text from title + abstract.
-- Detect candidate topical domains from keyword heuristics.
-- Query ChromaDB using allenai/specter2_base embeddings only.
-
-3. Ranking logic:
-- Normalize `None` metadata to `{}` before field access.
-- Convert returned ChromaDB distance with `1.0 - dist`, clamp similarity into `[0.0, 1.0]`, apply domain-overlap bonus, then clamp again for a robust final score.
-- Build response rows with journal title, score, rationale, URL, publisher, domains, deadline.
-- Sort by score descending and return top_k.
-
-Behavior under missing data:
-- If collection is missing or empty, returns empty list rather than raising runtime failure.
+- No fabricated venue/crawl records on source failure.
+- Degraded embedding/runtime states must log warnings clearly.
 
 ---
 
@@ -343,22 +292,39 @@ Behavior under missing data:
 
 ### 5.1 Chat Contract
 
-- chat completion endpoints return session_id + serialized session + serialized user_message + assistant_message.
-- assistant tool responses are encoded through message_type and tool_results payload.
+- Chat responses return `session_id`, `session`, `user_message`, and `assistant_message`.
+- `assistant_message` semantics are driven by `message_type` + `tool_results`, not plain text alone.
 
-### 5.2 Tool Invocation Contract
+### 5.2 Tool Result Contract
 
-- Tool endpoints persist interaction into chat history through chat_service.persist_tool_interaction.
-- Output shape must remain compatible with frontend tool result cards.
+- Frontend cards depend on stable payload families such as:
+  - `citation_report`
+  - `journal_list`
+  - `retraction_report`
+  - `ai_writing_detection`
+  - `grammar_report`
+  - `file_upload`
+  - `pdf_summary`
+  - `multi_tool_report`
+- Do not replace structured payloads with only untyped narrative text.
 
-### 5.3 Auth/Security Contract
+### 5.3 Auth / Authorization Contract
 
-- JWT claims include sub, exp, iat, jti.
-- Access control combines permission gates (RBAC) and ownership checks (ABAC).
-- Middleware always enforces security headers and rate limiting unless explicitly disabled by settings.
+- Access control combines permission checks and ownership assertions.
+- Admin-only APIs must stay behind `Permission.ADMIN_MANAGE`.
+- Session, message, and file access must remain ownership-checked.
 
-Operational note:
-- auth/login currently builds access token with explicit 24h timedelta in endpoint code, while settings default is 60 minutes. Treat as current behavior, and align deliberately in future changes.
+### 5.4 Storage / Crypto Contract
+
+- Encrypted DB fields must stay encrypted by default.
+- File download must always happen after access validation.
+- Local and S3 storage backends must preserve the same security semantics from the caller’s perspective.
+
+### 5.5 Frontend Transport Contract
+
+- Frontend API calls are same-origin.
+- `next.config.mjs` rewrites `/api/v1/*` and `/health`.
+- Do not reintroduce frontend assumptions that the browser will call a separate backend origin directly unless the transport model is intentionally redesigned.
 
 ---
 
@@ -366,16 +332,20 @@ Operational note:
 
 | Domain | Primary Files |
 |---|---|
-| App bootstrap | backend/app/main.py |
-| API router | backend/app/api/v1/router.py |
-| Auth/session/chat endpoints | backend/app/api/v1/endpoints/*.py |
-| Settings/security | backend/app/core/config.py, backend/app/core/security.py, backend/app/core/authorization.py |
-| Middleware/rate limiting | backend/app/core/middleware.py, backend/app/core/rate_limit.py |
-| LLM orchestration | backend/app/services/llm_service.py |
-| Chat orchestration | backend/app/services/chat_service.py |
-| Academic tools | backend/app/services/tools/*.py |
-| Crawler and vector ingestion | backend/crawler/*.py, backend/crawler/sources.json |
-| Embedding store | backend/data/chroma_db |
+| Frontend shell | `frontend/app/*`, `frontend/components/*`, `frontend/lib/*` |
+| App bootstrap | `backend/app/main.py` |
+| API router | `backend/app/api/v1/router.py` |
+| Endpoint surface | `backend/app/api/v1/endpoints/*.py` |
+| Core security/config | `backend/app/core/*.py` |
+| Chat orchestration | `backend/app/services/chat_service.py` |
+| LLM orchestration | `backend/app/services/llm_service.py` |
+| AI detection | `backend/app/services/ai_detection_service.py`, `backend/app/services/ai_detection_rule_service.py` |
+| Citation tools | `backend/app/services/tools/citation_batch_service.py`, `backend/app/services/tools/citation_checker.py`, `backend/app/services/tools/citation/*` |
+| Journal match | `backend/app/services/journal_match/*` |
+| Ingestion/index | `backend/app/services/ingestion/*`, `backend/app/services/embeddings/*` |
+| Crawl pipeline | `backend/crawler/*` |
+| Migrations | `backend/alembic/*` |
+| Security audit | `backend/security/pentest/*` |
 
 ---
 
@@ -383,8 +353,9 @@ Operational note:
 
 Before changing architecture-sensitive code:
 
-- Confirm behavior in code, not in legacy docs.
-- Preserve zero-hallucination constraints.
-- Preserve function-calling data contracts.
-- Validate fallback behavior under provider outage and crawler scrape failure.
-- Keep tool payload formats backward compatible with frontend renderers.
+- Confirm behavior in code, not in legacy docs or issue descriptions.
+- Preserve zero-hallucination constraints for academic outputs.
+- Preserve `message_type` / `tool_results` contracts consumed by frontend renderers.
+- Keep deterministic academic actions deterministic when intent is explicit.
+- Validate permission and ownership boundaries on any new route or file flow.
+- Update docs immediately when route composition, payload shape, or runtime behavior changes.
