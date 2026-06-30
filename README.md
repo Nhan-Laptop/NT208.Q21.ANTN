@@ -504,7 +504,7 @@ For a quick non-destructive audit workflow, see [`backend/security/pentest/READM
 
 ## 🎥 Demo Video
 
-[![Watch the video](https://img.youtube.com/vi/VIDEO_ID/0.jpg)](https://github.com/Nhan-Laptop/NT208.Q21.ANTN/docs/video_demo.mp4)
+[▶ Xem video demo](./docs/video_demo.mp4)
 
 ---
 
