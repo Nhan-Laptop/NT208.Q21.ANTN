@@ -504,9 +504,7 @@ For a quick non-destructive audit workflow, see [`backend/security/pentest/READM
 
 ## 🎥 Demo Video
 
-<video src="./docs/video_demo.mp4" controls width="100%">
-  Your browser does not support the video tag.
-</video>
+[▶ Xem video demo](./docs/video_demo.mp4)
 
 ---
 
