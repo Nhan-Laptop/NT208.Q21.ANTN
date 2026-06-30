@@ -502,6 +502,10 @@ For a quick non-destructive audit workflow, see [`backend/security/pentest/READM
 
 ---
 
-<p align="center">
-  <strong>Chúng em đã biết làm web và hiểu hệ thống web hoạt động như thế nào.</strong>
-</p>
+## 🎥 Demo Video
+
+[![Watch the video](https://img.youtube.com/vi/VIDEO_ID/0.jpg)](https://github.com/Nhan-Laptop/NT208.Q21.ANTN/docs/video_demo.mp4)
+
+---
+
+### Chúng em đã biết làm web và hiểu hệ thống web hoạt động như thế nào.
