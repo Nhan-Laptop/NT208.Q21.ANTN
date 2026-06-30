@@ -502,6 +502,12 @@ For a quick non-destructive audit workflow, see [`backend/security/pentest/READM
 
 ---
 
-<p align="center">
-  <strong>Chúng em đã biết làm web và hiểu hệ thống web hoạt động như thế nào.</strong>
-</p>
+## 🎥 Demo Video
+
+<video src="./docs/video_demo.mp4" controls width="100%">
+  Your browser does not support the video tag.
+</video>
+
+---
+
+### Chúng em đã biết làm web và hiểu hệ thống web hoạt động như thế nào.
